@@ -152,6 +152,11 @@ mod tests {
         let paths = resolve(base.to_str().unwrap(), "$HOME", " final ").unwrap();
         assert_eq!(paths.base_path, base);
         assert_eq!(paths.transcription_directory, base.join("$HOME"));
+        // Normal Win32 paths remove a trailing space during absolute-path
+        // resolution. The leading space is meaningful on every supported OS.
+        #[cfg(windows)]
+        assert_eq!(paths.recording_directory, base.join(" final"));
+        #[cfg(not(windows))]
         assert_eq!(paths.recording_directory, base.join(" final "));
     }
 

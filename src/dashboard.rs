@@ -1291,8 +1291,8 @@ mod tests {
         .unwrap();
         assert_eq!(paths["base_path"], json!(base));
         assert_eq!(
-            paths["transcription_directory"],
-            json!(base.join("texto/original"))
+            std::path::Path::new(paths["transcription_directory"].as_str().unwrap()),
+            base.join("texto").join("original")
         );
         assert_eq!(paths["recording_directory"], json!(outside));
         assert!(paths.get("working_directory").is_none());

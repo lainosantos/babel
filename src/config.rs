@@ -703,6 +703,19 @@ fn canonical_device(id: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn configured_routes() -> AppConfig {
+        // Device discovery is deliberately not involved in configuration tests.
+        // Native platforms start without selected virtual endpoints, so fixtures
+        // must specify both complete routes instead of inheriting Linux defaults.
+        let mut cfg = AppConfig::default();
+        cfg.microphone.capture_device = "physical-mic".into();
+        cfg.microphone.playback_device = "babel_mic_bus".into();
+        cfg.speaker.capture_device = "babel_speaker.monitor".into();
+        cfg.speaker.playback_device = "physical-speakers".into();
+        cfg
+    }
+
     #[test]
     fn new_defaults_use_an_absolute_home_subdirectory_and_roundtrip_verbatim() {
         let mut cfg = AppConfig::default();
@@ -816,8 +829,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn migration_preserves_symlink_parent_semantics_and_rejects_non_utf8_parent() {
-        use std::os::unix::ffi::OsStringExt;
+    fn migration_preserves_symlink_parent_semantics() {
         let directory = tempfile::tempdir().unwrap();
         fs::create_dir_all(directory.path().join("real/nested")).unwrap();
         std::os::unix::fs::symlink("real/nested", directory.path().join("alias")).unwrap();
@@ -829,6 +841,16 @@ mod tests {
             directory.path().join("alias/../archive")
         );
         assert!(!directory.path().join("real/archive").exists());
+    }
+
+    // Linux permits these filenames; macOS APFS rejects mkdir with EILSEQ before
+    // a configuration file could exist. Pure non-UTF-8 path validation is also
+    // covered on every Unix platform by storage's non_utf8_home test.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn migration_rejects_non_utf8_parent_without_rewriting_the_file() {
+        use std::os::unix::ffi::OsStringExt;
+        let directory = tempfile::tempdir().unwrap();
         let invalid_directory = directory
             .path()
             .join(std::ffi::OsString::from_vec(vec![0xff]));
@@ -927,19 +949,23 @@ mod tests {
             canonical_device("input:0:CABLE-A Output (VB-Audio)"),
             canonical_device("output:3:CABLE-A Input (VB-Audio)")
         );
-        let mut cfg = AppConfig::default();
+        let mut cfg = configured_routes();
         cfg.microphone.enabled = false;
         cfg.speaker.provider = "loopback".into();
+        cfg.validate_for_start().unwrap();
         cfg.speaker.playback_device = "babel_speaker".into();
-        assert!(cfg.validate_for_start().is_err());
+        assert!(
+            cfg.validate_for_start()
+                .unwrap_err()
+                .to_string()
+                .contains("retorna ao próprio dispositivo")
+        );
     }
     #[test]
     fn recording_only_needs_no_cloud_or_voice_credentials() {
-        let mut cfg = AppConfig::default();
+        let mut cfg = configured_routes();
         cfg.microphone.enabled = false;
         cfg.speaker.enabled = false;
-        cfg.microphone.capture_device = "physical-mic".into();
-        cfg.speaker.playback_device = "physical-speakers".into();
         cfg.recording.enabled = true;
         cfg.microphone.voice.engine = "elevenlabs".into();
         cfg.providers.gemini.api_key_env = "BABEL_TEST_UNUSED_ASR_KEY".into();
@@ -952,10 +978,9 @@ mod tests {
     }
     #[test]
     fn transcription_without_translation_uses_only_selected_originals() {
-        let mut cfg = AppConfig::default();
+        let mut cfg = configured_routes();
         cfg.microphone.enabled = false;
         cfg.speaker.enabled = false;
-        cfg.microphone.capture_device = "physical-mic".into();
         cfg.microphone.provider = "local".into();
         cfg.transcription.enabled = true;
         cfg.transcription.speaker = false;
@@ -968,14 +993,17 @@ mod tests {
     }
     #[test]
     fn feedback_is_rejected_even_when_every_feature_is_off() {
-        let mut cfg = AppConfig::default();
+        let mut cfg = configured_routes();
         cfg.microphone.enabled = false;
         cfg.speaker.enabled = false;
-        cfg.microphone.capture_device = "physical-mic".into();
-        cfg.speaker.playback_device = "physical-speakers".into();
         cfg.validate_routing().unwrap();
         cfg.microphone.playback_device = "babel_speaker".into();
-        assert!(cfg.validate_routing().is_err());
+        assert!(
+            cfg.validate_routing()
+                .unwrap_err()
+                .to_string()
+                .contains("dois cabos independentes")
+        );
         assert!(cfg.validate().is_err());
     }
     #[test]
