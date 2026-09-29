@@ -1,0 +1,12 @@
+{
+  "version": "10.0.26100.6584",
+  "kit_version": "10.0.26100.0",
+  "source": "https://api.nuget.org/v3-flatcontainer",
+  "packages": [
+    {"id": "Microsoft.Windows.WDK.x64", "sha256": "c393d03dfb640b5c92f546b32f6770ef68cd3aaf691956e7d66d8e2c28a1b55e"},
+    {"id": "Microsoft.Windows.WDK.arm64", "sha256": "e705b2a63eab891def8f98087666f93e8f21da8e3b5def81a624b83fef5bdae9"},
+    {"id": "Microsoft.Windows.SDK.CPP", "sha256": "5d31b38205bdd9ac761b4cb39fbbc6b7209b01c11194324afc674d7d119483a0"},
+    {"id": "Microsoft.Windows.SDK.CPP.x64", "sha256": "c29ce7a4641cb37ee32ebb8078cc65cfbabc7025076bcfba869039204b1e960d"},
+    {"id": "Microsoft.Windows.SDK.CPP.arm64", "sha256": "ac06922186fdd75e4ff1033a304ea629d7917bd0ca85e483762f8109584ccfc4"}
+  ]
+}

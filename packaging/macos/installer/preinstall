@@ -1,0 +1,25 @@
+#!/bin/sh
+set -eu
+if [ "${3:-/}" != / ]; then
+    echo 'Install Babel only on the active system volume.' >&2
+    exit 1
+fi
+babel_app='/Applications/Babel.app'
+for babel_path in /Applications "$babel_app"; do
+    if [ -L "$babel_path" ]; then
+        echo "Refusing to replace a symbolic link: $babel_path" >&2
+        exit 1
+    fi
+done
+if [ -e "$babel_app" ]; then
+    if [ ! -d "$babel_app" ] || [ -L "$babel_app/Contents" ] || [ -L "$babel_app/Contents/Info.plist" ]; then
+        echo 'Unexpected existing application layout; installation stopped.' >&2
+        exit 1
+    fi
+    babel_id=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$babel_app/Contents/Info.plist")
+    if [ "$babel_id" != 'org.babel.audio' ]; then
+        echo 'The existing application does not belong to Babel; installation stopped.' >&2
+        exit 1
+    fi
+fi
+exit 0

@@ -1,0 +1,31 @@
+Babel — Windows development package
+
+This installer places Babel, its tray application, documentation, and the complete
+Babel Audio driver package on your computer. It does not start the application,
+enable login startup, or change your default microphone/speaker.
+
+IMPORTANT: CI builds are not signed for public distribution. The bundled kernel
+driver cannot be activated under normal Windows signing policy until its publisher
+has completed the appropriate Microsoft signing process. This installer does NOT
+install a certificate, disable Secure Boot, or enable test-signing mode. Installing
+the application alone does not create virtual audio endpoints.
+
+After obtaining the complete signed driver package, run its install.ps1 explicitly
+from an Administrator PowerShell. Never combine INF/SYS/CAT files from different
+builds. Restart Windows if requested, then choose the Babel endpoints in the app.
+For development driver tests, use a separate test machine configured according to
+Microsoft's driver testing documentation.
+
+The Babel shortcut starts only the tray and the local settings interface. Settings
+use a dynamic local port. Configuration belongs to the current user's
+%APPDATA%\Babel\babel.toml; existing configuration and recordings are preserved by
+installation and removal. Autostart is optional in Settings.
+
+Before uninstalling Babel, remove its audio driver using uninstall.ps1 from an
+Administrator PowerShell. The application uninstaller checks that no Babel driver
+device remains. It preserves the program/helper files if removal still needs
+attention, and never removes a driver before the uninstall confirmation dialog.
+Models for local voice commands and API keys are configured separately; no model,
+API key, transcript or user recording is included in this installer.
+
+See docs\native-drivers.md, docs\platforms.md and docs\voice-commands.md.

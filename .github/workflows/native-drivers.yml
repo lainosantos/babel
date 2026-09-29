@@ -1,0 +1,181 @@
+name: Build installers and native drivers
+on:
+  workflow_call:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  portable:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+          targets: x86_64-pc-windows-gnu
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install Linux package validation tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes rpm rpm2cpio cpio
+      - name: Safe core and ABI policy tests (no device I/O)
+        run: |
+          set -euo pipefail
+          cargo fmt --manifest-path native/macos/Cargo.toml --all -- --check
+          cargo fmt --manifest-path native/windows/transport/Cargo.toml -- --check
+          cargo fmt --manifest-path native/windows/installer/Cargo.toml -- --check
+          cargo test --locked --manifest-path native/macos/Cargo.toml
+          cargo test --locked --manifest-path native/windows/transport/Cargo.toml --lib
+          cargo test --locked --manifest-path native/windows/installer/Cargo.toml
+          cargo clippy --locked --manifest-path native/macos/Cargo.toml --all-targets -- -D warnings
+          cargo clippy --locked --manifest-path native/windows/transport/Cargo.toml --all-targets -- -D warnings
+          cargo clippy --locked --manifest-path native/windows/installer/Cargo.toml --all-targets --target x86_64-pc-windows-gnu -- -D warnings
+      - name: Rust and C++ transport integration outside the kernel
+        run: python3 native/windows/tests/test_shim.py
+      - name: Verify pinned Microsoft sources and generate WaveRT project
+        run: python3 native/windows/prepare.py --output artifacts/wdk-source
+      - name: Driver and installer package contracts
+        env:
+          BABEL_WDK_GENERATED: artifacts/wdk-source
+        run: |
+          set -euo pipefail
+          python3 -m unittest discover -s native/windows/tests -p 'test_*.py' -v
+          python3 -m unittest discover -s packaging/windows -p 'test_*.py' -v
+          python3 -m unittest discover -s packaging/macos -p 'test_*.py' -v
+          python3 -m unittest discover -s packaging/linux -p 'test_*.py' -v
+  linux:
+    needs: portable
+    runs-on: ubuntu-22.04
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install package inspection and RPM build tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes rpm rpm2cpio cpio
+      - run: cargo build --locked --release --bins
+      - name: Check release CLI without audio or user configuration
+        run: python3 scripts/test_cli_smoke.py --output-dir artifacts/cli-smoke
+      - name: Build and inspect DEB, RPM and portable archive
+        run: python3 packaging/linux/build.py --bin-dir target/release --output artifacts/installers
+      - uses: actions/upload-artifact@v4
+        with:
+          name: babel-installers-linux-amd64
+          path: artifacts/installers/
+          if-no-files-found: error
+          retention-days: 30
+  macos:
+    needs: portable
+    runs-on: macos-15
+    timeout-minutes: 50
+    env:
+      MACOSX_DEPLOYMENT_TARGET: '14.2'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Build both application architectures and combine them
+        run: |
+          set -euo pipefail
+          cargo build --locked --release --bins --target aarch64-apple-darwin
+          cargo build --locked --release --bins --target x86_64-apple-darwin
+          mkdir -p artifacts/universal
+          for binary in babel babel-tray; do
+            lipo -create "target/aarch64-apple-darwin/release/$binary" "target/x86_64-apple-darwin/release/$binary" -output "artifacts/universal/$binary"
+            lipo -verify_arch arm64 x86_64 "artifacts/universal/$binary"
+            chmod 755 "artifacts/universal/$binary"
+            codesign --force --sign - "artifacts/universal/$binary"
+          done
+          python3 scripts/test_cli_smoke.py --babel artifacts/universal/babel --output-dir artifacts/cli-smoke
+      - name: Build and test universal HAL driver with Apple SDK
+        run: python3 native/macos/build.py --unsigned --arch universal --test --pkg
+      - name: Build and expand complete application and driver PKG
+        run: python3 packaging/macos/build.py --unsigned --arch universal --bin-dir artifacts/universal --driver-dir native/macos/dist --output artifacts/installers
+      - name: Publish development installer (no distribution signature)
+        uses: actions/upload-artifact@v4
+        with:
+          name: babel-installers-macos-universal-development
+          path: |
+            artifacts/installers/*.pkg
+            artifacts/installers/*.json
+            artifacts/installers/*.txt
+          if-no-files-found: error
+          retention-days: 30
+  windows:
+    needs: portable
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - architecture: x64
+            target: x86_64-pc-windows-msvc
+          - architecture: ARM64
+            target: aarch64-pc-windows-msvc
+    runs-on: windows-2022
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: installers-${{ matrix.architecture }}-static-crt
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: microsoft/setup-msbuild@v2
+      - name: Restore pinned official WDK and SDK for the hosted runner
+        shell: pwsh
+        run: ./.github/scripts/setup-wdk.ps1 -Architecture '${{ matrix.architecture }}'
+      - name: Build and verify complete WaveRT driver package
+        shell: pwsh
+        run: ./native/windows/build.ps1 -Architecture '${{ matrix.architecture }}'
+      - name: Build application with static VC runtime
+        env:
+          RUSTFLAGS: '-C target-feature=+crt-static'
+        run: cargo build --locked --release --bins --target ${{ matrix.target }}
+      - name: Check x64 release CLI without installing or loading a driver
+        if: matrix.architecture == 'x64'
+        run: python scripts/test_cli_smoke.py --babel target/${{ matrix.target }}/release/babel.exe --output-dir artifacts/cli-smoke
+      - name: Build EXE installer and verify complete portable ZIP
+        run: python packaging/windows/build.py --architecture ${{ matrix.architecture }} --bin-dir target/${{ matrix.target }}/release --driver-dir native/windows/dist/${{ matrix.architecture }} --output artifacts/installers
+      - name: Check app and helper runtime dependencies
+        shell: pwsh
+        run: ./.github/scripts/check-windows-runtime.ps1 -BinaryDirectory target/${{ matrix.target }}/release -DriverDirectory native/windows/dist/${{ matrix.architecture }}
+      - name: Verify x64 installer payload and uninstall on the disposable runner
+        if: matrix.architecture == 'x64'
+        shell: pwsh
+        run: ./.github/scripts/test-windows-package.ps1
+      - name: Publish development installer (unsigned kernel driver)
+        uses: actions/upload-artifact@v4
+        with:
+          name: babel-installers-windows-${{ matrix.architecture }}-development
+          path: artifacts/installers/
+          if-no-files-found: error
+          retention-days: 30
+      - name: Preserve WDK diagnostics on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: wdk-diagnostics-${{ matrix.architecture }}
+          path: |
+            native/windows/build/**/*.binlog
+            native/windows/build/**/*.log
+            ${{ runner.temp }}/babel-installer-smoke.log
+            ${{ runner.temp }}/babel-uninstaller-smoke.log
+          if-no-files-found: warn
+          retention-days: 14

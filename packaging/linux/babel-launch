@@ -1,0 +1,23 @@
+#!/bin/sh
+# A user-invoked menu launcher, never an installer hook or autostart entry.
+set -eu
+
+BABEL_LAUNCH_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+umask 077
+# Explicit arguments (including a systemd user drop-in) are already complete.
+# Do not add a second --config/--port or a CLI subcommand.
+if [ "$#" -gt 0 ]; then
+    exec "$BABEL_LAUNCH_DIR/babel-tray" "$@"
+fi
+
+case ${XDG_CONFIG_HOME-} in
+    /*) BABEL_CONFIG_ROOT=$XDG_CONFIG_HOME ;;
+    *)
+        case ${HOME-} in
+            /*) BABEL_CONFIG_ROOT=$HOME/.config ;;
+            *) printf '%s\n' 'Babel needs an absolute HOME or XDG_CONFIG_HOME.' >&2; exit 1 ;;
+        esac
+        ;;
+esac
+mkdir -p -- "$BABEL_CONFIG_ROOT/babel"
+exec "$BABEL_LAUNCH_DIR/babel-tray" --config "$BABEL_CONFIG_ROOT/babel/babel.toml" --port 0 "$@"

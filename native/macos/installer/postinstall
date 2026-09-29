@@ -1,0 +1,11 @@
+#!/bin/sh
+set -eu
+babel_driver='/Library/Audio/Plug-Ins/HAL/BabelAudio.driver'
+if [ -L "$babel_driver" ] || [ ! -d "$babel_driver" ]; then exit 1; fi
+babel_id=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$babel_driver/Contents/Info.plist")
+if [ "$babel_id" != 'org.babel.audio.driver' ]; then exit 1; fi
+/usr/sbin/chown -R root:wheel "$babel_driver"
+/bin/chmod -R u=rwX,go=rX "$babel_driver"
+echo 'BabelAudio installed. Restart macOS to publish Babel Microphone and Babel Speaker.'
+# Intentionally do not kill coreaudiod or change any system audio defaults.
+exit 0

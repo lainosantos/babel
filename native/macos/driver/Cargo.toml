@@ -1,0 +1,14 @@
+[package]
+name = "babel-hal-driver"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+build = "build.rs"
+
+[lib]
+name = "babel_hal_driver"
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+babel-hal-core = { path = "../core" }

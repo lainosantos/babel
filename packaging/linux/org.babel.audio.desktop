@@ -1,0 +1,14 @@
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=Babel
+Comment=Virtual audio routing and live speech translation
+Comment[pt]=Roteamento de áudio virtual e tradução de voz em tempo real
+Exec=babel-launch
+TryExec=babel-launch
+Icon=org.babel.audio
+Terminal=false
+StartupNotify=false
+Categories=AudioVideo;Audio;Network;
+Keywords=translation;microphone;audio;voice;
+Keywords[pt]=tradução;microfone;áudio;voz;

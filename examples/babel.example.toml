@@ -1,0 +1,109 @@
+version = 1
+
+# Display language: system (OS language, English fallback), en or pt.
+# Independent of source_language / target_language on each audio route.
+[interface]
+language = "system"
+
+[providers.gemini]
+api_key_env = "GEMINI_API_KEY"
+endpoint = "wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent"
+model = "gemini-3.5-live-translate-preview"
+voice = "Kore"
+tts_model = "gemini-3.8-flash-tts"
+transcription_model = ""
+connect_timeout_secs = 15
+max_reconnect_attempts = 5
+
+[providers.openai]
+api_key_env = "OPENAI_API_KEY"
+endpoint = ""
+model = "gpt-realtime-translate"
+voice = "marin"
+tts_model = ""
+transcription_model = ""
+connect_timeout_secs = 15
+max_reconnect_attempts = 5
+
+[providers.elevenlabs]
+api_key_env = "ELEVENLABS_API_KEY"
+endpoint = "https://api.elevenlabs.io/v1"
+model = "eleven_flash_v2_5"
+voice = ""
+tts_model = "eleven_flash_v2_5"
+transcription_model = ""
+connect_timeout_secs = 15
+max_reconnect_attempts = 5
+
+[providers.local]
+whisper_endpoint = "http://127.0.0.1:8080/inference"
+ollama_endpoint = "http://127.0.0.1:11434/api/chat"
+translation_model = "qwen3:4b"
+piper_endpoint = "http://127.0.0.1:5000/synthesize"
+piper_voice = ""
+segment_ms = 2000
+silence_ms = 300
+vad_threshold = 0.01
+request_timeout_secs = 30
+
+[audio]
+quality = "balanced"
+capture_queue_ms = 200
+playback_queue_ms = 2000
+max_capture_age_ms = 200
+device_latency_ms = 30
+
+[microphone]
+enabled = true
+provider = "gemini"
+capture_device = ""
+playback_device = "babel_mic_bus"
+source_language = "pt-BR"
+target_language = "en-US"
+prompt = ""
+gain = 1.0
+
+[microphone.voice]
+engine = "native"
+voice_id = ""
+style = ""
+chunk_ms = 400
+
+[speaker]
+enabled = true
+provider = "gemini"
+capture_device = "babel_speaker.monitor"
+playback_device = ""
+source_language = "en-US"
+target_language = "pt-BR"
+prompt = ""
+gain = 1.0
+
+[speaker.voice]
+engine = "native"
+voice_id = ""
+style = ""
+chunk_ms = 400
+
+[transcription]
+enabled = false
+microphone = true
+speaker = true
+timestamps = true
+directory = "transcripts"
+
+[recording]
+enabled = false
+microphone = true
+speaker = true
+directory = "recordings"
+
+[files]
+# Defina uma base absoluta; escolha e adapte uma das opções abaixo.
+# babel init gera HOME/Babel (Linux/macOS) ou USERPROFILE\Babel (Windows).
+# Sem este campo, um TOML existente é legado: ao carregar, Babel fixa a pasta
+# do próprio arquivo de configuração como base e salva o caminho absoluto.
+# base_path = '/home/ana/Babel'
+# base_path = '/Users/ana/Babel'
+# base_path = 'C:\Users\Ana\Babel'
+name_pattern = "{date}-{time}-{session}-{id}"

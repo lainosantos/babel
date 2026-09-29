@@ -1,0 +1,17 @@
+/target/
+/.tools/
+/babel.toml
+/.env
+*.log
+/transcripts/
+/recordings/
+/ui/node_modules/
+__pycache__/
+*.pyc
+/native/**/target/
+/native/**/build/
+/native/**/dist/
+/packaging/**/dist/
+/packaging/**/build/
+/artifacts/
+*.babel-instance.lock

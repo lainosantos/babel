@@ -1,0 +1,40 @@
+diff --git a/examples/server/server.cpp b/examples/server/server.cpp
+index b745f4d..f905733 100644
+--- a/examples/server/server.cpp
++++ b/examples/server/server.cpp
+@@ -1253,7 +1253,12 @@ int main(int argc, char ** argv) {
+     svr->set_read_timeout(sparams.read_timeout);
+     svr->set_write_timeout(sparams.write_timeout);
+ 
+-    if (!svr->bind_to_port(sparams.hostname, sparams.port))
++    // Port zero asks the OS to choose an available port while keeping its
++    // listening socket reserved. Keep the actual port for endpoint discovery.
++    const bool bound = sparams.port == 0
++        ? (sparams.port = svr->bind_to_any_port(sparams.hostname)) > 0
++        : svr->bind_to_port(sparams.hostname, sparams.port);
++    if (!bound)
+     {
+         fprintf(stderr, "\ncouldn't bind to server socket: hostname=%s port=%d\n\n",
+                 sparams.hostname.c_str(), sparams.port);
+@@ -1301,6 +1306,21 @@ int main(int argc, char ** argv) {
+ 
+     svr->wait_until_ready();
+ 
++    // The launcher consumes this marker and discards all other output. Never
++    // include recognized speech here; callers still verify /health before use.
++    if (svr->is_running()) {
++        const std::string host = sparams.hostname.find(':') != std::string::npos
++            ? "[" + sparams.hostname + "]" : sparams.hostname;
++        const json ready = {
++            {"service", "babel-whisper"},
++            {"endpoint", "http://" + host + ":" + std::to_string(sparams.port)
++                + sparams.request_path + sparams.inference_path},
++            {"port", sparams.port},
++        };
++        printf("BABEL_SERVICE_READY %s\n", ready.dump().c_str());
++        fflush(stdout);
++    }
++
+     t.join();
+ 
+ 

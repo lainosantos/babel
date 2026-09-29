@@ -1,0 +1,172 @@
+; Babel WaveRT adapter. Derived from Microsoft SimpleAudioSample; MS-PL.
+[Version]
+Signature="$Windows NT$"
+Class=MEDIA
+ClassGUID={4d36e96c-e325-11ce-bfc1-08002be10318}
+Provider=%ProviderName%
+DriverVer=09/29/2026,0.1.0.0
+CatalogFile=BabelAudio.cat
+PnpLockdown=1
+
+[Manufacturer]
+%ProviderName%=Babel,NT$ARCH$.10.0...19041
+[Babel.NT$ARCH$.10.0...19041]
+%Babel.DeviceDesc%=BabelAudio,ROOT\BabelAudio
+
+[SourceDisksNames]
+1=%Babel.Disk%
+[SourceDisksFiles]
+BabelAudio.sys=1
+[DestinationDirs]
+Babel.Copy=13
+[Babel.Copy]
+BabelAudio.sys
+
+[BabelAudio.NT]
+Include=ks.inf,wdmaudio.inf
+Needs=KS.Registration,WDMAUDIO.Registration
+CopyFiles=Babel.Copy
+AddReg=Babel.Adapter
+[Babel.Adapter]
+HKR,,AssociatedFilters,,"wdmaud"
+HKR,,Driver,,BabelAudio.sys
+HKR,Drivers,SubClasses,,"wave,mixer"
+HKR,Drivers\wave\wdmaud.drv,Driver,,wdmaud.drv
+HKR,Drivers\mixer\wdmaud.drv,Driver,,wdmaud.drv
+HKR,Drivers\wave\wdmaud.drv,Description,,%Babel.DeviceDesc%
+HKR,Drivers\mixer\wdmaud.drv,Description,,%Babel.DeviceDesc%
+
+[BabelAudio.NT.Services]
+AddService=BabelAudio,0x00000002,Babel.Service
+[Babel.Service]
+DisplayName=%Babel.DeviceDesc%
+ServiceType=1
+StartType=3
+ErrorControl=1
+ServiceBinary=%13%\BabelAudio.sys
+[BabelAudio.NT.Wdf]
+KmdfService=BabelAudio,Babel.Wdf
+[Babel.Wdf]
+KmdfLibraryVersion=$KMDFVERSION$
+[BabelAudio.NT.HW]
+AddReg=Babel.Hardware
+[Babel.Hardware]
+HKR,,DeviceType,0x10001,0x0000001D
+HKR,,Security,,"D:P(A;;GA;;;SY)(A;;GRGWGX;;;BA)(A;;GRGWGX;;;WD)(A;;GRGWGX;;;RC)"
+
+[BabelAudio.NT.Interfaces]
+AddInterface=%KSCATEGORY_AUDIO%,"WaveBabelMicRender",Babel.WaveBabelMicRender
+AddInterface=%KSCATEGORY_RENDER%,"WaveBabelMicRender",Babel.WaveBabelMicRender
+AddInterface=%KSCATEGORY_REALTIME%,"WaveBabelMicRender",Babel.WaveBabelMicRender
+AddInterface=%KSCATEGORY_AUDIO%,"TopologyBabelMicRender",Babel.TopologyBabelMicRender
+AddInterface=%KSCATEGORY_TOPOLOGY%,"TopologyBabelMicRender",Babel.TopologyBabelMicRender
+AddInterface=%KSCATEGORY_AUDIO%,"WaveBabelMicCapture",Babel.WaveBabelMicCapture
+AddInterface=%KSCATEGORY_CAPTURE%,"WaveBabelMicCapture",Babel.WaveBabelMicCapture
+AddInterface=%KSCATEGORY_REALTIME%,"WaveBabelMicCapture",Babel.WaveBabelMicCapture
+AddInterface=%KSCATEGORY_AUDIO%,"TopologyBabelMicCapture",Babel.TopologyBabelMicCapture
+AddInterface=%KSCATEGORY_TOPOLOGY%,"TopologyBabelMicCapture",Babel.TopologyBabelMicCapture
+AddInterface=%KSCATEGORY_AUDIO%,"WaveBabelSpeakerRender",Babel.WaveBabelSpeakerRender
+AddInterface=%KSCATEGORY_RENDER%,"WaveBabelSpeakerRender",Babel.WaveBabelSpeakerRender
+AddInterface=%KSCATEGORY_REALTIME%,"WaveBabelSpeakerRender",Babel.WaveBabelSpeakerRender
+AddInterface=%KSCATEGORY_AUDIO%,"TopologyBabelSpeakerRender",Babel.TopologyBabelSpeakerRender
+AddInterface=%KSCATEGORY_TOPOLOGY%,"TopologyBabelSpeakerRender",Babel.TopologyBabelSpeakerRender
+AddInterface=%KSCATEGORY_AUDIO%,"WaveBabelSpeakerCapture",Babel.WaveBabelSpeakerCapture
+AddInterface=%KSCATEGORY_CAPTURE%,"WaveBabelSpeakerCapture",Babel.WaveBabelSpeakerCapture
+AddInterface=%KSCATEGORY_REALTIME%,"WaveBabelSpeakerCapture",Babel.WaveBabelSpeakerCapture
+AddInterface=%KSCATEGORY_AUDIO%,"TopologyBabelSpeakerCapture",Babel.TopologyBabelSpeakerCapture
+AddInterface=%KSCATEGORY_TOPOLOGY%,"TopologyBabelSpeakerCapture",Babel.TopologyBabelSpeakerCapture
+
+[Babel.WaveBabelMicRender]
+AddReg=Babel.WaveBabelMicRender.Properties
+[Babel.WaveBabelMicRender.Properties]
+HKR,,CLSID,,%Proxy.CLSID%
+HKR,,FriendlyName,,"Babel Audio v1"
+
+[Babel.TopologyBabelMicRender]
+AddReg=Babel.TopologyBabelMicRender.Properties
+[Babel.TopologyBabelMicRender.Properties]
+HKR,,CLSID,,%Proxy.CLSID%
+HKR,,FriendlyName,,"Babel Audio v1"
+HKR,EP\0,%PKEY_AudioEndpoint_Association%,,%KSNODETYPE_ANY%
+HKR,EP\0,%PKEY_AudioEndpoint_Supports_EventDriven_Mode%,0x10001,1
+HKR,EP\0,%PKEY_Device_DeviceDesc%,,"Babel Microphone Feed"
+HKR,EP\0,%PKEY_Device_FriendlyName%,,"Babel Microphone Feed"
+HKR,EP\0,%PKEY_DeviceInterface_FriendlyName%,,"Babel Audio v1"
+HKR,EP\0,%PKEY_Babel_Role%,,"babel:mic:render:v1"
+HKR,EP\0,%PKEY_Babel_Driver%,,"org.babel.audio.driver.v1"
+
+[Babel.WaveBabelMicCapture]
+AddReg=Babel.WaveBabelMicCapture.Properties
+[Babel.WaveBabelMicCapture.Properties]
+HKR,,CLSID,,%Proxy.CLSID%
+HKR,,FriendlyName,,"Babel Audio v1"
+
+[Babel.TopologyBabelMicCapture]
+AddReg=Babel.TopologyBabelMicCapture.Properties
+[Babel.TopologyBabelMicCapture.Properties]
+HKR,,CLSID,,%Proxy.CLSID%
+HKR,,FriendlyName,,"Babel Audio v1"
+HKR,EP\0,%PKEY_AudioEndpoint_Association%,,%KSNODETYPE_ANY%
+HKR,EP\0,%PKEY_AudioEndpoint_Supports_EventDriven_Mode%,0x10001,1
+HKR,EP\0,%PKEY_Device_DeviceDesc%,,"Babel Microphone"
+HKR,EP\0,%PKEY_Device_FriendlyName%,,"Babel Microphone"
+HKR,EP\0,%PKEY_DeviceInterface_FriendlyName%,,"Babel Audio v1"
+HKR,EP\0,%PKEY_Babel_Role%,,"babel:mic:capture:v1"
+HKR,EP\0,%PKEY_Babel_Driver%,,"org.babel.audio.driver.v1"
+
+[Babel.WaveBabelSpeakerRender]
+AddReg=Babel.WaveBabelSpeakerRender.Properties
+[Babel.WaveBabelSpeakerRender.Properties]
+HKR,,CLSID,,%Proxy.CLSID%
+HKR,,FriendlyName,,"Babel Audio v1"
+
+[Babel.TopologyBabelSpeakerRender]
+AddReg=Babel.TopologyBabelSpeakerRender.Properties
+[Babel.TopologyBabelSpeakerRender.Properties]
+HKR,,CLSID,,%Proxy.CLSID%
+HKR,,FriendlyName,,"Babel Audio v1"
+HKR,EP\0,%PKEY_AudioEndpoint_Association%,,%KSNODETYPE_ANY%
+HKR,EP\0,%PKEY_AudioEndpoint_Supports_EventDriven_Mode%,0x10001,1
+HKR,EP\0,%PKEY_Device_DeviceDesc%,,"Babel Speaker"
+HKR,EP\0,%PKEY_Device_FriendlyName%,,"Babel Speaker"
+HKR,EP\0,%PKEY_DeviceInterface_FriendlyName%,,"Babel Audio v1"
+HKR,EP\0,%PKEY_Babel_Role%,,"babel:speaker:render:v1"
+HKR,EP\0,%PKEY_Babel_Driver%,,"org.babel.audio.driver.v1"
+
+[Babel.WaveBabelSpeakerCapture]
+AddReg=Babel.WaveBabelSpeakerCapture.Properties
+[Babel.WaveBabelSpeakerCapture.Properties]
+HKR,,CLSID,,%Proxy.CLSID%
+HKR,,FriendlyName,,"Babel Audio v1"
+
+[Babel.TopologyBabelSpeakerCapture]
+AddReg=Babel.TopologyBabelSpeakerCapture.Properties
+[Babel.TopologyBabelSpeakerCapture.Properties]
+HKR,,CLSID,,%Proxy.CLSID%
+HKR,,FriendlyName,,"Babel Audio v1"
+HKR,EP\0,%PKEY_AudioEndpoint_Association%,,%KSNODETYPE_ANY%
+HKR,EP\0,%PKEY_AudioEndpoint_Supports_EventDriven_Mode%,0x10001,1
+HKR,EP\0,%PKEY_Device_DeviceDesc%,,"Babel Speaker Monitor"
+HKR,EP\0,%PKEY_Device_FriendlyName%,,"Babel Speaker Monitor"
+HKR,EP\0,%PKEY_DeviceInterface_FriendlyName%,,"Babel Audio v1"
+HKR,EP\0,%PKEY_Babel_Role%,,"babel:speaker:capture:v1"
+HKR,EP\0,%PKEY_Babel_Driver%,,"org.babel.audio.driver.v1"
+
+[Strings]
+ProviderName="Babel"
+Babel.DeviceDesc="Babel Audio v1"
+Babel.Disk="Babel Virtual Audio Driver"
+Proxy.CLSID="{17CCA71B-ECD7-11D0-B908-00A0C9223196}"
+KSCATEGORY_AUDIO="{6994AD04-93EF-11D0-A3CC-00A0C9223196}"
+KSCATEGORY_RENDER="{65E8773E-8F56-11D0-A3B9-00A0C9223196}"
+KSCATEGORY_CAPTURE="{65E8773D-8F56-11D0-A3B9-00A0C9223196}"
+KSCATEGORY_REALTIME="{EB115FFC-10C8-4964-831D-6DCB02E6F23F}"
+KSCATEGORY_TOPOLOGY="{DDA54A40-1E4C-11D1-A050-405705C10000}"
+KSNODETYPE_ANY="{00000000-0000-0000-0000-000000000000}"
+PKEY_AudioEndpoint_Association="{1DA5D803-D492-4EDD-8C23-E0C0FFEE7F0E},2"
+PKEY_AudioEndpoint_Supports_EventDriven_Mode="{1DA5D803-D492-4EDD-8C23-E0C0FFEE7F0E},7"
+PKEY_Device_DeviceDesc="{A45C254E-DF1C-4EFD-8020-67D146A850E0},2"
+PKEY_Device_FriendlyName="{A45C254E-DF1C-4EFD-8020-67D146A850E0},14"
+PKEY_DeviceInterface_FriendlyName="{026E516E-B814-414B-83CD-856D6FEF4822},2"
+PKEY_Babel_Role="{76AD3C42-65B7-4DA0-A823-907A8E5AC6C1},1"
+PKEY_Babel_Driver="{76AD3C42-65B7-4DA0-A823-907A8E5AC6C1},2"
