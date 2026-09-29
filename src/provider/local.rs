@@ -28,6 +28,7 @@ pub struct LocalProvider {
     client: Client,
     native_synthesis: bool,
     transcription_only: bool,
+    whisper_api_key_env: String,
 }
 
 impl LocalProvider {
@@ -80,6 +81,7 @@ impl LocalProvider {
             client,
             native_synthesis: true,
             transcription_only,
+            whisper_api_key_env: String::new(),
         })
     }
 
@@ -90,6 +92,12 @@ impl LocalProvider {
         self
     }
 
+    /// Dedicated STT authentication must never inherit a translation API key.
+    pub fn with_whisper_auth(mut self, api_key_env: String) -> Self {
+        self.whisper_api_key_env = api_key_env;
+        self
+    }
+
     async fn process(
         &self,
         config: &SessionConfig,
@@ -97,6 +105,11 @@ impl LocalProvider {
         rendered: mpsc::Sender<Vec<i16>>,
         events: &mpsc::Sender<ProviderEvent>,
     ) -> Result<()> {
+        let key = if self.whisper_api_key_env.is_empty() {
+            None
+        } else {
+            Some(crate::credentials::get(&self.whisper_api_key_env)?)
+        };
         while let Some(segment) = segments.recv().await {
             let wav = encode_wav(&segment.samples)?;
             let language = whisper_language(&config.source_language);
@@ -112,13 +125,14 @@ impl LocalProvider {
                 .text("temperature", "0.0")
                 .text("translate", "false")
                 .text("language", language);
-            let original = bounded_json(
-                self.client
-                    .post(&self.config.whisper_endpoint)
-                    .multipart(form),
-                "whisper.cpp",
-            )
-            .await?;
+            let mut request = self
+                .client
+                .post(&self.config.whisper_endpoint)
+                .multipart(form);
+            if let Some(key) = &key {
+                request = request.bearer_auth(key.trim());
+            }
+            let original = bounded_json(request, "whisper.cpp").await?;
             let original = required_text(&original["text"], "whisper.cpp")?;
             if original.trim().is_empty() {
                 continue;

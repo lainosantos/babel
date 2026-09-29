@@ -3,9 +3,11 @@
 //! All serialization/network work runs outside audio callbacks. Callers own the
 //! bounded channels and cancel a session before changing its configuration.
 
+mod deepgram;
 mod gemini;
 mod local;
 mod openai;
+pub mod stt;
 
 use std::sync::Arc;
 
@@ -152,43 +154,6 @@ pub fn create_configured_provider(
     create_route_provider(kind, cloud, local, true)
 }
 
-/// Original speech recognition without any translation or generated voice.
-/// Translation model, prompt, target language and voice in SessionConfig are
-/// deliberately not forwarded. Cloud ASR selects transcription_model instead.
-pub fn create_transcription_provider(
-    kind: &str,
-    cloud: &crate::config::CloudProviderConfig,
-    local: &crate::config::LocalProviderConfig,
-) -> Result<Arc<dyn SpeechProvider>> {
-    match kind {
-        "gemini" => {
-            let model = if cloud.transcription_model.is_empty() {
-                gemini::TRANSCRIBE_MODEL
-            } else {
-                cloud
-                    .transcription_model
-                    .strip_prefix("models/")
-                    .unwrap_or(&cloud.transcription_model)
-            };
-            anyhow::ensure!(
-                model == gemini::TRANSCRIBE_MODEL,
-                "Gemini ASR requires gemini-3.5-transcribe-live"
-            );
-            Ok(Arc::new(gemini::GeminiTranscriptionProvider {
-                model: model.into(),
-            }))
-        }
-        "openai" => Ok(Arc::new(openai::OpenAiProvider::transcription(
-            cloud.endpoint.clone(),
-            cloud.transcription_model.clone(),
-        )?)),
-        "local" => Ok(Arc::new(local::LocalProvider::transcription(
-            local.clone(),
-        )?)),
-        _ => bail!("original transcription requires gemini, openai or local"),
-    }
-}
-
 /// Local translation can bypass Piper when a separate streaming TTS supplies the voice.
 pub fn create_route_provider(
     kind: &str,
@@ -220,28 +185,6 @@ mod tests {
         assert!(
             create_route_provider("loopback", &profiles.gemini, &profiles.local, false).is_err()
         );
-    }
-
-    #[test]
-    fn transcription_factory_uses_only_valid_recognizers() {
-        let profiles = crate::config::ProviderProfiles::default();
-        for (kind, cloud) in [
-            ("gemini", &profiles.gemini),
-            ("openai", &profiles.openai),
-            ("local", &profiles.gemini),
-        ] {
-            assert!(create_transcription_provider(kind, cloud, &profiles.local).is_ok());
-        }
-        assert!(
-            create_transcription_provider("loopback", &profiles.gemini, &profiles.local).is_err()
-        );
-        let mut cloud = profiles.openai;
-        cloud.endpoint = "wss://api.openai.com/v1/realtime/translations".into();
-        assert!(create_transcription_provider("openai", &cloud, &profiles.local).is_err());
-        cloud.endpoint.clear();
-        cloud.transcription_model = "gpt-realtime-2.1".into();
-        assert!(create_transcription_provider("openai", &cloud, &profiles.local).is_err());
-        assert!(create_transcription_provider("gemini", &cloud, &profiles.local).is_err());
     }
 
     #[test]

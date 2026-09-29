@@ -70,9 +70,9 @@
     const panel = field.closest('[data-workspace-panel]');
     if (panel) navigate(panel.dataset.workspacePanel);
     const profile = field.closest('.provider-profile');
-    const selector = byId('profile-selector');
+    const selector = byId(profile?.dataset.profileSelector || 'profile-selector');
     if (profile && selector) {
-      const provider = profile.id.replace(/^profile-/, '');
+      const provider = profile.dataset.profileValue || profile.id.replace(/^profile-/, '');
       if ([...selector.options].some(option => option.value === provider)) {
         selector.value = provider;
         selector.dispatchEvent(new Event('change', { bubbles: true }));

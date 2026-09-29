@@ -74,6 +74,7 @@
       state.configConflict = false;
       byId('config-conflict').hidden = true;
       refreshCredentialStatus(byId('profile-selector').value);
+      refreshCredentialStatus(byId('stt-profile-selector').value, true);
     } catch (error) { markConfigConflict(); throw error; }
     finally { state.syncing = false; updateControls(); }
   }
@@ -97,6 +98,8 @@
   }
 
   function fieldContainer(config, element) {
+    if (element.dataset.transcriptionProfile) return config.transcription?.providers?.[element.dataset.transcriptionProfile];
+    if (element.dataset.recognitionRoute) return config.transcription?.[`${element.dataset.recognitionRoute}_recognition`];
     if (element.dataset.profile) return config.providers?.[element.dataset.profile];
     if (element.dataset.voiceRoute) return config[element.dataset.voiceRoute]?.voice;
     return config[element.dataset.route || element.dataset.section];
@@ -104,6 +107,9 @@
 
   function routeProvider(route) { return byId(`${route}-provider`).value; }
   function profileValue(provider, field) { return byId(`profile-${provider}-${field}`)?.value || ''; }
+  function sttProfileValue(provider, field) { return byId(`stt-profile-${provider}-${field}`)?.value || ''; }
+  function sttProvider(route) { return byId(`stt-${route}-provider`).value; }
+  function transcribesRoute(route) { return byId('transcription-enabled').checked && byId(`transcription-${route}`).checked; }
   function isOpenAITranslation(model) { return model === 'gpt-realtime-translate' || model.startsWith('gpt-realtime-translate-'); }
   function dedicatedRoute(route) {
     const provider = routeProvider(route);
@@ -397,12 +403,29 @@
     byId('profile-openai-voice').disabled = isOpenAITranslation(profileValue('openai', 'model'));
     const local = routeNames.every(route => {
       const translates = byId(`${route}-enabled`).checked;
-      const transcribes = byId('transcription-enabled').checked && byId(`transcription-${route}`).checked;
-      return (!translates && !transcribes) || (routeProvider(route) === 'local' && (!translates || byId(`${route}-voice-engine`).value === 'native'));
+      return (!translates || (routeProvider(route) === 'local' && byId(`${route}-voice-engine`).value === 'native'))
+        && (!transcribesRoute(route) || sttProvider(route) === 'whisper');
     });
     byId('footer-state').textContent = local ? t("ui.session_configured_for_local_processing") : t("ui.session_configured_with_cloud_providers");
+    updateTranscriptionControls();
     renderVoiceOptions();
     renderSignalPaths();
+  }
+
+  function updateTranscriptionControls() {
+    for (const route of routeNames) byId(`stt-${route}-language`).required = transcribesRoute(route);
+    for (const provider of ['gemini', 'openai', 'deepgram', 'whisper']) {
+      const used = routeNames.some(route => transcribesRoute(route) && sttProvider(route) === provider);
+      byId(`stt-profile-${provider}-endpoint`).required = used && provider !== 'openai';
+      byId(`stt-profile-${provider}-api_key_env`).required = used && provider !== 'whisper';
+      const model = byId(`stt-profile-${provider}-model`);
+      if (model) model.required = used;
+      for (const number of byId(`stt-profile-${provider}`).querySelectorAll('input[type="number"]')) number.required = used;
+      if (provider === 'whisper') {
+        const silence = byId('stt-profile-whisper-silence_ms');
+        silence.setCustomValidity(used && Number(silence.value) >= Number(byId('stt-profile-whisper-segment_ms').value) ? t('stt.silence_shorter') : '');
+      }
+    }
   }
 
   function routeWaiting(route, status = state.status) {
@@ -567,7 +590,7 @@
     if (!event.target.matches('[data-field]')) return;
     state.dirty = true;
     updateGainLabels();
-    if (['provider', 'enabled', 'engine', 'model'].includes(event.target.dataset.field) || event.target.dataset.section === 'transcription') updateProviderControls();
+    if (['provider', 'enabled', 'engine', 'model'].includes(event.target.dataset.field) || event.target.dataset.section === 'transcription' || event.target.dataset.transcriptionProfile) updateProviderControls();
     if (event.target.id === 'audio-quality') updateQualityHint();
     if (['files-base_path', 'transcription-directory', 'recording-directory'].includes(event.target.id)) scheduleFilePathPreview();
     updateControls();
@@ -645,38 +668,63 @@
     refreshCredentialStatus(provider);
   }
 
-  async function refreshCredentialStatus(provider) {
-    if (provider === 'local' || !state.authenticated) return;
-    const environment = profileValue(provider, 'api_key_env');
-    if (!environment) return;
+  async function refreshCredentialStatus(provider, stt = false) {
+    if ((!stt && provider === 'local') || !state.authenticated) return;
+    const value = stt ? sttProfileValue : profileValue;
+    const prefix = stt ? 'stt-' : '';
+    const environment = value(provider, 'api_key_env');
+    const status = byId(`${prefix}credential-${provider}-status`);
+    if (!environment) {
+      if (stt) i18n.message(status, t(provider === 'whisper' ? 'stt.optional_credential' : 'stt.credential_name_required'));
+      return;
+    }
     try {
       const result = await api(`/credentials?${new URLSearchParams({ api_key_env: environment })}`);
-      if (profileValue(provider, 'api_key_env') !== environment) return;
-      i18n.message(byId(`credential-${provider}-status`), result.configured
+      if (value(provider, 'api_key_env') !== environment) return;
+      i18n.message(status, result.configured
         ? t("ui.a_key_is_available_for_this_profile_in_memory_or_the_environment_its_value_")
         : t("ui.no_key_is_available_apply_a_temporary_key_or_set_the_environment_variable_b"));
-    } catch (error) { byId(`credential-${provider}-status`).textContent = error.message; }
+    } catch (error) { if (value(provider, 'api_key_env') === environment) status.textContent = error.message; }
   }
 
   byId('profile-selector').addEventListener('change', profileChanged);
   for (const provider of ['gemini', 'openai', 'elevenlabs']) {
     byId(`profile-${provider}-api_key_env`).addEventListener('change', () => refreshCredentialStatus(provider));
   }
-  document.querySelectorAll('.credential-apply').forEach(button => button.addEventListener('click', () => action(async () => {
+  function sttProfileChanged() {
+    const provider = byId('stt-profile-selector').value;
+    for (const name of ['gemini', 'openai', 'deepgram', 'whisper']) byId(`stt-profile-${name}`).hidden = name !== provider;
+    refreshCredentialStatus(provider, true);
+  }
+  byId('stt-profile-selector').addEventListener('change', sttProfileChanged);
+  for (const provider of ['gemini', 'openai', 'deepgram', 'whisper']) {
+    byId(`stt-profile-${provider}-api_key_env`).addEventListener('change', () => refreshCredentialStatus(provider, true));
+  }
+  document.querySelectorAll('[data-stt-route-profile]').forEach(button => button.addEventListener('click', () => {
+    const field = byId(`stt-profile-${sttProvider(button.dataset.sttRouteProfile)}-${sttProvider(button.dataset.sttRouteProfile) === 'whisper' ? 'endpoint' : 'model'}`);
+    window.BabelWorkspace?.revealField(field);
+  }));
+  document.querySelectorAll('.credential-apply, .stt-credential-apply').forEach(button => button.addEventListener('click', () => action(async () => {
     const provider = button.dataset.provider;
-    const input = byId(`credential-${provider}`);
+    const stt = button.classList.contains('stt-credential-apply');
+    const environment = (stt ? sttProfileValue : profileValue)(provider, 'api_key_env');
+    if (!environment.trim()) throw new Error(t('stt.credential_name_required'));
+    const input = byId(`${stt ? 'stt-' : ''}credential-${provider}`);
     const key = input.value;
     input.value = '';
     if (!key.trim()) throw new Error(t("ui.enter_a_key_for_this_app_instance"));
-    await api('/credentials', { method: 'POST', body: { api_key_env: profileValue(provider, 'api_key_env'), key } });
-    await refreshCredentialStatus(provider);
+    await api('/credentials', { method: 'POST', body: { api_key_env: environment, key } });
+    await refreshCredentialStatus(provider, stt);
     announce(t("ui.key_applied_to_this_app_instance_s_memory_only_it_will_be_discarded_when_ba"));
   })));
-  document.querySelectorAll('.credential-clear').forEach(button => button.addEventListener('click', () => action(async () => {
+  document.querySelectorAll('.credential-clear, .stt-credential-clear').forEach(button => button.addEventListener('click', () => action(async () => {
     const provider = button.dataset.provider;
-    byId(`credential-${provider}`).value = '';
-    await api('/credentials/clear', { method: 'POST', body: { api_key_env: profileValue(provider, 'api_key_env') } });
-    await refreshCredentialStatus(provider);
+    const stt = button.classList.contains('stt-credential-clear');
+    const environment = (stt ? sttProfileValue : profileValue)(provider, 'api_key_env');
+    if (!environment.trim()) throw new Error(t('stt.credential_name_required'));
+    byId(`${stt ? 'stt-' : ''}credential-${provider}`).value = '';
+    await api('/credentials/clear', { method: 'POST', body: { api_key_env: environment } });
+    await refreshCredentialStatus(provider, stt);
     announce(t("ui.temporary_key_removed_a_key_set_in_the_environment_remains_available_as_a_f"));
   })));
 
@@ -898,6 +946,7 @@
       if (results[2].status === 'rejected') byId('autostart-status').textContent = t('autostart.read_error', { error: results[2].reason.message });
       updateControls();
       refreshCredentialStatus(byId('profile-selector').value);
+      refreshCredentialStatus(byId('stt-profile-selector').value, true);
     } catch (error) {
       showError(error.message);
       byId('session-state').textContent = t("ui.dashboard_disconnected");

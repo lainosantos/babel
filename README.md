@@ -2,7 +2,9 @@
 
 Microfone e saída de áudio virtuais para tradução bidirecional de voz. O núcleo,
 os adaptadores de IA, o servidor do painel e os controles de bandeja são Rust.
-Cada direção pode usar um provedor e uma voz diferentes.
+Cada direção pode usar um provedor e uma voz diferentes para tradução.
+A transcrição também escolhe seu próprio provedor e idioma para o microfone e
+para o áudio recebido, independentemente da tradução.
 Tradução, transcrição e gravação são independentes. Fora de uma sessão, o Babel
 encaminha o áudio original entre os dispositivos configurados. Desligar a
 tradução de uma direção mantém esse encaminhamento durante a sessão também.
@@ -67,20 +69,23 @@ Em Linux/macOS, `./scripts/run.sh` inicia o binário compilado a partir deste
 diretório; na primeira execução, compila caso ele ainda não exista. O script
 também aceita os subcomandos, por exemplo `./scripts/run.sh doctor`.
 
-1. Em **Tradução e vozes**, configure o perfil de IA para traduzir ou transcrever.
+1. Em **Tradução e vozes**, configure os perfis usados para traduzir.
    Provedores de nuvem recebem uma chave temporária pelo painel ou pela variável
    de ambiente indicada. Só gravar ou encaminhar originais dispensa essa etapa.
-2. Nessa mesma página, escolha o provedor em cada faixa que usará IA. As configurações de um provedor
-   não sobrescrevem as dos outros. O padrão de tradução é Gemini Live Translate.
+2. Nessa mesma página, escolha o tradutor de cada faixa. As configurações de um
+   provedor não sobrescrevem as dos outros. O padrão é Gemini Live Translate.
 3. Em **Roteamento**, selecione os físicos e as pontas virtuais do seu sistema.
    No Linux, use o microfone físico como captura e `babel_mic_bus` como reprodução
    do microfone; na saída, `babel_speaker.monitor` como captura e seus fones como
    reprodução. O [guia por sistema](docs/platforms.md) mostra as pontas macOS/Windows.
 4. Em **Tradução e vozes**, defina os idiomas e as vozes de cada direção e ative
    apenas as traduções desejadas. Os perfis de IA e a biblioteca de vozes ficam juntos.
-5. Nas páginas **Transcrição** e **Gravação**, escolha separadamente os originais
-   que deseja guardar. Ambas têm um atalho para a pasta base e os nomes de arquivos
-   em **Ajustes**. É possível só gravar, só transcrever ou combinar os recursos.
+5. Em **Transcrição**, escolha os originais que deseja guardar e, para cada
+   origem, seu provider STT e idioma: Gemini, OpenAI, Deepgram ou Whisper.
+   Os perfis e credenciais de transcrição ficam nessa página e são independentes
+   dos perfis de tradução. Em **Gravação**, selecione o áudio original que deseja
+   salvar. Ambas têm um atalho para a pasta base e os nomes de arquivos em
+   **Ajustes**. É possível só gravar, só transcrever ou combinar os recursos.
 6. Salve os ajustes, preencha **Nome da sessão** se desejar e clique em **Iniciar
    sessão**. No aplicativo da chamada, selecione **Babel_Microphone** e
    **Babel_Speaker** no Linux, ou **Babel Microphone** e **Babel Speaker** no
@@ -114,6 +119,8 @@ principal. Permita a captura de microfone ao aplicativo/terminal.
   idiomas, rotas, qualidade, filas, transcrição, gravação e bandeja.
 - [Idiomas da interface](docs/localization.md): inglês, português, seleção pelo
   sistema e inclusão de novos catálogos de tradução.
+- [Transcrição dos originais](docs/transcription.md): Gemini, OpenAI, Deepgram e
+  Whisper, seleção de idioma/provider por origem, perfis próprios e limitações.
 - [Gravação dos originais](docs/recording.md): WAV único, mistura, sincronização
   e limites do gravador.
 - [Dispositivos Linux/macOS/Windows](docs/platforms.md): instalação,
@@ -124,8 +131,8 @@ principal. Permita a captura de microfone ao aplicativo/terminal.
   preparação dos pacotes e requisitos de instalação explícita.
 - [Gemini Live](docs/providers.md): protocolos, modelos, transcrições,
   capacidades e restrições da tradução contínua.
-- [OpenAI e serviços open source](docs/other-providers.md): Realtime Translate,
-  Realtime conversacional, whisper.cpp, Ollama e Piper.
+- [OpenAI, Deepgram e serviços open source](docs/other-providers.md): Realtime
+  Translate, Realtime conversacional, Deepgram STT, whisper.cpp, Ollama e Piper.
 - [Vozes Gemini e ElevenLabs](docs/voices.md): biblioteca, voice design,
   clonagem, seleção por faixa, formatos, requisitos, custos e limites.
 - [Arquitetura, segurança de memória e desempenho](docs/architecture.md).
@@ -135,15 +142,30 @@ principal. Permita a captura de microfone ao aplicativo/terminal.
 
 ## O que está implementado
 
-| Integração | Tradução de áudio | Voz personalizada | Transcrição original |
-|---|---|---|---|
-| Gemini Live Translate | Contínua, áudio para áudio | Preservação automática aproximada; TTS opcional para voz fixa | Sim |
-| Gemini 3.8 Live | Speech-to-speech por turnos/VAD | Voz pronta nativa; TTS opcional | Sim |
-| OpenAI Realtime Translate | Contínua, áudio para áudio | Voz do modelo; TTS opcional | Sim, conforme modelo de transcrição configurado |
-| OpenAI Realtime | Speech-to-speech por turnos/VAD | Voz pronta nativa; TTS opcional | Sim |
-| whisper.cpp + Ollama + Piper | Pipeline local por trechos | Vozes Piper instaladas; TTS de nuvem opcional | Sim, com offsets do trecho capturado |
-| Gemini 3.8 TTS | Síntese do texto traduzido, não tradutor isolado | Vozes prontas, design e clonagem cadastrada | Não se aplica |
-| ElevenLabs | Síntese do texto traduzido, não tradutor isolado | Vozes da biblioteca, design e instant voice clone | Não se aplica |
+| Integração de tradução/voz | Tradução de áudio | Voz personalizada |
+|---|---|---|
+| Gemini Live Translate | Contínua, áudio para áudio | Preservação automática aproximada; TTS opcional para voz fixa |
+| Gemini 3.8 Live | Speech-to-speech por turnos/VAD | Voz pronta nativa; TTS opcional |
+| OpenAI Realtime Translate | Contínua, áudio para áudio | Voz do modelo; TTS opcional |
+| OpenAI Realtime | Speech-to-speech por turnos/VAD | Voz pronta nativa; TTS opcional |
+| whisper.cpp + Ollama + Piper | Pipeline local por trechos | Vozes Piper instaladas; TTS de nuvem opcional |
+| Gemini 3.8 TTS | Síntese do texto traduzido, não tradutor isolado | Vozes prontas, design e clonagem cadastrada |
+| ElevenLabs | Síntese do texto traduzido, não tradutor isolado | Vozes da biblioteca, design e instant voice clone |
+
+Os quatro reconhecedores abaixo produzem o TXT dos originais, com qualquer
+tradutor ou sem tradução. Cada origem escolhe seu próprio provider e idioma.
+
+| Reconhecedor STT | Modelo/caminho padrão | Falantes e tempos |
+|---|---|---|
+| Gemini | `gemini-3.5-transcribe-live` | Sem diarização ou tempos por palavra no streaming |
+| OpenAI | `gpt-live-transcribe` | Sem identificação de falantes ou tempos por palavra no adaptador padrão |
+| Deepgram | Nova-3 via Listen v1 | Diarização configurável e tempos fornecidos nas palavras |
+| Whisper | Servidor whisper.cpp configurado pelo usuário | Offsets dos trechos capturados, sem identificação de falantes |
+
+Perfis de reconhecimento usam `transcription.providers.*`; a escolha e o idioma
+ficam em `transcription.microphone_recognition` e
+`transcription.speaker_recognition`. O texto de entrada do tradutor STS não é
+gravado nem substitui esse reconhecimento. Veja [configuração e exemplos](docs/transcription.md).
 
 A biblioteca permite criar várias vozes, listar os perfis da conta e selecionar
 uma voz para cada direção. O áudio de referência/consentimento é enviado somente
@@ -177,13 +199,15 @@ Gravar os originais não exige um provedor de IA; transcrever exige reconhecimen
 de fala e pode usar nuvem conforme o perfil escolhido.
 Veja [nomes e opções de gravação](docs/configuration.md#arquivos-da-sessão).
 
-Metadados reais de falante, quando fornecidos por um adaptador, são preservados.
-**Diarização estável de participantes dentro de um áudio misturado e cadastramento
-automático de clones nos primeiros segundos não estão implementados.** As APIs
-Live integradas não oferecem essa combinação. Os dois canais de áudio não são
-tratados como identificação das pessoas de uma reunião. Gemini pode aproximar
-as características originais da voz, sem garantir uma identidade distinta por
-participante. Vozes fixas/desenhadas/clonadas são selecionadas explicitamente.
+Deepgram pode atribuir IDs de falante às palavras e o Babel preserva esses
+metadados na transcrição. São rótulos locais da conexão, sujeitos a erros e a
+reinício após reconexão; não são nomes nem identidade persistente entre origens
+ou sessões. **O cadastro automático de clones nos primeiros segundos e sua
+associação aos participantes não estão implementados.** Os dois canais de áudio
+não são tratados como identificação das pessoas de uma reunião. Gemini pode
+aproximar as características originais da voz, sem garantir uma identidade
+vocal distinta por participante. Vozes fixas/desenhadas/clonadas são selecionadas
+explicitamente.
 
 Gemini exige uma amostra de referência de 10–30 segundos e uma gravação de
 consentimento da mesma pessoa para cadastrar um clone. Isso é diferente da

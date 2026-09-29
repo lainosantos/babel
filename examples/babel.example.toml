@@ -92,6 +92,46 @@ speaker = true
 timestamps = true
 directory = "transcripts"
 
+# Original-speech recognition is independent of translation and voices.
+[transcription.microphone_recognition]
+provider = "gemini" # gemini, openai, deepgram or whisper
+language = "auto"
+
+[transcription.speaker_recognition]
+provider = "gemini"
+language = "auto"
+
+[transcription.providers.gemini]
+api_key_env = "GEMINI_API_KEY" # May differ from the translation profile's key.
+endpoint = "wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent"
+model = "gemini-3.5-transcribe-live"
+connect_timeout_secs = 15
+max_reconnect_attempts = 5
+
+[transcription.providers.openai]
+api_key_env = "OPENAI_API_KEY"
+endpoint = "" # Official recognition endpoint; never /translations.
+model = "gpt-live-transcribe"
+connect_timeout_secs = 15
+max_reconnect_attempts = 5
+
+[transcription.providers.deepgram]
+api_key_env = "DEEPGRAM_API_KEY"
+endpoint = "wss://api.deepgram.com/v1/listen"
+model = "nova-3"
+connect_timeout_secs = 15
+max_reconnect_attempts = 3
+diarize = true
+punctuate = true
+
+[transcription.providers.whisper]
+endpoint = "" # Required when selected: use the actual installed server URL.
+api_key_env = "" # Optional bearer credential; never put a secret in this file.
+segment_ms = 2000
+silence_ms = 300
+vad_threshold = 0.01
+request_timeout_secs = 30
+
 [recording]
 enabled = false
 microphone = true

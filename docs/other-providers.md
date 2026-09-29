@@ -1,9 +1,13 @@
-# OpenAI e inferência local
+# OpenAI, Deepgram e inferência local
 
-Cada rota escolhe seu provider independentemente. Por exemplo, o microfone pode
+Cada rota escolhe seu provider de tradução independentemente. Por exemplo, o microfone pode
 usar OpenAI e a saída recebida pode usar a cadeia local. Vozes adicionais e
 ressíntese de texto traduzido estão em [voices.md](voices.md); dispositivos
 selecionáveis em cada sistema estão em [platforms.md](platforms.md).
+A transcrição possui escolhas separadas de provider e idioma por origem e seus
+próprios perfis `transcription.providers.*`. Ela recebe o áudio original, mesmo
+com tradução simultânea, e não grava o texto de entrada emitido pelo STS.
+Consulte [Transcrição: Gemini, OpenAI, Deepgram e Whisper](transcription.md).
 
 ## OpenAI: tradução contínua ou modelo conversacional
 
@@ -25,7 +29,6 @@ Trecho para mesclar ao arquivo TOML existente:
 api_key_env = "OPENAI_API_KEY"
 model = "gpt-realtime-translate"
 endpoint = ""
-transcription_model = ""
 voice = "marin"
 connect_timeout_secs = 15
 max_reconnect_attempts = 5
@@ -69,7 +72,6 @@ Para tradução com instruções e voz nativa:
 model = "gpt-realtime-2.1"
 endpoint = ""
 voice = "marin"
-transcription_model = ""
 
 [microphone]
 provider = "openai"
@@ -86,14 +88,13 @@ anterior automaticamente quando detecta nova fala. Consulte
 [Realtime conversations](https://developers.openai.com/api/docs/guides/realtime-conversations)
 e [WebSockets](https://developers.openai.com/api/docs/guides/voice-websockets?voice-api=realtime).
 
-Com tradução e transcrição habilitadas, `transcription_model = ""` escolhe
-`gpt-realtime-whisper` para tradução dedicada e `gpt-4o-mini-transcribe` para
-Realtime conversacional. Um nome explícito substitui essa seleção. Deltas de
-texto são preservados sem inserir espaços artificiais. `elapsed_ms` da API
-dedicada é registrado como **ponto de alinhamento**, não como tempo exato de
-cada palavra. Limites de fala informados pelo VAD conversacional são usados
-como início/fim quando disponíveis. O adaptador não inventa IDs de falantes.
-Veja os [eventos de servidor](https://developers.openai.com/api/reference/resources/realtime/translation-server-events).
+A sessão de tradução não solicita reconhecimento original para gerar o TXT.
+Seu texto traduzido é usado em memória quando uma voz TTS externa precisa dele.
+Para salvar a fala original, selecione e configure um STT na página
+**Transcrição**, independentemente do modelo de tradução OpenAI. Os campos
+legados `providers.*.transcription_model` não substituem
+`transcription.providers.*.model` depois da migração. Veja o
+[guia de configuração e migração da transcrição](transcription.md).
 
 A conexão só libera captura depois da confirmação de configuração. Reconexões
 têm tentativas limitadas e descartam áudio antigo: não reproduzem a fila acumulada
@@ -104,13 +105,33 @@ A disponibilidade real do modelo exige validação com sua própria conta; os
 [detalhes oficiais do modelo](https://developers.openai.com/api/docs/models/gpt-realtime-translate)
 não garantem acesso para todas as contas.
 
-## OpenAI: somente transcrição
+## OpenAI: transcrição independente
 
-Desligue a tradução da direção (`enabled = false`) e selecione essa origem em
-`transcription`. O áudio original continua passando; o reconhecedor não produz
-tradução nem voz. `providers.openai.transcription_model` vazio escolhe
+Na página **Transcrição**, escolha OpenAI em uma ou nas duas origens. Use o
+perfil `transcription.providers.openai`, cujo modelo padrão é
 `gpt-live-transcribe`. O adaptador também aceita as famílias compatíveis
 `gpt-transcribe` e `gpt-realtime-whisper`, incluindo snapshots datados validados.
+Chave, modelo e endpoint desse perfil não são obtidos do perfil de tradução.
+O áudio original pode continuar passando ou ser traduzido por outro provider;
+o reconhecedor STT produz somente texto original.
+
+```toml
+[transcription.microphone_recognition]
+provider = "openai"
+language = "pt-BR"
+
+[transcription.providers.openai]
+api_key_env = "OPENAI_STT_API_KEY"
+model = "gpt-live-transcribe"
+endpoint = ""
+connect_timeout_secs = 15
+max_reconnect_attempts = 5
+```
+
+Ative `transcription.enabled` e selecione as origens que deseja guardar.
+`transcription.speaker_recognition` configura separadamente o áudio recebido;
+os perfis STT podem compartilhar a mesma chave por opção, sem compartilhar suas
+configurações com a tradução.
 
 O endpoint vazio seleciona `/realtime?intent=transcription`. Um endpoint explícito
 que termina em `/translations` é rejeitado nesse modo. O adaptador usa sessão
@@ -119,8 +140,8 @@ O idioma de origem é encaminhado conforme o contrato do modelo; destino, voz e
 prompt de tradução não são enviados. Consulte a
 [documentação oficial de Realtime transcription](https://developers.openai.com/api/docs/guides/realtime-transcription).
 
-O Babel detecta pausas localmente com limiar RMS de 0,01 e duração de silêncio do
-perfil de qualidade; também fecha trechos de até dez segundos. Registra somente
+O Babel detecta pausas localmente com limiar RMS de 0,01 e silêncio de 400 ms
+no adaptador STT; também fecha trechos de até dez segundos. Registra somente
 resultados finais, associados aos commits por `item_id`, com no máximo 64 itens
 pendentes para reordenação. Esse ordenamento por direção não sincroniza as falas
 das duas conexões. O modelo padrão não fornece diarização nem tempos por palavra.
@@ -130,6 +151,30 @@ frase ainda não finalizada. Aguarde uma pausa curta e o resultado final antes d
 encerrar; resultados já recebidos são drenados para o TXT. Para conservar a
 captura original independentemente da resposta do reconhecedor, a gravação WAV
 pode ser habilitada separadamente.
+
+## Deepgram: transcrição contínua dos originais
+
+Selecione `deepgram` no reconhecimento de cada origem desejada e configure
+`transcription.providers.deepgram`. O padrão é Nova-3 no endpoint WebSocket
+`wss://api.deepgram.com/v1/listen`; a chave usa `DEEPGRAM_API_KEY` por padrão e
+segue no cabeçalho `Authorization: Token …`, nunca na URL.
+
+A entrada é PCM16 mono a 16 kHz. O adaptador registra resultados finais, sem
+hipóteses parciais, e não produz tradução ou voz. A opção `diarize` habilita o
+diarizador streaming v1 (`diarize_model=v1`); palavras consecutivas com o mesmo
+ID de falante são agrupadas, preservando pontuação e tempos fornecidos pela
+Deepgram. IDs são rótulos da conexão, não nomes nem identificação persistente
+das pessoas. A opção `punctuate` controla pontuação.
+
+`language = "auto"` seleciona o modo `multi` dos modelos gerais Nova-2/Nova-3.
+Esse modo cobre o conjunto multilíngue do modelo, não todas as línguas disponíveis
+isoladamente. Flux usa outro protocolo e não é aceito por este adaptador.
+Reconexões têm orçamento limitado e descartam áudio acumulado; rótulos de falante
+e offsets podem reiniciar. Keepalive mantém a conexão durante silêncio sem
+inventar áudio ou avançar seus timestamps. Veja a [configuração completa](transcription.md),
+o [contrato Listen v1](https://developers.deepgram.com/reference/speech-to-text/listen-streaming),
+[diarização](https://developers.deepgram.com/docs/diarization) e
+[modo multilíngue](https://developers.deepgram.com/docs/multilingual-code-switching).
 
 ## Provider local: whisper.cpp → Ollama → Piper
 
@@ -144,8 +189,9 @@ O provider `local` é uma implementação funcional de três chamadas HTTP locai
 Essa cadeia tem latência de segmentação, reconhecimento, tradução e síntese.
 Ela não preserva automaticamente a voz original, não clona vozes e não faz
 diarização. Os segmentos podem cortar uma frase longa no limite configurado.
-Os timestamps da transcrição original correspondem aos segmentos efetivamente
-capturados; não são alinhamento de palavras. A tradução tem um ponto de
+Os offsets do reconhecimento interno dessa cadeia correspondem aos segmentos
+capturados, não a palavras. Esse texto intermediário não alimenta o TXT; para
+gravar uma transcrição, configure o reconhecedor STT independente. A tradução tem um ponto de
 alinhamento ao segmento de origem, sem duração inventada de fala sintetizada.
 
 Os serviços e pesos são instalados separadamente. O Babel não baixa modelos
@@ -153,14 +199,22 @@ silenciosamente. Após baixar os arquivos necessários, os endpoints de loopback
 não precisam de chave de nuvem. Se você mudar um endpoint para um servidor
 HTTPS remoto, áudio/texto passam a ser enviados a esse servidor.
 
-### Local: somente transcrição
+### Whisper: transcrição independente
 
-Com tradução desligada e transcrição ligada, o mesmo perfil local chama apenas
-Whisper com `translate=false`, preservando o idioma original. Ollama, Piper e o
-modelo de tradução não precisam estar configurados nem em execução. A seleção
-de fontes para TXT/WAV é independente das flags de tradução. A segmentação local
-e seus limites continuam valendo; encerrar a sessão cancela segmentos ainda em
-reconhecimento, enquanto resultados finais já entregues são gravados.
+Escolha `whisper` na página **Transcrição** e configure
+`transcription.providers.whisper`, incluindo seu endpoint HTTP explícito.
+O adaptador envia `translate=false` e reconhece os originais sem Ollama, Piper,
+modelo de tradução ou perfil `providers.local`. O idioma de cada origem pertence
+a `transcription.microphone_recognition.language` ou
+`transcription.speaker_recognition.language`.
+
+O STT funciona com qualquer tradutor ou com tradução desligada. Mesmo quando
+Whisper participa da cadeia local de tradução, o STT é uma tarefa independente;
+apontar ambos para o mesmo servidor aumenta a carga de inferência. A segmentação
+do STT tem seus próprios limites, e seus tempos representam segmentos capturados,
+não palavras ou falantes. Encerrar a sessão cancela segmentos ainda em
+reconhecimento; resultados finais já entregues são gravados. Veja os campos,
+a autenticação opcional e os exemplos no [guia de transcrição](transcription.md).
 
 ### Pré-requisitos por sistema
 
@@ -352,12 +406,15 @@ você efetivamente selecionar para distribuir um produto.
 
 ```sh
 cargo test --lib provider::openai
+cargo test --lib provider::deepgram
 cargo test --lib provider::local
 ```
 
 Os testes usam um WebSocket e servidores HTTP locais reais como mocks: verificam
 a confirmação de sessão antes do áudio, os dois protocolos OpenAI, PCM, texto,
 alinhamento, multipart WAV, cadeia de tradução/síntese, limites, cancelamento e
-saturação. Eles não medem qualidade de modelos. Os testes não enviam voz para
+saturação. Deepgram também tem mocks para autenticação, frames PCM, finais,
+diarização, timestamps, keepalive, descarte da fila antiga e reconexão. Esses
+testes não medem qualidade de modelos. Os testes não enviam voz para
 nuvem e não usam chaves reais. Faça uma avaliação com áudio e idiomas de seu uso
 após configurar credenciais ou instalar e iniciar os serviços locais.

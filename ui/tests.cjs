@@ -14,7 +14,14 @@ function defaults() {
     providers: { gemini: cloud(), openai: cloud({ api_key_env: 'OPENAI_API_KEY', endpoint: '', model: 'gpt-realtime-translate', voice: 'marin', tts_model: '' }), elevenlabs: cloud({ api_key_env: 'ELEVENLABS_API_KEY', endpoint: 'https://api.elevenlabs.io/v1', model: 'eleven_flash_v2_5', voice: '', tts_model: 'eleven_flash_v2_5' }), local: { whisper_endpoint: 'http://127.0.0.1:8080/inference', ollama_endpoint: 'http://127.0.0.1:11434/api/chat', translation_model: 'qwen3:4b', piper_endpoint: 'http://127.0.0.1:5000/synthesize', piper_voice: '', segment_ms: 2000, silence_ms: 300, vad_threshold: 0.01, request_timeout_secs: 30 } },
     audio: { quality: 'balanced', capture_queue_ms: 200, playback_queue_ms: 2000, max_capture_age_ms: 200, device_latency_ms: 30 },
     microphone: route(), speaker: route({ capture_device: 'babel_speaker.monitor', playback_device: 'physical-speaker', source_language: 'en-US', target_language: 'pt-BR' }),
-    transcription: { enabled: false, microphone: true, speaker: true, timestamps: true, directory: 'transcripts' },
+    transcription: { enabled: false, microphone: true, speaker: true, timestamps: true, directory: 'transcripts',
+      microphone_recognition: { provider: 'gemini', language: 'auto' }, speaker_recognition: { provider: 'gemini', language: 'auto' },
+      providers: {
+        gemini: { api_key_env: 'GEMINI_API_KEY', endpoint: cloud().endpoint, model: 'gemini-3.5-transcribe-live', connect_timeout_secs: 15, max_reconnect_attempts: 5 },
+        openai: { api_key_env: 'OPENAI_API_KEY', endpoint: '', model: 'gpt-live-transcribe', connect_timeout_secs: 15, max_reconnect_attempts: 5 },
+        deepgram: { api_key_env: 'DEEPGRAM_API_KEY', endpoint: 'wss://api.deepgram.com/v1/listen', model: 'nova-3', connect_timeout_secs: 15, max_reconnect_attempts: 3, diarize: true, punctuate: true },
+        whisper: { endpoint: '', api_key_env: '', segment_ms: 2000, silence_ms: 300, vad_threshold: 0.01, request_timeout_secs: 30 },
+      } },
     files: { base_path: '/home/test/Babel', name_pattern: '{date}-{time}-{session}-{id}' },
     recording: { enabled: false, microphone: true, speaker: true, directory: 'recordings' },
   };
@@ -123,7 +130,7 @@ test('the real dashboard separates routing, translation, transcription and recor
   const groups = {
     routing: ['microphone-capture_device', 'microphone-playback_device', 'speaker-capture_device', 'speaker-playback_device', 'microphone-input', 'speaker-output', 'microphone-state', 'speaker-state', 'microphone-signal', 'speaker-signal', 'audio-quality'],
     translation: ['microphone-enabled', 'speaker-enabled', 'microphone-source_language', 'speaker-target_language', 'microphone-provider', 'speaker-provider', 'microphone-prompt', 'speaker-prompt', 'microphone-voice-engine', 'speaker-voice-voice_id', 'microphone-gain', 'speaker-gain', 'profile-selector', 'credential-gemini'],
-    transcription: ['transcription-enabled', 'transcription-microphone', 'transcription-speaker', 'transcription-timestamps', 'transcription-directory', 'microphone-transcripts', 'speaker-transcripts'],
+    transcription: ['transcription-enabled', 'transcription-microphone', 'transcription-speaker', 'transcription-timestamps', 'transcription-directory', 'microphone-transcripts', 'speaker-transcripts', 'stt-microphone-provider', 'stt-speaker-language', 'stt-profile-selector', 'stt-profile-deepgram-model', 'stt-profile-whisper-endpoint', 'stt-credential-gemini'],
     recording: ['recording-enabled', 'recording-microphone', 'recording-speaker', 'recording-directory'],
     settings: ['files-base_path', 'files-name_pattern', 'files-path-preview'],
   };
@@ -458,7 +465,7 @@ test('recording and original transcription save independently with one shared fi
   p.set('transcription-directory', 'texto-original');
   p.byId('save').click();
   await settle(() => p.config().transcription.enabled);
-  assert.deepEqual(p.config().transcription, { enabled: true, microphone: false, speaker: true, timestamps: true, directory: 'texto-original' });
+  assert.deepEqual(p.config().transcription, { ...defaults().transcription, enabled: true, microphone: false, speaker: true, timestamps: true, directory: 'texto-original' });
   assert.equal(p.config().recording.microphone, true);
   assert.equal(p.config().recording.speaker, false);
   assert.equal(p.doc.querySelector('.transcription-settings').textContent.includes('um único .txt'), true);
@@ -733,18 +740,19 @@ test('transcription sources and ASR models remain selectable with both translati
   p.set('transcription-enabled', true);
   p.set('transcription-microphone', true);
   p.set('transcription-speaker', true);
-  p.set('profile-gemini-transcription_model', 'fixture-asr-model');
+  p.set('stt-profile-gemini-model', 'fixture-asr-model');
   assert.equal(p.byId('transcription-microphone').disabled, false);
   assert.equal(p.byId('transcription-speaker').disabled, false);
   assert.equal(p.byId('microphone-source_language').disabled, false);
   assert.equal(p.byId('speaker-source_language').disabled, false);
-  assert.equal(p.byId('profile-gemini-transcription_model').closest('label').hidden, false);
+  assert.equal(p.byId('profile-gemini-transcription_model').closest('label').hidden, true);
   assert.equal(p.byId('footer-state').textContent, 'Sessão configurada com provedores de nuvem');
   p.byId('start').click();
   await settle(() => !p.byId('stop').hidden);
   assert.equal(p.config().recording.enabled, false);
   assert.equal(p.config().transcription.enabled, true);
-  assert.equal(p.config().providers.gemini.transcription_model, 'fixture-asr-model');
+  assert.equal(p.config().transcription.providers.gemini.model, 'fixture-asr-model');
+  assert.equal(p.config().providers.gemini.transcription_model, '');
   assert.equal(p.byId('speaker-output-label').textContent, 'Original');
 });
 
@@ -1150,4 +1158,186 @@ test('native guide hides when host metadata fails and recovers without reinstall
   assert.equal(guide.open, true);
   assert.equal(p.byId('speaker-target_language').value, 'ja-JP');
   assert.equal(p.calls.some(call => call.path.startsWith('/api/virtual/')), false);
+});
+
+test('recognizers, languages and STT profiles save independently from translation and voices', async t => {
+  const p = await page(t, { initialChange: cfg => { cfg.providers.openai.transcription_model = 'legacy-sts-recognition'; } });
+  p.set('transcription-enabled', true);
+  p.set('stt-microphone-provider', 'deepgram');
+  p.set('stt-microphone-language', 'pt-BR');
+  p.set('stt-speaker-provider', 'whisper');
+  p.set('stt-speaker-language', 'en-US');
+  p.set('stt-profile-deepgram-model', 'nova-3-fixture');
+  p.set('stt-profile-deepgram-diarize', true);
+  p.set('stt-profile-deepgram-punctuate', false);
+  p.set('stt-profile-whisper-endpoint', 'http://127.0.0.1:43219/inference');
+  p.set('microphone-provider', 'openai');
+  p.set('microphone-source_language', 'fr');
+  p.set('speaker-provider', 'local');
+  p.set('speaker-voice-engine', 'elevenlabs');
+  p.set('speaker-voice-voice_id', 'independent-voice');
+  assert.equal(p.byId('stt-microphone-provider').value, 'deepgram');
+  assert.equal(p.byId('stt-microphone-language').value, 'pt-BR');
+  assert.deepEqual([...p.byId('stt-microphone-provider').options].map(o => o.value), ['gemini','openai','deepgram','whisper']);
+  p.byId('save').click();
+  await settle(() => p.calls.some(c => c.path === '/api/config' && c.options.method === 'PUT'));
+  const cfg = p.config();
+  assert.deepEqual(cfg.transcription.microphone_recognition, { provider: 'deepgram', language: 'pt-BR' });
+  assert.deepEqual(cfg.transcription.speaker_recognition, { provider: 'whisper', language: 'en-US' });
+  assert.equal(cfg.transcription.providers.deepgram.model, 'nova-3-fixture');
+  assert.equal(cfg.transcription.providers.deepgram.diarize, true);
+  assert.equal(cfg.transcription.providers.deepgram.punctuate, false);
+  assert.equal(cfg.microphone.provider, 'openai');
+  assert.equal(cfg.speaker.provider, 'local');
+  assert.equal(cfg.speaker.voice.voice_id, 'independent-voice');
+  assert.equal(cfg.providers.openai.transcription_model, 'legacy-sts-recognition');
+  assert.equal(cfg.providers.gemini.model, 'gemini-3.5-live-translate-preview');
+  assert.equal(cfg.transcription.providers.gemini.model, 'gemini-3.5-transcribe-live');
+  assert.equal(p.byId('profile-openai-transcription_model').closest('label').hidden, true);
+  assert.equal(p.calls.some(c => ['/api/start','/api/voices'].includes(c.path)), false);
+});
+
+test('STT credentials use their own profile name and never enter saved settings', async t => {
+  const p = await page(t);
+  p.set('profile-gemini-api_key_env', 'TRANSLATION_GEMINI_KEY');
+  p.set('stt-profile-gemini-api_key_env', 'TRANSCRIPTION_GEMINI_KEY');
+  p.byId('credential-gemini').value = 'translation-fixture-secret';
+  p.doc.querySelector('.credential-apply[data-provider="gemini"]').click();
+  await settle(() => p.calls.some(c => c.path === '/api/credentials' && c.body?.api_key_env === 'TRANSLATION_GEMINI_KEY'));
+  await settle(() => !p.byId('settings').disabled);
+  p.byId('stt-credential-gemini').value = 'transcription-fixture-secret';
+  p.doc.querySelector('.stt-credential-apply[data-provider="gemini"]').click();
+  await settle(() => p.calls.some(c => c.path === '/api/credentials' && c.body?.api_key_env === 'TRANSCRIPTION_GEMINI_KEY'));
+  await settle(() => !p.byId('settings').disabled);
+  assert.equal(p.byId('stt-credential-gemini').value, '');
+  const applied = p.calls.filter(c => c.path === '/api/credentials' && c.options.method === 'POST');
+  assert.deepEqual(applied.map(c => c.body), [{ api_key_env: 'TRANSLATION_GEMINI_KEY', key: 'translation-fixture-secret' }, { api_key_env: 'TRANSCRIPTION_GEMINI_KEY', key: 'transcription-fixture-secret' }]);
+  p.byId('save').click();
+  await settle(() => p.calls.some(c => c.path === '/api/config' && c.options.method === 'PUT'));
+  assert.equal(p.config().transcription.providers.gemini.api_key_env, 'TRANSCRIPTION_GEMINI_KEY');
+  assert.equal(p.config().providers.gemini.api_key_env, 'TRANSLATION_GEMINI_KEY');
+  assert.doesNotMatch(JSON.stringify(p.config()), /fixture-secret/);
+  await settle(() => !p.byId('settings').disabled);
+  p.doc.querySelector('.stt-credential-clear[data-provider="gemini"]').click();
+  await settle(() => p.calls.some(c => c.path === '/api/credentials/clear'));
+  assert.deepEqual(p.calls.find(c => c.path === '/api/credentials/clear').body, { api_key_env: 'TRANSCRIPTION_GEMINI_KEY' });
+});
+
+test('STT validation reveals the correct profile without changing the translation profile selector', async t => {
+  const p = await page(t);
+  p.set('profile-selector', 'openai');
+  p.byId('profile-selector').dispatchEvent(new p.window.Event('change', { bubbles: true }));
+  p.set('profile-openai-model', 'my-sts-draft');
+  p.set('transcription-enabled', true);
+  p.set('transcription-speaker', false);
+  p.set('stt-microphone-provider', 'deepgram');
+  p.set('stt-profile-deepgram-model', '');
+  p.byId('nav-translation').click();
+  p.byId('save').click();
+  assert.equal(p.window.BabelWorkspace.current, 'transcription');
+  assert.equal(p.byId('stt-profile-selector').value, 'deepgram');
+  assert.equal(p.byId('stt-profile-deepgram').hidden, false);
+  assert.equal(p.doc.activeElement, p.byId('stt-profile-deepgram-model'));
+  assert.equal(p.byId('profile-selector').value, 'openai');
+  assert.equal(p.byId('profile-openai-model').value, 'my-sts-draft');
+  assert.equal(p.calls.some(c => c.path === '/api/config' && c.options.method === 'PUT'), false);
+  p.set('stt-profile-deepgram-model', 'nova-3');
+  p.byId('save').click();
+  await settle(() => p.calls.some(c => c.path === '/api/config' && c.options.method === 'PUT'));
+});
+
+test('Whisper transcription has no assumed port and requires an endpoint only when a selected source uses it', async t => {
+  const p = await page(t);
+  p.set('microphone-enabled', false);
+  p.set('speaker-enabled', false);
+  p.set('recording-enabled', true);
+  p.set('stt-microphone-provider', 'whisper');
+  assert.equal(p.byId('stt-profile-whisper-endpoint').value, '');
+  assert.equal(p.byId('stt-profile-whisper-endpoint').required, false);
+  assert.equal(p.byId('stt-microphone-language').disabled, false);
+  p.byId('save').click();
+  await settle(() => p.calls.some(c => c.path === '/api/config' && c.options.method === 'PUT'));
+  await settle(() => !p.byId('settings').disabled);
+  p.set('transcription-enabled', true);
+  p.set('transcription-speaker', false);
+  p.byId('start').click();
+  assert.equal(p.window.BabelWorkspace.current, 'transcription');
+  assert.equal(p.byId('stt-profile-selector').value, 'whisper');
+  assert.equal(p.doc.activeElement, p.byId('stt-profile-whisper-endpoint'));
+  assert.equal(p.calls.some(c => c.path === '/api/start'), false);
+  p.set('stt-profile-whisper-endpoint', 'http://127.0.0.1:41921/inference');
+  p.byId('start').click();
+  await settle(() => !p.byId('stop').hidden);
+  assert.equal(p.config().transcription.microphone_recognition.provider, 'whisper');
+  assert.equal(p.config().transcription.providers.whisper.endpoint, 'http://127.0.0.1:41921/inference');
+  assert.equal(p.config().providers.local.whisper_endpoint, defaults().providers.local.whisper_endpoint);
+  assert.equal(p.byId('stt-microphone-provider').matches(':disabled'), true);
+});
+
+test('STT validation accepts exact segment values and reveals language and timing errors in source order', async t => {
+  const p = await page(t);
+  p.set('transcription-enabled', true); p.set('transcription-speaker', false);
+  p.set('stt-microphone-provider', 'whisper');
+  p.set('stt-profile-whisper-endpoint', 'http://127.0.0.1:49213/inference');
+  p.set('stt-profile-whisper-segment_ms', 1234);
+  p.set('stt-profile-whisper-silence_ms', 1234);
+  p.set('stt-profile-whisper-vad_threshold', 0.01234);
+  p.set('stt-microphone-language', 'bad language');
+  p.byId('nav-settings').click();
+  p.byId('configuration').requestSubmit();
+  assert.equal(p.window.BabelWorkspace.current, 'transcription');
+  assert.equal(p.doc.activeElement, p.byId('stt-microphone-language'));
+  assert.equal(p.calls.some(c => c.path === '/api/config' && c.options.method === 'PUT'), false);
+  p.set('stt-microphone-language', 'pt-BR');
+  p.byId('save').click();
+  assert.equal(p.doc.activeElement, p.byId('stt-profile-whisper-silence_ms'));
+  assert.equal(p.byId('stt-profile-selector').value, 'whisper');
+  assert.equal(p.byId('stt-profile-whisper-silence_ms').validationMessage, p.window.BabelI18n.t('stt.silence_shorter'));
+  p.set('stt-profile-whisper-silence_ms', 321);
+  p.set('stt-profile-whisper-request_timeout_secs', '');
+  p.byId('save').click();
+  assert.equal(p.doc.activeElement, p.byId('stt-profile-whisper-request_timeout_secs'));
+  p.set('stt-profile-whisper-request_timeout_secs', 25);
+  p.byId('save').click();
+  await settle(() => p.calls.some(c => c.path === '/api/config' && c.options.method === 'PUT'));
+  assert.deepEqual(p.config().transcription.providers.whisper, { endpoint: 'http://127.0.0.1:49213/inference', api_key_env: '', segment_ms: 1234, silence_ms: 321, vad_threshold: 0.01234, request_timeout_secs: 25 });
+});
+
+test('processing summary uses the independent STT selection and ignores disabled translator profiles', async t => {
+  const p = await page(t);
+  p.set('microphone-enabled', false); p.set('speaker-enabled', false);
+  p.set('transcription-enabled', true); p.set('transcription-speaker', false);
+  p.set('stt-microphone-provider', 'deepgram');
+  assert.equal(p.byId('footer-state').textContent, p.window.BabelI18n.t('ui.session_configured_with_cloud_providers'));
+  p.set('stt-microphone-provider', 'whisper');
+  assert.equal(p.byId('footer-state').textContent, p.window.BabelI18n.t('ui.session_configured_for_local_processing'));
+  p.set('microphone-provider', 'openai');
+  assert.equal(p.byId('footer-state').textContent, p.window.BabelI18n.t('ui.session_configured_for_local_processing'));
+  p.set('microphone-enabled', true);
+  assert.equal(p.byId('footer-state').textContent, p.window.BabelI18n.t('ui.session_configured_with_cloud_providers'));
+});
+
+test('STT shortcuts, languages and unsaved secrets survive workspace and interface changes', async t => {
+  const p = await page(t);
+  p.set('stt-microphone-provider', 'deepgram');
+  p.set('stt-microphone-language', 'fr-CA');
+  p.set('stt-profile-deepgram-model', 'draft-model');
+  p.set('stt-profile-deepgram-api_key_env', 'MY_DEEPGRAM_STT');
+  p.byId('stt-credential-deepgram').value = 'unsaved-secret';
+  const node = p.byId('stt-profile-deepgram-model');
+  p.byId('nav-transcription').click();
+  p.doc.querySelector('[data-stt-route-profile="microphone"]').click();
+  assert.equal(p.byId('stt-profile-selector').value, 'deepgram');
+  assert.equal(p.doc.activeElement, node);
+  for (const view of ['translation','recording','settings','transcription']) p.byId(`nav-${view}`).click();
+  await p.window.BabelI18n.setLanguage('en');
+  p.window.dispatchEvent(new p.window.CustomEvent('babel:languagechange'));
+  assert.equal(p.byId('stt-profile-deepgram-model'), node);
+  assert.equal(node.value, 'draft-model');
+  assert.equal(p.byId('stt-microphone-language').value, 'fr-CA');
+  assert.equal(p.byId('stt-credential-deepgram').value, 'unsaved-secret');
+  assert.equal(p.byId('stt-profile-deepgram-api_key_env').value, 'MY_DEEPGRAM_STT');
+  assert.equal(p.byId('stt-provider-title').textContent, 'Transcription providers');
+  assert.equal(p.byId('stt-profile-selector').value, 'deepgram');
+  assert.equal(p.calls.some(c => c.options.method === 'PUT' || ['/api/start','/api/stop'].includes(c.path)), false);
 });

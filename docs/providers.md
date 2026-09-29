@@ -1,10 +1,12 @@
 # Provedores de fala
 
-O `SpeechProvider` recebe PCM16 mono de 16 kHz em um canal limitado e devolve eventos de texto e, nos tradutores, PCM16 mono de 24 kHz. Cada direção que usa IA tem sua própria sessão. A passagem original e a gravação sem transcrição/tradução não abrem provedores. Rede, JSON, Base64 e IA ficam fora dos callbacks de áudio. Para adicionar um provedor, implemente o trait e registre sua factory.
+O `SpeechProvider` recebe PCM16 mono de 16 kHz em um canal limitado e devolve eventos de texto e, nos tradutores, PCM16 mono de 24 kHz. Cada direção mantém sessões independentes para tradução (STS) e transcrição (STT), quando esses recursos estão habilitados. A passagem original e a gravação sem transcrição/tradução não abrem provedores. Rede, JSON, Base64 e IA ficam fora dos callbacks de áudio. Para adicionar um provedor, implemente o trait e registre sua factory.
 
 ## Perfis e escolha por direção
 
-`providers.gemini`, `providers.openai`, `providers.elevenlabs` e `providers.local` guardam configurações independentes. `microphone.provider` e `speaker.provider` selecionam o tradutor de cada direção; `voice.engine` seleciona áudio nativo ou outro sintetizador. ElevenLabs participa como sintetizador, sem um endpoint speech-to-speech de tradução neste aplicativo. Chaves ficam na memória da sessão ou no ambiente; o TOML guarda somente o nome da credencial. Leia [configuração e operação](configuration.md), [OpenAI e pipeline local](other-providers.md) e [biblioteca de vozes](voices.md).
+`providers.gemini`, `providers.openai`, `providers.elevenlabs` e `providers.local` guardam configurações independentes. `microphone.provider` e `speaker.provider` selecionam o tradutor de cada direção; `voice.engine` seleciona áudio nativo ou outro sintetizador. ElevenLabs participa como sintetizador, sem um endpoint speech-to-speech de tradução neste aplicativo. Chaves ficam na memória da sessão ou no ambiente; o TOML guarda somente o nome da credencial. Os reconhecedores usam outros perfis: `transcription.providers.gemini`, `.openai`, `.deepgram` e `.whisper`. `transcription.microphone_recognition` e `transcription.speaker_recognition` escolhem separadamente o provider e o idioma da fala original de cada origem, sem herdar `microphone.provider`, `speaker.provider` ou seus idiomas. O TXT recebe somente resultados do STT dedicado, mesmo quando há tradução simultânea. Textos de entrada emitidos pelo tradutor não são gravados.
+
+Leia [transcrição independente e seus quatro providers](transcription.md), [configuração e operação](configuration.md), [OpenAI e pipeline local](other-providers.md) e [biblioteca de vozes](voices.md).
 
 ## Gemini
 
@@ -23,16 +25,20 @@ No modo contínuo, prompts não vazios causam erro de configuração. Não há e
 
 A API recebe áudio binário PCM little-endian codificado em Base64, em `realtimeInput.audio`. A entrada começa somente depois de `setupComplete`. O motor usa quadros de 100 ms no modo de tradução contínua. A resposta pode trazer diversos fragmentos de áudio no mesmo evento; todos são processados. O resultado é reproduzido ao chegar, sem aguardar `turnComplete`. Esse evento serve somente para sinalizar o encerramento de uma geração aos consumidores.
 
-As opções `input_transcription` e `output_transcription` da abstração são independentes e usam os campos de transcrição de `BidiGenerateContentSetup`. Quando a transcrição original está habilitada para uma direção, o aplicativo solicita a entrada: a fala original do microfone físico ou a fala original recebida pela saída virtual. Com voz TTS personalizada, solicita também a transcrição da tradução, mantida somente em memória para síntese. Apenas as falas originais são salvas. Fragmentos mantêm espaços e conteúdo exatamente como recebidos; o motor decide quando e onde gravá-los.
+Na sessão de tradução, o motor desliga `input_transcription`: o texto de entrada do STS não é usado para o TXT. Com voz TTS personalizada, solicita `output_transcription`, que permanece em memória para sintetizar a tradução. O reconhecimento original usa uma sessão STT separada, alimentada pelo mesmo áudio original da origem selecionada. Ativar ou mudar a transcrição não troca o provider, modelo, idioma ou voz da tradução.
 
 ## Gemini: transcrição independente
 
-Com a tradução da faixa desligada e sua transcrição ligada, o Babel usa somente
-ASR. `providers.gemini.transcription_model` vazio seleciona
-`gemini-3.5-transcribe-live`; também é possível informar esse identificador
-explicitamente. A configuração solicita `TEXT` e modo `VERBATIM`, sem voz,
-idioma de destino ou prompt de tradução. `source_language` aceita BCP-47 ou
-`auto`. O modelo recebe PCM16 mono a 16 kHz e fornece texto original final.
+Na página **Transcrição**, selecione Gemini para o microfone, para a saída ou
+para ambos. `transcription.providers.gemini.model` usa
+`gemini-3.5-transcribe-live`; chave, endpoint fixo e limites pertencem a esse
+perfil STT. Os campos `transcription.microphone_recognition.language` e
+`transcription.speaker_recognition.language` aceitam BCP-47 ou `auto`.
+A sessão solicita `TEXT` e modo `VERBATIM`, sem voz, idioma de destino ou prompt
+de tradução. Recebe PCM16 mono a 16 kHz e fornece texto original final.
+Esse percurso funciona tanto com tradução desligada quanto junto a qualquer
+tradutor. O campo legado `providers.gemini.transcription_model` não controla
+o novo perfil em execução; veja a [configuração e migração do STT](transcription.md).
 Veja o [guia oficial de Live Transcribe](https://ai.google.dev/gemini-api/docs/live-api/live-transcribe).
 
 O adaptador ignora hipóteses parciais para não duplicar conteúdo no TXT. A sessão
@@ -54,13 +60,13 @@ A existência de `diarization` e `wordTimestamp` no schema compartilhado de `Aud
 
 A abstração preserva metadados autênticos quando presentes: `speakerLabel` e os offsets da primeira/última palavra de `words` são expostos por `TranscriptMetadata`. IDs e listas têm limites; durações inválidas, negativas ou com overflow são rejeitadas. Campos ausentes continuam ausentes. Esses offsets são relativos ao áudio da sessão do provedor e podem reiniciar após reconexão. Essa compatibilidade com o schema do [SDK oficial](https://github.com/googleapis/python-genai/blob/main/google/genai/types.py#L2051) não ativa diarização nos modelos atuais.
 
-`provider::capabilities(model)` declara apenas recursos confirmados para os modelos conhecidos. Gemini Live Translate informa tradução contínua e preservação vocal automática de melhor esforço; os modelos 3.8 Live informam voz fixa e prompts. OpenAI `gpt-realtime-translate` informa tradução contínua e `gpt-realtime-2.1` informa voz fixa e prompts, incluindo snapshots dessas famílias com sufixo de data válido. O catálogo não atribui preservação vocal automática ao OpenAI. Diarização, timestamps por palavra e cadastro de voz permanecem `false`: a biblioteca de vozes é um fluxo separado. Famílias desconhecidas e sufixos não reconhecidos não anunciam capacidades presumidas.
+`provider::capabilities(model)` descreve os modelos de tradução, declarando apenas recursos confirmados para as famílias conhecidas. Gemini Live Translate informa tradução contínua e preservação vocal automática de melhor esforço; os modelos 3.8 Live informam voz fixa e prompts. OpenAI `gpt-realtime-translate` informa tradução contínua e `gpt-realtime-2.1` informa voz fixa e prompts, incluindo snapshots dessas famílias com sufixo de data válido. O catálogo não atribui preservação vocal automática ao OpenAI. Nesse catálogo de tradução, diarização, timestamps por palavra e cadastro de voz permanecem `false`: a biblioteca de vozes e os reconhecedores STT são fluxos separados. O STT Deepgram, por exemplo, pode fornecer rótulos reais de falante e tempos das palavras sem que o tradutor ofereça esses recursos. Famílias desconhecidas e sufixos não reconhecidos não anunciam capacidades presumidas.
 
 Marcações geradas pelo aplicativo a partir do relógio local indicam quando o texto foi recebido, incluindo o atraso da rede/IA. Não são o início de cada palavra no áudio. A documentação Live cita tempos de enunciados, mas a referência WebSocket pública não especifica esses offsets para Live Translate; o recebimento desses metadados não é garantido.
 
 O Babel implementa uma biblioteca separada de design/clonagem e síntese com Gemini 3.8 Flash TTS ou ElevenLabs. No Gemini, o cadastro aceita 10–30 segundos de referência e uma gravação específica de consentimento da mesma pessoa, retornando um perfil reutilizável. Esse TTS recebe texto e não utiliza a Live API. O adaptador `revoice` mantém a tradução ativa, descarta seu áudio nativo e sintetiza o texto traduzido em blocos pela voz selecionada; portanto acrescenta requisições, latência e custo. Cada direção seleciona seu perfil, sem atribuir automaticamente clones a pessoas de uma chamada misturada. O caminho direto continua disponível para priorizar tradução contínua. Veja [biblioteca, requisitos e exemplos](voices.md), [Voice replication](https://ai.google.dev/gemini-api/docs/voice-replication) e [modelo TTS](https://ai.google.dev/gemini-api/docs/models/gemini-3.8-flash-tts).
 
-## Limites e recuperação
+## Limites e recuperação do Gemini
 
 - Mensagens WebSocket: até 512 KiB; fragmento PCM de saída: até 48.000 bytes (um segundo); entrada: até 16.000 amostras por envio. MIME, frequência, canais, Base64 e comprimento par de PCM16 são validados.
 - Envio de áudio: prazo de 500 ms. Eventos de reprodução: prazo de dois segundos. Filas e buffers de rede são limitados. Congestionamento prolongado encerra a sessão, em vez de consumir memória sem limite.
@@ -77,7 +83,7 @@ percurso funciona sem sessão enquanto um aplicativo usa o dispositivo virtual;
 também permanece disponível durante uma sessão de gravação. Não há um provedor
 de diagnóstico para selecionar, e roteamento e gravação, com transcrição e
 tradução desligadas, não abrem conexões de IA nem exigem chave. A transcrição
-independente usa reconhecimento de fala do perfil escolhido para aquela direção.
+independente usa o perfil `transcription.providers.*` escolhido para cada origem, mesmo que a tradução dessa direção esteja ativa. Gemini, OpenAI, Deepgram e Whisper estão descritos no [guia de transcrição](transcription.md).
 
 Os testes usam um servidor WebSocket local com credencial fictícia: barreira de setup, PCM little-endian, múltiplos fragmentos, transcrições, cancelamento, retomada de sessão, orçamento de retries, erros sanitizados e EOF de captura. Eles não comprovam autorização da conta nem a qualidade real da tradução; isso exige uma chave válida e áudio real.
 

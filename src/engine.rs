@@ -879,7 +879,8 @@ async fn run_route(
         }
     }
     let translating = route.enabled;
-    let needs_provider = translating || transcript_tx.is_some();
+    let transcribing = transcript_tx.is_some();
+    let needs_provider = translating || transcribing;
     let frame_ms = cfg.capture_frame_ms(&route);
     let capture_rate = if translating { INPUT_RATE } else { 48_000 };
     let playback_rate = if translating {
@@ -897,6 +898,9 @@ async fn run_route(
     let (input_tx, input_rx) =
         mpsc::channel((cfg.audio.capture_queue_ms / cfg.capture_frame_ms(&route)).max(1) as usize);
     let (events_tx, mut events_rx) = mpsc::channel(16);
+    let (stt_input_tx, stt_input_rx) =
+        mpsc::channel((cfg.audio.capture_queue_ms / frame_ms).max(1) as usize);
+    let (stt_events_tx, mut stt_events_rx) = mpsc::channel(16);
     let (play_tx, play_rx) = mpsc::channel((playback_queue_ms / OUTPUT_FRAME_MS).max(1) as usize);
     let mut jobs = JoinSet::new();
     let capture_options = AudioOptions {
@@ -941,7 +945,7 @@ async fn run_route(
         .await
         .context("Reprodução")
     });
-    if needs_provider {
+    if translating {
         let provider_cancel = cancel.clone();
         let cloud = cfg.profile(&route.provider).clone();
         let native_voice = if route.provider == "local" {
@@ -965,7 +969,7 @@ async fn run_route(
             vad_silence_ms: cfg.audio.quality.vad_silence_ms(),
             connect_timeout_secs: cloud.connect_timeout_secs,
             max_reconnect_attempts: cloud.max_reconnect_attempts,
-            input_transcription: transcript_tx.is_some(),
+            input_transcription: false,
             output_transcription: translating && route.voice.engine != "native",
         };
         let provider_kind = route.provider.clone();
@@ -986,16 +990,12 @@ async fn run_route(
         let chunk_ms = route.voice.chunk_ms;
         let queue_ms = cfg.audio.playback_queue_ms;
         jobs.spawn(async move {
-            let provider = if translating {
-                provider::create_route_provider(
-                    &provider_kind,
-                    &cloud,
-                    &local_config,
-                    synthesis.is_none(),
-                )?
-            } else {
-                provider::create_transcription_provider(&provider_kind, &cloud, &local_config)?
-            };
+            let provider = provider::create_route_provider(
+                &provider_kind,
+                &cloud,
+                &local_config,
+                synthesis.is_none(),
+            )?;
             if let Some(synthesis) = synthesis {
                 crate::revoice::run(
                     provider,
@@ -1017,6 +1017,22 @@ async fn run_route(
             }
         });
     }
+    if transcribing {
+        let recognition = match origin {
+            TranscriptOrigin::Microphone => cfg.transcription.microphone_recognition.clone(),
+            TranscriptOrigin::Speaker => cfg.transcription.speaker_recognition.clone(),
+        };
+        let profiles = cfg.transcription.providers.clone();
+        let stt_cancel = cancel.clone();
+        jobs.spawn(async move {
+            let recognizer = provider::stt::create(&recognition, &profiles)?;
+            let session_config = provider::stt::session_config(&recognition, &profiles)?;
+            recognizer
+                .run(session_config, stt_input_rx, stt_events_tx, stt_cancel)
+                .await
+                .context("Transcrição STT")
+        });
+    }
     if !translating {
         metrics.state(if needs_provider {
             "connecting"
@@ -1025,6 +1041,7 @@ async fn run_route(
         });
     }
     let mut connected = false;
+    let mut stt_connected = false;
     let mut tap_resampler = audio::resample::Resampler::new(capture_rate, INPUT_RATE);
     let mut original_float = Vec::with_capacity(4800);
     let mut tap_float = Vec::with_capacity(1600);
@@ -1040,22 +1057,19 @@ async fn run_route(
                         _ => bail!("Um componente de áudio encerrou inesperadamente"),
                     }
                 }
-                event = events_rx.recv(), if needs_provider => {
+                event = events_rx.recv(), if translating => {
                     if cancel.is_cancelled() { break Ok(()); }
                     let Some(event) = event else { bail!("Provider encerrou o canal de áudio"); };
                     match event {
-                        ProviderEvent::Connected => { connected = true; metrics.state(if translating { "running" } else { "transcribing" }); }
+                        ProviderEvent::Connected => { connected = true; metrics.state("running"); }
                         ProviderEvent::Reconnecting { .. } => {
                             connected = false;
                             metrics.state("reconnecting");
                             metrics.reconnects.fetch_add(1, Ordering::Relaxed);
-                            if translating { interrupt(&metrics, &play_tx); }
-                            record(&transcript_tx, TranscriptRecord::Gap)?;
+                            interrupt(&metrics, &play_tx);
                         }
-                        ProviderEvent::Interrupted => { if translating { interrupt(&metrics, &play_tx); } record(&transcript_tx, TranscriptRecord::Gap)?; }
+                        ProviderEvent::Interrupted => { interrupt(&metrics, &play_tx); }
                         ProviderEvent::Audio { mut samples, sample_rate } => {
-                            // ASR adapters must never replace or interrupt the original audio.
-                            if !translating { continue; }
                             ensure!(sample_rate == OUTPUT_RATE, "Provider devolveu taxa de áudio não suportada: {sample_rate}");
                             ensure!(samples.len() <= OUTPUT_RATE as usize, "Bloco de áudio do provider excede 1 segundo");
                             apply_gain(&mut samples, route.gain);
@@ -1069,15 +1083,27 @@ async fn run_route(
                                 }
                             }
                         }
-                        ProviderEvent::Transcript { input: true, text, metadata } => {
-                            if transcript_tx.is_some() {
-                                metrics.view.lock().unwrap_or_else(|e| e.into_inner()).last_input_transcript = Some(text.chars().take(2048).collect());
-                                record(&transcript_tx, TranscriptRecord::Text { input: true, text, metadata, received_at: chrono::Utc::now().to_rfc3339() })?;
-                            }
-                        }
-                        ProviderEvent::Transcript { input: false, .. } => {} // Only originals are requested/saved.
-                        ProviderEvent::TurnComplete => { record(&transcript_tx, TranscriptRecord::TurnComplete)?; }
+                        // STS may emit transcripts for its own synthesis protocol. Only
+                        // the independently selected STT stream owns the saved original.
+                        ProviderEvent::Transcript { .. } | ProviderEvent::TurnComplete => {}
                     }
+                }
+                event = stt_events_rx.recv(), if transcribing => {
+                    if cancel.is_cancelled() { break Ok(()); }
+                    let Some(event) = event else { bail!("Provider STT encerrou o canal de transcrição"); };
+                    match &event {
+                        ProviderEvent::Connected => {
+                            stt_connected = true;
+                            if !translating { metrics.state("transcribing"); }
+                        }
+                        ProviderEvent::Reconnecting { .. } => {
+                            stt_connected = false;
+                            metrics.reconnects.fetch_add(1, Ordering::Relaxed);
+                            if !translating { metrics.state("reconnecting"); }
+                        }
+                        _ => {}
+                    }
+                    record_recognition_event(event, &transcript_tx, &metrics)?;
                 }
                 frame = captured_rx.recv() => {
                     if cancel.is_cancelled() { break Ok(()); }
@@ -1106,8 +1132,14 @@ async fn run_route(
                         sender.try_send(AudioRecord { lane: match origin { TranscriptOrigin::Microphone => RecordingLane::Microphone, TranscriptOrigin::Speaker => RecordingLane::Speaker }, samples: frame.samples.clone(), captured_at: frame.captured_at })
                             .map_err(|_| anyhow!("Gravação de áudio original indisponível ou lenta; sessão parada para evitar perda silenciosa"))?;
                     }
-                    if needs_provider && (!connected || frame.captured_at.elapsed() > Duration::from_millis(u64::from(cfg.audio.max_capture_age_ms)) || input_tx.try_send(frame.samples).is_err()) {
-                        metrics.audio.dropped_frames.fetch_add(1, Ordering::Relaxed);
+                    if needs_provider {
+                        if frame.captured_at.elapsed() > Duration::from_millis(u64::from(cfg.audio.max_capture_age_ms)) {
+                            metrics.audio.dropped_frames.fetch_add(1, Ordering::Relaxed);
+                        } else {
+                            fanout_original_audio(frame.samples,
+                                (translating && connected).then_some(&input_tx),
+                                (transcribing && stt_connected).then_some(&stt_input_tx), &metrics);
+                        }
                     }
                 }
             }
@@ -1116,8 +1148,8 @@ async fn run_route(
     cancel.cancel();
     interrupt(&metrics, &play_tx);
     drop(input_tx);
+    drop(stt_input_tx);
     drop(play_tx);
-    drop(transcript_tx);
     drop(audio_tx);
     let mut cleanup_result = Ok(());
     while let Some(completed) = jobs.join_next().await {
@@ -1128,6 +1160,16 @@ async fn run_route(
             cleanup_result = completed;
         }
     }
+    // Save finals already delivered before cancellation. Never wait for a model
+    // to finish another turn or replay a result into a later device activation.
+    while let Ok(event) = stt_events_rx.try_recv() {
+        if let Err(error) = record_recognition_event(event, &transcript_tx, &metrics)
+            && cleanup_result.is_ok()
+        {
+            cleanup_result = Err(error);
+        }
+    }
+    drop(transcript_tx);
     metrics.input_level.store(0, Ordering::Relaxed);
     metrics.output_level.store(0, Ordering::Relaxed);
     metrics.state(if result.is_ok() && cleanup_result.is_ok() {
@@ -1138,6 +1180,65 @@ async fn run_route(
     result
         .and(cleanup_result)
         .with_context(|| format!("Fluxo {name}"))
+}
+
+/// Independent bounded queues: a slow recognizer cannot hold translation or
+/// physical playback. Both receive the same original PCM, before voice/gain.
+fn fanout_original_audio(
+    samples: Vec<i16>,
+    translation: Option<&mpsc::Sender<Vec<i16>>>,
+    recognition: Option<&mpsc::Sender<Vec<i16>>>,
+    metrics: &RouteMetrics,
+) {
+    let send = |sender: &mpsc::Sender<Vec<i16>>, samples| {
+        if sender.try_send(samples).is_err() {
+            metrics.audio.dropped_frames.fetch_add(1, Ordering::Relaxed);
+        }
+    };
+    match (translation, recognition) {
+        (Some(translation), Some(recognition)) => {
+            send(translation, samples.clone());
+            send(recognition, samples);
+        }
+        (Some(sender), None) | (None, Some(sender)) => send(sender, samples),
+        (None, None) => {}
+    }
+}
+
+fn record_recognition_event(
+    event: ProviderEvent,
+    transcript: &Option<TranscriptSink>,
+    metrics: &RouteMetrics,
+) -> Result<()> {
+    match event {
+        ProviderEvent::Transcript {
+            input: true,
+            text,
+            metadata,
+        } => {
+            metrics
+                .view
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .last_input_transcript = Some(text.chars().take(2048).collect());
+            record(
+                transcript,
+                TranscriptRecord::Text {
+                    input: true,
+                    text,
+                    metadata,
+                    received_at: chrono::Utc::now().to_rfc3339(),
+                },
+            )
+        }
+        ProviderEvent::TurnComplete => record(transcript, TranscriptRecord::TurnComplete),
+        ProviderEvent::Reconnecting { .. } | ProviderEvent::Interrupted => {
+            record(transcript, TranscriptRecord::Gap)
+        }
+        // Recognition has no access to playback. Defensive against a broken
+        // endpoint returning generated audio or translated text.
+        _ => Ok(()),
+    }
 }
 
 fn record(sender: &Option<TranscriptSink>, record: TranscriptRecord) -> Result<()> {
@@ -1176,6 +1277,10 @@ fn rms(samples: &[i16]) -> f32 {
         / samples.len() as f64)
         .sqrt() as f32
 }
+
+#[cfg(test)]
+#[path = "engine/stt_tests.rs"]
+mod stt_tests;
 
 #[cfg(test)]
 mod tests {

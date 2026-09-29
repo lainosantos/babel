@@ -10,9 +10,9 @@ O painel separa os controles em seis páginas:
 - **Tradução e vozes:** ative a tradução de cada direção, escolha idiomas,
   provedores e vozes e configure os perfis e as credenciais de IA compartilhados.
   A biblioteca de vozes fica nesta página.
-- **Transcrição:** escolha as origens do texto original, os horários opcionais
-  e a pasta do TXT, e acompanhe os últimos trechos recebidos. O atalho **Provedor
-  de reconhecimento** leva às configurações de IA em **Tradução e vozes**.
+- **Transcrição:** escolha o reconhecedor e o idioma de cada origem, configure
+  seus perfis e credenciais, os horários opcionais e a pasta do TXT, e acompanhe
+  os últimos trechos recebidos.
 - **Gravação:** escolha as origens do áudio original e a pasta do WAV único.
 - **Comandos:** configure a ativação pelo microfone, os serviços locais e as
   integrações MCP.
@@ -21,8 +21,8 @@ O painel separa os controles em seis páginas:
 
 **Transcrição** e **Gravação** têm o atalho **Pasta base e nomes de arquivos** para
 **Ajustes → Arquivos da sessão**. Os recursos continuam independentes: é possível
-gravar ou transcrever sem ativar tradução. A transcrição usa o provedor escolhido
-para cada direção; seus perfis e credenciais são os mesmos de **Tradução e vozes**.
+gravar ou transcrever sem ativar tradução. A transcrição tem provedores, modelos,
+idiomas, endpoints e credenciais próprios, independentes de **Tradução e vozes**.
 Mudar de página preserva os ajustes ainda não salvos.
 
 ## Idioma da interface
@@ -58,11 +58,18 @@ valores fora dos limites e combinações de capacidades incompatíveis são erro
 A escrita usa arquivo temporário e substituição atômica. Em Unix, os arquivos de
 configuração, transcrição e gravação criados têm permissão 0600.
 
-Há quatro perfis persistentes: `providers.gemini`, `providers.openai`,
+Há quatro perfis de tradução/síntese: `providers.gemini`, `providers.openai`,
 `providers.elevenlabs` e `providers.local`. Cada faixa seleciona seu tradutor
 em `microphone.provider` ou `speaker.provider`. Assim, por exemplo, é possível
 usar Gemini no microfone e OpenAI na saída. ElevenLabs é um **sintetizador**, não
 aparece como tradutor de speech-to-speech nesta aplicação.
+
+O reconhecimento original usa `transcription.providers.gemini`, `.openai`,
+`.deepgram` ou `.whisper`. As escolhas são
+`transcription.microphone_recognition` e `transcription.speaker_recognition`,
+cada uma com `provider` e `language`. É possível, por exemplo, traduzir com Gemini
+e transcrever os originais com Deepgram, ou transcrever com Whisper sem usar IA
+de nuvem. Escolher outro tradutor não altera a configuração de reconhecimento.
 
 O antigo provedor de diagnóstico `loopback` foi removido. Ao carregar um TOML
 legado que o seleciona, o Babel troca essa seleção por `gemini`, desliga a
@@ -75,7 +82,10 @@ direção exige habilitar explicitamente tradução ou transcrição e configura
 perfil. Novas configurações enviadas pela API não aceitam `loopback`.
 
 Cada perfil de nuvem tem um `api_key_env`. Os padrões são `GEMINI_API_KEY`,
-`OPENAI_API_KEY` e `ELEVENLABS_API_KEY`. Há duas formas de fornecer a chave:
+`OPENAI_API_KEY`, `ELEVENLABS_API_KEY` e `DEEPGRAM_API_KEY`. STT e tradução podem
+usar nomes diferentes para manter contas/chaves separadas. O Whisper aceita um
+nome opcional de variável para serviços HTTP que exigem autenticação.
+Há duas formas de fornecer a chave:
 
 - **Painel, chave desta execução:** a chave fica em um armazenamento de memória
   separado, é apagada ao substituir/remover e não é devolvida pelas APIs do painel.
@@ -161,20 +171,23 @@ ou clonagem. Leia [o guia específico](voices.md) antes de preparar os arquivos.
 O Babel aceita múltiplos perfis retornados pelo serviço e IDs existentes. Ele não
 executa cadastramento oculto de participantes durante a captura.
 
-Com a tradução desligada e a transcrição ligada para uma origem, o perfil da
-mesma faixa fornece somente reconhecimento de fala (ASR). O modelo independente
-usa `transcription_model`; vazio seleciona `gemini-3.5-transcribe-live` no Gemini
-ou `gpt-live-transcribe` no OpenAI. Isso não executa
-tradução ou síntese escondidas. No perfil local, somente Whisper é necessário
-nesse caminho: Ollama, Piper e o modelo de tradução podem ficar sem configuração.
-Gravação e passagem original, sem transcrição nem
-tradução, não usam os provedores. Para esse uso, desligue a tradução e a
-transcrição das origens desejadas; não é necessário selecionar um provedor
-especial nem fornecer uma chave. Consulte os guias de cada adaptador para os
-modelos de reconhecimento compatíveis.
-O idioma de origem continua disponível com a tradução desligada; ele pode ser
-usado pelo reconhecedor, em vez de herdar detecção automática de um modelo de
-tradução que não está em execução.
+Sempre que a transcrição está ligada para uma origem, seu reconhecedor STT
+recebe o áudio original, inclusive quando a tradução está ativa. Os padrões são
+`gemini-3.5-transcribe-live` para Gemini, `gpt-live-transcribe` para OpenAI e
+`nova-3` para Deepgram. Configure o idioma em `*_recognition.language`: `auto`
+pede detecção automática quando o adaptador/modelo permite; códigos como `pt-BR`
+selecionam um idioma específico. O idioma de tradução não substitui esse valor.
+
+Whisper requer somente seu serviço de reconhecimento; Ollama, Piper e o modelo
+de tradução podem ficar sem configuração quando não há tradução local ativa.
+`transcription.providers.whisper.endpoint` começa vazio: informe a URL real do
+servidor, sem presumir uma porta. Apenas a configuração e as credenciais dos
+reconhecedores ativos são exigidas para iniciar. A passagem original e a gravação
+sem transcrição nem tradução não usam provedores nem exigem chave.
+
+`providers.*.transcription_model` permanece um campo de compatibilidade do
+tradutor, usado onde seu protocolo precisa de reconhecimento interno. Ele não
+define mais o modelo que escreve o TXT. Consulte [o guia de transcrição](transcription.md).
 
 No reconhecimento independente, o TXT recebe somente resultados finais; parciais
 não são repetidas no arquivo. Encerrar a sessão cancela o reconhecimento pendente,
@@ -310,6 +323,30 @@ speaker = true
 timestamps = true
 directory = "transcripts"
 
+[transcription.microphone_recognition]
+provider = "gemini"
+language = "pt-BR"
+
+[transcription.speaker_recognition]
+provider = "deepgram"
+language = "auto"
+
+[transcription.providers.gemini]
+api_key_env = "GEMINI_STT_API_KEY"
+endpoint = "wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent"
+model = "gemini-3.5-transcribe-live"
+connect_timeout_secs = 15
+max_reconnect_attempts = 5
+
+[transcription.providers.deepgram]
+api_key_env = "DEEPGRAM_API_KEY"
+endpoint = "wss://api.deepgram.com/v1/listen"
+model = "nova-3"
+connect_timeout_secs = 15
+max_reconnect_attempts = 3
+diarize = true
+punctuate = true
+
 [recording]
 enabled = false
 microphone = true
@@ -380,9 +417,19 @@ de escrita do arquivo de configuração e tente novamente.
 ### Transcrição dos originais
 
 Na página **Transcrição**, habilite o recurso, escolha as origens, os horários
-opcionais e a pasta do texto. Use **Pasta base e nomes de arquivos** para alterar
-os ajustes compartilhados e **Provedor de reconhecimento** para acessar o perfil
-de IA de cada direção em **Tradução e vozes**, sem precisar habilitar tradução.
+opcionais e a pasta do texto. Escolha o reconhecedor e o idioma de cada origem
+nessa mesma página, com seus próprios perfis de IA. Use **Pasta base e nomes de
+arquivos** para alterar os ajustes compartilhados, sem precisar habilitar tradução.
+
+Ao carregar um TOML antigo sem as novas configurações STT, o Babel copia a escolha
+e o idioma de origem anteriores de cada faixa (`local` torna-se `whisper`), suas
+chaves, modelos de reconhecimento e endpoints compatíveis. Campos STT já
+explícitos são preservados. A migração não ativa tradução ou transcrição e salva
+o resultado atomicamente. Um endpoint OpenAI oficial terminado em
+`/v1/realtime/translations` é ajustado para `/v1/realtime`, no mesmo host. Um
+endpoint personalizado de tradução exige configurar um endpoint STT explícito;
+o Babel não o redireciona para outro serviço. Se o endpoint Whisper não constava
+no arquivo antigo, permanece vazio, sem introduzir uma porta presumida.
 
 `transcription.enabled` habilita **um único TXT por sessão**, contendo somente o
 texto original das faixas selecionadas. Os rótulos `[microfone]` e `[saída recebida]`

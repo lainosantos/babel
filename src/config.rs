@@ -2,6 +2,11 @@ use anyhow::{Context, Result, ensure};
 use serde::{Deserialize, Serialize};
 use std::{fs, io::Write, path::Path};
 
+mod stt;
+pub use stt::{
+    CloudSttConfig, DeepgramSttConfig, SttProviderProfiles, SttRouteConfig, WhisperSttConfig,
+};
+
 pub const TRANSLATE_MODEL: &str = "gemini-3.5-live-translate-preview";
 pub const GEMINI_ENDPOINT: &str = "wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent";
 
@@ -174,6 +179,9 @@ pub struct TranscriptionConfig {
     pub speaker: bool,
     pub timestamps: bool,
     pub directory: String,
+    pub microphone_recognition: SttRouteConfig,
+    pub speaker_recognition: SttRouteConfig,
+    pub providers: SttProviderProfiles,
 }
 impl Default for TranscriptionConfig {
     fn default() -> Self {
@@ -183,6 +191,9 @@ impl Default for TranscriptionConfig {
             speaker: true,
             timestamps: true,
             directory: "transcripts".into(),
+            microphone_recognition: SttRouteConfig::default(),
+            speaker_recognition: SttRouteConfig::default(),
+            providers: SttProviderProfiles::default(),
         }
     }
 }
@@ -392,8 +403,9 @@ impl AppConfig {
         if migrate_provider && !cfg.transcription.microphone && !cfg.transcription.speaker {
             cfg.transcription.enabled = false;
         }
+        let migrate_stt = stt::migrate(&mut cfg, &document)?;
         cfg.validate()?;
-        if migrate_base || migrate_provider {
+        if migrate_base || migrate_provider || migrate_stt {
             cfg.save(path)
                 .context("Não foi possível persistir a migração da configuração")?;
         }
@@ -489,10 +501,7 @@ impl AppConfig {
         );
         // Validate only transports needed by selected features. An original-only
         // session must not require an unused translator, synthesizer or ASR setup.
-        for (route, transcribe) in [
-            (&self.microphone, self.transcription.microphone),
-            (&self.speaker, self.transcription.speaker),
-        ] {
+        for route in [&self.microphone, &self.speaker] {
             if route.enabled {
                 crate::provider::create_route_provider(
                     &route.provider,
@@ -500,12 +509,24 @@ impl AppConfig {
                     &self.providers.local,
                     route.voice.engine == "native",
                 )?;
-            } else if self.transcription.enabled && transcribe {
-                crate::provider::create_transcription_provider(
-                    &route.provider,
-                    self.profile(&route.provider),
-                    &self.providers.local,
-                )?;
+            }
+        }
+        for (recognition, selected) in [
+            (
+                &self.transcription.microphone_recognition,
+                self.transcription.microphone,
+            ),
+            (
+                &self.transcription.speaker_recognition,
+                self.transcription.speaker,
+            ),
+        ] {
+            recognition.validate()?;
+            if self.transcription.enabled && selected {
+                self.transcription
+                    .providers
+                    .validate_selected(recognition)?;
+                crate::provider::stt::create(recognition, &self.transcription.providers)?;
             }
         }
         ensure!(
@@ -665,20 +686,31 @@ impl AppConfig {
                     "Selecione captura e reprodução de {name}"
                 );
             }
-            if (route.enabled || transcribe)
-                && matches!(route.provider.as_str(), "gemini" | "openai")
-            {
+            if route.enabled && matches!(route.provider.as_str(), "gemini" | "openai") {
                 crate::credentials::get(&self.profile(&route.provider).api_key_env)?;
-            }
-            if !route.enabled && transcribe {
-                crate::provider::create_transcription_provider(
-                    &route.provider,
-                    self.profile(&route.provider),
-                    &self.providers.local,
-                )?;
             }
             if route.enabled && route.voice.engine != "native" {
                 crate::credentials::get(&self.profile(&route.voice.engine).api_key_env)?;
+            }
+        }
+        for (recognition, selected) in [
+            (
+                &self.transcription.microphone_recognition,
+                self.transcription.microphone,
+            ),
+            (
+                &self.transcription.speaker_recognition,
+                self.transcription.speaker,
+            ),
+        ] {
+            if self.transcription.enabled
+                && selected
+                && let Some(key) = self
+                    .transcription
+                    .providers
+                    .api_key_env(&recognition.provider)
+            {
+                crate::credentials::get(key)?;
             }
         }
         Ok(())
@@ -708,7 +740,7 @@ fn canonical_device(id: &str) -> String {
 mod tests {
     use super::*;
 
-    fn configured_routes() -> AppConfig {
+    pub(super) fn configured_routes() -> AppConfig {
         // Device discovery is deliberately not involved in configuration tests.
         // Native platforms start without selected virtual endpoints, so fixtures
         // must specify both complete routes instead of inheriting Linux defaults.
@@ -1089,14 +1121,17 @@ mod tests {
         let mut cfg = configured_routes();
         cfg.microphone.enabled = false;
         cfg.speaker.enabled = false;
-        cfg.microphone.provider = "local".into();
         cfg.transcription.enabled = true;
         cfg.transcription.speaker = false;
+        cfg.transcription.microphone_recognition.provider = "whisper".into();
+        cfg.transcription.providers.whisper.endpoint = "http://127.0.0.1:54321/inference".into();
         cfg.providers.local.ollama_endpoint.clear();
         cfg.providers.local.piper_endpoint.clear();
         cfg.providers.local.translation_model.clear();
+        cfg.providers.gemini.api_key_env =
+            format!("BABEL_UNUSED_STS_KEY_{}", rand::random::<u64>());
         cfg.validate_for_start().unwrap();
-        cfg.microphone.provider = "unknown".into();
+        cfg.transcription.microphone_recognition.provider = "unknown".into();
         assert!(cfg.validate_for_start().is_err());
     }
     #[test]

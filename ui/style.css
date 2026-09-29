@@ -572,3 +572,21 @@ dialog::backdrop { background: #152c4866; }
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { scroll-behavior: auto !important; animation: none !important; transition: none !important; }
 }
+
+/* Each original source has its own recognizer; cloud profiles stay below it. */
+.stt-routes { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 20px; margin: 24px 0 30px; }
+.stt-route { min-width: 0; padding: 20px; border: 1px solid var(--line); border-left: 3px solid var(--accent); border-radius: 8px; }
+.stt-route.speaker { border-left-color: var(--output); }
+.stt-route > .checkbox-label { align-items: flex-start; }
+.stt-route-fields { display: grid; grid-template-columns: minmax(0, 1.5fr) minmax(0, 1fr); gap: 16px; margin: 20px 0 16px; }
+.stt-route-fields input, .stt-route-fields select { font-size: 12px; }
+.transcription-workspace .stt-settings { margin-top: 24px; padding-bottom: 28px; }
+.stt-settings .section-heading > a { flex-shrink: 0; font-size: 12px; }
+.stt-provider-profile .profile-grid > .checkbox-label { align-self: center; }
+@media (max-width: 1150px) { .stt-route-fields { grid-template-columns: 1fr; } }
+@media (max-width: 760px) {
+  .stt-routes { grid-template-columns: 1fr; gap: 16px; }
+  .stt-route-fields { grid-template-columns: minmax(0, 1.5fr) minmax(0, 1fr); }
+  .stt-settings .section-heading { flex-wrap: wrap; }
+}
+@media (max-width: 440px) { .stt-route-fields { grid-template-columns: 1fr; } }

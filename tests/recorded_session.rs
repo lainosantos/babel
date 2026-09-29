@@ -408,13 +408,13 @@ async fn idle_routing_recording_and_transcription_are_independent_without_cloud(
         let server_cancel=cancel.clone();
         workers.push(tokio::spawn(async move {axum::serve(listener,app).with_graceful_shutdown(server_cancel.cancelled_owned()).await.context("ASR mock server failed")}));
         let mut cfg=controller.config().await;
-        cfg.microphone.provider="local".into();cfg.speaker.provider="local".into();
+        cfg.transcription.microphone_recognition.provider="whisper".into();cfg.transcription.speaker_recognition.provider="whisper".into();
         cfg.recording.enabled=false;
         cfg.transcription.enabled=true;cfg.transcription.microphone=true;cfg.transcription.speaker=true;
-        cfg.providers.local.whisper_endpoint=format!("{base}/inference");
+        cfg.transcription.providers.whisper.endpoint=format!("{base}/inference");
         cfg.providers.local.ollama_endpoint=format!("{base}/api/chat");
         cfg.providers.local.piper_endpoint=format!("{base}/synthesize");
-        cfg.providers.local.segment_ms=500;cfg.providers.local.silence_ms=100;
+        cfg.transcription.providers.whisper.segment_ms=500;cfg.transcription.providers.whisper.silence_ms=100;
         let transcripts=std::path::PathBuf::from(&cfg.transcription.directory);
         controller.set_config(cfg).await?;
         controller.start_named(Some("Texto original sem tradução".into())).await?;
@@ -434,6 +434,13 @@ async fn idle_routing_recording_and_transcription_are_independent_without_cloud(
         ensure!(asr_calls.load(Ordering::SeqCst)>=2,"Both original streams should reach the ASR mock");
         ensure!(translation_calls.load(Ordering::SeqCst)==0 && synthesis_calls.load(Ordering::SeqCst)==0,"Transcription-only mode invoked translation or speech synthesis");
         ensure!(std::fs::read_dir(&recordings)?.count()==1,"Transcription-only mode unexpectedly created another WAV");
+        // Stop starts the original routing worker asynchronously. Wait for its
+        // activity inspection instead of assuming it already ran in this task.
+        tokio::time::timeout(Duration::from_secs(3), async {
+            while !controller.status().await.routing_active {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        }).await.context("Original routing did not reactivate after stopping STT")?;
         let stopped=controller.status().await;
         ensure!(!stopped.running && stopped.last_error.is_none() && stopped.routing_active,"Transcription-only stop did not restore original routing: {stopped:?}");
         let (mic,speaker)=tokio::join!(observe_original_tone(&mut mic_rx,440.0),observe_original_tone(&mut speaker_rx,880.0));
