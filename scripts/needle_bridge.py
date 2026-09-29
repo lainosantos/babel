@@ -10,6 +10,7 @@ import json
 import os
 import sys
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from socketserver import TCPServer
 from threading import BoundedSemaphore, Lock
 
 # Set before importing Needle so its optional usage telemetry stays disabled.
@@ -168,6 +169,13 @@ class Server(ThreadingHTTPServer):
     def __init__(self, *args, **kwargs):
         self.connections = BoundedSemaphore(8)
         super().__init__(*args, **kwargs)
+
+    def server_bind(self):
+        # HTTPServer normally resolves the bound address with getfqdn(). This
+        # loopback-only helper has no use for a DNS name, and a slow system
+        # resolver must not delay its readiness announcement or health probes.
+        TCPServer.server_bind(self)
+        self.server_name, self.server_port = self.server_address[:2]
 
     def process_request(self, request, client_address):
         if not self.connections.acquire(blocking=False):

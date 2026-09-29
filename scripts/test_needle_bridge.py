@@ -5,11 +5,16 @@ import subprocess
 import sys
 import threading
 import unittest
+from unittest.mock import patch
 from urllib.error import HTTPError
 from urllib.parse import urlsplit
-from urllib.request import Request, urlopen
+from urllib.request import ProxyHandler, Request, build_opener
 
 from needle_bridge import Planner, Server, make_handler
+
+# These tests target sockets that they create on loopback. Never send their
+# authorization headers through environment or macOS system proxy settings.
+LOCAL_HTTP = build_opener(ProxyHandler({}))
 
 
 class FakeNeedle:
@@ -60,6 +65,16 @@ class BridgeTests(unittest.TestCase):
             self.planner.complete({"text": "x", "tools": []})
         self.assertFalse(FakeNeedle.instances)
 
+    def test_loopback_bind_never_waits_for_reverse_dns(self):
+        with patch("socket.getfqdn", side_effect=AssertionError("loopback bind must not use DNS")):
+            server = Server(("127.0.0.1", 0), make_handler(self.planner))
+        try:
+            self.assertEqual(server.server_name, "127.0.0.1")
+            self.assertEqual(server.server_port, server.socket.getsockname()[1])
+            self.assertGreater(server.server_port, 0)
+        finally:
+            server.server_close()
+
     def test_http_auth_origin_and_busy_guards_and_real_json_contract(self):
         server = Server(("127.0.0.1", 0), make_handler(self.planner, "local-test"))
         thread = threading.Thread(target=server.serve_forever, daemon=True)
@@ -68,7 +83,7 @@ class BridgeTests(unittest.TestCase):
         def request(extra=None):
             headers = {"Content-Type": "application/json", "Authorization": "Bearer local-test"}
             headers.update(extra or {})
-            return urlopen(Request(url, json.dumps(payload()).encode(), headers), timeout=3)
+            return LOCAL_HTTP.open(Request(url, json.dumps(payload()).encode(), headers), timeout=3)
         try:
             with request() as response:
                 self.assertTrue(json.load(response)["success"])
@@ -98,7 +113,7 @@ class BridgeTests(unittest.TestCase):
         def health(extra=None, path=url):
             headers = {"Authorization": "Bearer local-test"}
             headers.update(extra or {})
-            return urlopen(Request(path, headers=headers), timeout=3)
+            return LOCAL_HTTP.open(Request(path, headers=headers), timeout=3)
         try:
             with health() as response:
                 self.assertEqual(json.load(response), {"status": "ok", "service": "babel-needle",
@@ -150,7 +165,7 @@ class BridgeTests(unittest.TestCase):
                 self.assertEqual(endpoint.port, result["port"])
                 self.assertGreater(endpoint.port, 0)
                 endpoints.append(result["endpoint"])
-                with urlopen(f"http://127.0.0.1:{endpoint.port}/health", timeout=3) as response:
+                with LOCAL_HTTP.open(f"http://127.0.0.1:{endpoint.port}/health", timeout=3) as response:
                     self.assertEqual(json.load(response), {"status": "ok", "service": "babel-needle",
                                                            "model_loaded": False})
             self.assertEqual(len(set(endpoints)), 2)
