@@ -91,7 +91,11 @@ Windows version/architecture still requires native validation.
 
 The build script does not install anything. `prepare.py` downloads only pinned
 Microsoft files and verifies every SHA256 in `upstream.json`, or accepts an offline
-checkout with `-MicrosoftSourceRoot C:\src\Windows-driver-samples`. The exact revision
+checkout with `-MicrosoftSourceRoot C:\src\Windows-driver-samples`. For a Git
+repository, it reads the original blobs from the fixed commit, not modified
+working-tree files. This avoids `.gitattributes` conversions to CRLF/UTF-16;
+the hashes pin the UTF-8/LF bytes served by the raw commit URLs. An exported
+directory must contain those exact original bytes. The exact revision
 is `2dc3fd3a0cc84a2933f2194e7ec0871584979071`. It then applies asserted transformations,
 builds the Rust static library, links it into the WDK driver, validates/generates
 the INF/catalog, and builds the separate Rust SetupAPI installer. No dependency

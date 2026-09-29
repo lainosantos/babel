@@ -1,4 +1,5 @@
-import importlib.util, json, os, tempfile, unittest, hashlib, zipfile
+import importlib.util, json, os, tempfile, unittest, hashlib, zipfile, subprocess
+from unittest import mock
 import xml.etree.ElementTree as ET
 from pathlib import Path
 ROOT=Path(__file__).resolve().parents[1]
@@ -6,6 +7,39 @@ spec=importlib.util.spec_from_file_location('prepare',ROOT/'prepare.py')
 prepare=importlib.util.module_from_spec(spec); spec.loader.exec_module(prepare)
 
 class PackageTests(unittest.TestCase):
+    def test_git_checkout_encoding_does_not_change_pinned_blob_verification(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root=Path(temp); checkout=root/'checkout'; checkout.mkdir()
+            files={'audio/simpleaudiosample/fixture.sln':b'Project\n',
+                   'audio/simpleaudiosample/fixture.inx':b'[Version]\n'}
+            (checkout/'.gitattributes').write_text('*.sln text eol=crlf\n*.inx text eol=crlf working-tree-encoding=UTF-16\n',encoding='utf-8')
+            for name,raw in files.items():
+                path=checkout/name;path.parent.mkdir(parents=True,exist_ok=True)
+                content=raw.replace(b'\n',b'\r\n')
+                if path.suffix=='.inx':content=content.decode('utf-8').encode('utf-16')
+                path.write_bytes(content)
+            def git(*args):
+                return subprocess.run(['git','-C',str(checkout),*args],check=True,
+                                      stdout=subprocess.PIPE,stderr=subprocess.PIPE).stdout
+            git('init');git('add','.')
+            git('-c','user.name=Babel fixture','-c','user.email=fixture@example.invalid',
+                'commit','--no-gpg-sign','-m','Pinned encoding fixture')
+            commit=git('rev-parse','HEAD').decode().strip()
+            manifest={'repository':'https://example.invalid/fixture','commit':commit,
+                      'files':{name:hashlib.sha256(raw).hexdigest() for name,raw in files.items()}}
+            for name,raw in files.items():
+                self.assertNotEqual((checkout/name).read_bytes(),raw)
+                self.assertEqual(git('cat-file','blob',f'{commit}:{name}'),raw)
+            with mock.patch.object(prepare,'MANIFEST',manifest),mock.patch.object(prepare,'transform'):
+                generated=root/'from-checkout';prepare.prepare(generated,checkout)
+                exported=root/'exported'
+                for name,raw in files.items():
+                    path=exported/name;path.parent.mkdir(parents=True,exist_ok=True);path.write_bytes(raw)
+                    self.assertEqual((generated/Path(name).name).read_bytes(),raw)
+                prepare.prepare(root/'from-raw',exported)
+                (exported/next(iter(files))).write_bytes(b'changed content\n')
+                with self.assertRaisesRegex(ValueError,'SHA256 mismatch'):
+                    prepare.prepare(root/'tampered',exported)
     def test_inf_registers_two_exact_pairs_without_replacing_os_generated_guid(self):
         text=(ROOT/'BabelAudio.inx').read_text()
         self.assertNotIn('\x00',text)

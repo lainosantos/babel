@@ -2,7 +2,7 @@
 """Verify pinned Microsoft WDK inputs and materialize the Babel WaveRT adapter.
 No installation. Network downloads use exact commit URLs plus per-file SHA256.
 """
-import argparse, hashlib, json, re, shutil, urllib.request
+import argparse, hashlib, json, re, shutil, subprocess, urllib.request
 from xml.sax.saxutils import escape
 from pathlib import Path
 ROOT = Path(__file__).resolve().parent
@@ -156,7 +156,16 @@ def prepare(destination, source_root=None, wdk_packages=None):
     destination.mkdir(parents=True)
     for relative,digest in MANIFEST['files'].items():
         if source_root:
-            data=(Path(source_root)/relative).read_bytes()
+            source_root=Path(source_root)
+            if (source_root/'.git').exists():
+                # The sample's .gitattributes changes CRLF and converts .inx to
+                # UTF-16 on checkout. Hash the original blob, exactly as served
+                # by the pinned raw URL, rather than machine-dependent worktree bytes.
+                data=subprocess.run(['git','-C',str(source_root),'cat-file','blob',
+                                     f"{MANIFEST['commit']}:{relative}"],
+                                    check=True,stdout=subprocess.PIPE).stdout
+            else:
+                data=(source_root/relative).read_bytes()
         else:
             url=f"https://raw.githubusercontent.com/microsoft/Windows-driver-samples/{MANIFEST['commit']}/{relative}"
             with urllib.request.urlopen(url,timeout=60) as response: data=response.read()
@@ -165,8 +174,7 @@ def prepare(destination, source_root=None, wdk_packages=None):
         if relative.startswith(prefix):
             path=destination/relative[len(prefix):]
             path.parent.mkdir(parents=True,exist_ok=True)
-            if path.suffix=='.inx': path.write_text(data.decode('utf-16'))
-            else: path.write_bytes(data)
+            path.write_bytes(data)
     transform(destination)
     if wdk_packages:
         (destination/'Directory.Build.props').write_text(wdk_props(wdk_packages),encoding='utf-8')
@@ -174,7 +182,7 @@ def prepare(destination, source_root=None, wdk_packages=None):
 if __name__=='__main__':
     parser=argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--output',type=Path,default=ROOT/'build'/'wdk')
-    parser.add_argument('--source-root',type=Path,help='Optional offline Microsoft repository at the pinned commit; hashes are still checked')
+    parser.add_argument('--source-root',type=Path,help='Offline Git repository containing the pinned commit (reads original blobs, not working-tree files), or an export of those exact bytes; hashes are checked')
     parser.add_argument('--wdk-packages',help='Verified NuGet directory from setup-wdk.ps1; imports the pinned SDK/WDK')
     args=parser.parse_args();prepare(args.output,args.source_root,args.wdk_packages)
     print('Prepared Babel WaveRT sources:',args.output)
