@@ -648,12 +648,12 @@ pub fn run_native(path: std::path::PathBuf, port: u16) -> Result<()> {
         Exit,
     }
     let mut builder = EventLoopBuilder::<UiEvent>::with_user_event();
+    let mut event_loop = builder.build();
     #[cfg(target_os = "macos")]
     {
-        use tao::platform::macos::{ActivationPolicy, EventLoopBuilderExtMacOS};
-        builder.with_activation_policy(ActivationPolicy::Accessory);
+        use tao::platform::macos::{ActivationPolicy, EventLoopExtMacOS};
+        event_loop.set_activation_policy(ActivationPolicy::Accessory);
     }
-    let mut event_loop = builder.build();
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?;
