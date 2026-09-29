@@ -70,9 +70,14 @@ O Babel implementa uma biblioteca separada de design/clonagem e síntese com Gem
 - No Live genérico, `sessionResumptionUpdate` e `goAway` permitem retomar de um ponto explicitamente resumível. O cliente habilita compressão de contexto. No modelo de tradução, a sessão é recriada sem essas opções, cuja compatibilidade específica não está documentada.
 - Cancelamento interrompe conexão, espera de setup, rede e filas. O fechamento inesperado da captura é erro, não conclusão bem-sucedida.
 
-## Diagnóstico local
+## Uso sem tradução e validação
 
-O provedor `loopback` testa o caminho de áudio sem rede, chave ou IA. Ele repassa a fala com interpolação linear de 16 kHz para 24 kHz, preservando fase entre quadros. Não traduz e não representa a qualidade sonora/latência do Gemini.
+Desligue a tradução da direção desejada para encaminhar o áudio original. Esse
+percurso funciona sem sessão enquanto um aplicativo usa o dispositivo virtual;
+também permanece disponível durante uma sessão de gravação. Não há um provedor
+de diagnóstico para selecionar, e roteamento e gravação, com transcrição e
+tradução desligadas, não abrem conexões de IA nem exigem chave. A transcrição
+independente usa reconhecimento de fala do perfil escolhido para aquela direção.
 
 Os testes usam um servidor WebSocket local com credencial fictícia: barreira de setup, PCM little-endian, múltiplos fragmentos, transcrições, cancelamento, retomada de sessão, orçamento de retries, erros sanitizados e EOF de captura. Eles não comprovam autorização da conta nem a qualidade real da tradução; isso exige uma chave válida e áudio real.
 

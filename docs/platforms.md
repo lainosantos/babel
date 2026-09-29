@@ -288,7 +288,9 @@ acima. Compilar o monitor não comprova seu comportamento com todos os drivers.
   quando a IA ainda não produziu fala. PulseAudio não fornece esse contador pelo
   transporte `pacat`, portanto ele permanece zero nesse backend.
 
-Teste o percurso com um provider local de loopback antes de usar a nuvem. A
+Teste o percurso com a tradução e a transcrição desligadas, usando o
+encaminhamento original. Se desejar, habilite somente a gravação durante uma
+sessão para conferir o WAV combinado; esse uso não requer provedor de IA. A
 compilação cruzada confirma tipos e APIs, mas não substitui testes de dispositivo,
 permissões, suspensão/retomada e desconexão em máquinas macOS e Windows reais.
 

@@ -86,6 +86,15 @@ também aceita os subcomandos, por exemplo `./scripts/run.sh doctor`.
    **Babel_Speaker** no Linux, ou **Babel Microphone** e **Babel Speaker** no
    macOS/Windows. Sem sessão ativa, esses caminhos passam o original.
 
+Para usar somente o áudio original, deixe a tradução desligada nas duas direções.
+O roteamento continua funcionando quando um aplicativo usa os dispositivos Babel.
+Se quiser guardar esse áudio, ative **Gravação** e inicie uma sessão; não é preciso
+escolher um provedor especial, fornecer chave de IA ou habilitar transcrição.
+
+Configurações antigas com `loopback` são migradas para o perfil Gemini com
+tradução e transcrição da rota desligadas, sem iniciar chamadas à nuvem. Veja
+[a migração de configuração](docs/configuration.md#arquivos-e-chaves).
+
 No macOS e Windows, o **driver nativo Babel** fornece dois percursos independentes.
 O código-fonte e os scripts de compilação estão em `native/macos` e `native/windows`;
 **a assinatura dos pacotes de distribuição e a validação em hardware nativo ainda
@@ -135,7 +144,6 @@ principal. Permita a captura de microfone ao aplicativo/terminal.
 | whisper.cpp + Ollama + Piper | Pipeline local por trechos | Vozes Piper instaladas; TTS de nuvem opcional | Sim, com offsets do trecho capturado |
 | Gemini 3.8 TTS | Síntese do texto traduzido, não tradutor isolado | Vozes prontas, design e clonagem cadastrada | Não se aplica |
 | ElevenLabs | Síntese do texto traduzido, não tradutor isolado | Vozes da biblioteca, design e instant voice clone | Não se aplica |
-| Loopback | Diagnóstico local, sem IA/tradução | Nenhuma | Não |
 
 A biblioteca permite criar várias vozes, listar os perfis da conta e selecionar
 uma voz para cada direção. O áudio de referência/consentimento é enviado somente

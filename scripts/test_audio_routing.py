@@ -186,12 +186,10 @@ class Babel:
 enabled = false
 [microphone]
 enabled = false
-provider = "loopback"
 capture_device = "babel_test_first.monitor"
 playback_device = "babel_mic_bus"
 [speaker]
 enabled = false
-provider = "loopback"
 capture_device = "babel_speaker.monitor"
 playback_device = "babel_test_other"
 [transcription]

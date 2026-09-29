@@ -5,7 +5,6 @@
 
 mod gemini;
 mod local;
-mod loopback;
 mod openai;
 
 use std::sync::Arc;
@@ -141,8 +140,7 @@ pub trait SpeechProvider: Send + Sync {
 pub fn create_provider(kind: &str) -> Result<Arc<dyn SpeechProvider>> {
     match kind {
         "gemini" => Ok(Arc::new(gemini::GeminiProvider)),
-        "loopback" => Ok(Arc::new(loopback::LoopbackProvider)),
-        _ => bail!("unknown speech provider; supported providers: gemini, loopback"),
+        _ => bail!("unknown speech provider; use a configured gemini, openai or local provider"),
     }
 }
 
@@ -187,9 +185,7 @@ pub fn create_transcription_provider(
         "local" => Ok(Arc::new(local::LocalProvider::transcription(
             local.clone(),
         )?)),
-        _ => bail!(
-            "original transcription requires gemini, openai or local; loopback has no recognizer"
-        ),
+        _ => bail!("original transcription requires gemini, openai or local"),
     }
 }
 
@@ -215,6 +211,16 @@ pub fn create_route_provider(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn removed_diagnostic_provider_cannot_be_created() {
+        let profiles = crate::config::ProviderProfiles::default();
+        assert!(create_provider("loopback").is_err());
+        assert!(create_configured_provider("loopback", &profiles.gemini, &profiles.local).is_err());
+        assert!(
+            create_route_provider("loopback", &profiles.gemini, &profiles.local, false).is_err()
+        );
+    }
 
     #[test]
     fn transcription_factory_uses_only_valid_recognizers() {

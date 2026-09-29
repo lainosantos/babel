@@ -9,10 +9,15 @@ use babel_audio::{
 };
 use std::{
     collections::BTreeSet,
+    process::Stdio,
     sync::Arc,
     time::{Duration, Instant},
 };
-use tokio::{process::Command, sync::mpsc, task::JoinHandle};
+use tokio::{
+    process::{Child, Command},
+    sync::mpsc,
+    task::JoinHandle,
+};
 use tokio_util::sync::CancellationToken;
 
 async fn pactl(args: &[String]) -> Result<String> {
@@ -35,6 +40,43 @@ async fn babel_devices() -> Result<BTreeSet<String>> {
         .filter(|d| d.id.starts_with("babel_"))
         .map(|d| d.id)
         .collect())
+}
+
+fn external_client(device: &str, capture: bool) -> Result<Child> {
+    // These fixture clients select the virtual endpoints. Babel-owned synthetic
+    // producers/observers alone must not activate the production activity gate.
+    Ok(Command::new("pacat")
+        .args([
+            if capture { "--record" } else { "--playback" },
+            "--raw",
+            "--format=s16le",
+            "--channels=1",
+            "--rate=16000",
+            "--client-name=Babel recording regression",
+        ])
+        .arg(format!("--device={device}"))
+        .stdin(if capture {
+            Stdio::null()
+        } else {
+            Stdio::from(std::fs::File::open("/dev/zero")?)
+        })
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .kill_on_drop(true)
+        .spawn()?)
+}
+
+async fn stop_external_clients(clients: &mut Vec<Child>) -> Result<()> {
+    let mut failure = None;
+    for client in clients {
+        if let Err(error) = client.kill().await {
+            failure = Some(error);
+        }
+    }
+    if let Some(error) = failure {
+        return Err(error.into());
+    }
+    Ok(())
 }
 async fn cleanup_modules(modules: &[(u32, String)], owner: &str) -> Result<()> {
     let mut failed = None;
@@ -102,10 +144,8 @@ async fn original_tones_share_one_recorded_timeline_without_changing_babel_devic
     let names: [String; 4] = std::array::from_fn(|i| format!("babeltestrec_{owner}_{i}"));
     let mut modules = Vec::new();
     let mut cfg = AppConfig::default();
-    cfg.microphone.enabled = true;
-    cfg.speaker.enabled = true;
-    cfg.microphone.provider = "loopback".into();
-    cfg.speaker.provider = "loopback".into();
+    cfg.microphone.enabled = false;
+    cfg.speaker.enabled = false;
     cfg.microphone.capture_device = format!("{}.monitor", names[0]);
     cfg.microphone.playback_device = names[1].clone();
     cfg.speaker.capture_device = format!("{}.monitor", names[2]);
@@ -125,11 +165,14 @@ async fn original_tones_share_one_recorded_timeline_without_changing_babel_devic
     let cancel = CancellationToken::new();
     let _cancel_on_drop = cancel.clone().drop_guard();
     let mut feeders: Vec<JoinHandle<Result<()>>> = Vec::new();
+    let mut external_clients = Vec::new();
     let result:Result<()>=async {
         for name in &names {
             let id=pactl(&["load-module".into(),"module-null-sink".into(),format!("sink_name={name}"),format!("sink_properties=babel.test={owner}"),"rate=16000".into(),"channels=1".into(),"channel_map=mono".into()]).await?.parse::<u32>()?;
             modules.push((id,name.clone()));
         }
+        external_clients.push(external_client(&format!("{}.monitor",names[1]),true)?);
+        external_clients.push(external_client(&names[2],false)?);
         let started=Instant::now();
         controller.start_named(Some("Gravação simultânea / teste".into())).await?;
         let options=AudioOptions{sample_rate:16000,frame_ms:20,latency_ms:40,queue_ms:200};
@@ -154,6 +197,7 @@ async fn original_tones_share_one_recorded_timeline_without_changing_babel_devic
         ensure!(!status.running && status.last_error.is_none(),"Normal stop failed: {status:?}");
         ensure!(status.session_name.as_deref()==Some("Gravação simultânea / teste"),"Session name was not preserved");
         ensure!(status.microphone.captured_frames>20 && status.speaker.captured_frames>20,"Both original capture routes must feed the recorder");
+        ensure!(status.microphone.translated_samples==0 && status.speaker.translated_samples==0,"Original recording must not invoke translation");
         let files=std::fs::read_dir(&recordings)?.collect::<std::io::Result<Vec<_>>>()?;
         ensure!(files.len()==1,"Expected one mixed WAV, found {} files",files.len());
         let path=files[0].path();let name=path.file_name().unwrap().to_string_lossy();
@@ -170,8 +214,9 @@ async fn original_tones_share_one_recorded_timeline_without_changing_babel_devic
     }.await;
     // Perform every cleanup even if a verification or process failed. Only the
     // four exact, still-owned IDs above can be unloaded; no Babel install calls.
-    let stopped = controller.stop().await;
+    let stopped = controller.shutdown().await;
     cancel.cancel();
+    let external_stopped = stop_external_clients(&mut external_clients).await;
     let mut feeder_error = None;
     for mut feeder in feeders {
         let joined = tokio::time::timeout(Duration::from_secs(3), &mut feeder).await;
@@ -189,6 +234,7 @@ async fn original_tones_share_one_recorded_timeline_without_changing_babel_devic
     let removed = cleanup_modules(&modules, &owner).await;
     result?;
     stopped?;
+    external_stopped?;
     if let Some(error) = feeder_error {
         return Err(error);
     };
@@ -283,11 +329,14 @@ async fn idle_routing_recording_and_transcription_are_independent_without_cloud(
     let cancel = CancellationToken::new();
     let _cancel_on_drop = cancel.clone().drop_guard();
     let mut workers: Vec<JoinHandle<Result<()>>> = Vec::new();
+    let mut external_clients = Vec::new();
     let result:Result<()>=async {
         for name in &names {
             let id=pactl(&["load-module".into(),"module-null-sink".into(),format!("sink_name={name}"),format!("sink_properties=babel.test={owner}"),"rate=16000".into(),"channels=1".into(),"channel_map=mono".into()]).await?.parse::<u32>()?;
             modules.push((id,name.clone()));
         }
+        external_clients.push(external_client(&format!("{}.monitor",names[1]),true)?);
+        external_clients.push(external_client(&names[2],false)?);
         controller.enable_routing().await?;
         let options=AudioOptions{sample_rate:16000,frame_ms:20,latency_ms:40,queue_ms:200};
         let mut senders=Vec::new();
@@ -395,6 +444,7 @@ async fn idle_routing_recording_and_transcription_are_independent_without_cloud(
     // Shutdown, unlike Stop, must not restart idle capture while cleaning up.
     let stopped = controller.shutdown().await;
     cancel.cancel();
+    let external_stopped = stop_external_clients(&mut external_clients).await;
     let mut worker_error = None;
     for mut worker in workers {
         match tokio::time::timeout(Duration::from_secs(3), &mut worker).await {
@@ -411,6 +461,7 @@ async fn idle_routing_recording_and_transcription_are_independent_without_cloud(
     let removed = cleanup_modules(&modules, &owner).await;
     result?;
     stopped?;
+    external_stopped?;
     if let Some(error) = worker_error {
         return Err(error);
     };

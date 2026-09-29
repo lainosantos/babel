@@ -64,6 +64,16 @@ em `microphone.provider` ou `speaker.provider`. Assim, por exemplo, é possível
 usar Gemini no microfone e OpenAI na saída. ElevenLabs é um **sintetizador**, não
 aparece como tradutor de speech-to-speech nesta aplicação.
 
+O antigo provedor de diagnóstico `loopback` foi removido. Ao carregar um TOML
+legado que o seleciona, o Babel troca essa seleção por `gemini`, desliga a
+tradução da rota (`microphone.enabled` ou `speaker.enabled`) e desmarca sua origem
+na transcrição (`transcription.microphone` ou `transcription.speaker`). Se nenhuma
+origem de transcrição permanecer selecionada, também desliga
+`transcription.enabled`. A migração é salva atomicamente e preserva os dispositivos,
+a gravação e os demais ajustes. Ela não inicia chamadas à nuvem: usar IA nessa
+direção exige habilitar explicitamente tradução ou transcrição e configurar o
+perfil. Novas configurações enviadas pela API não aceitam `loopback`.
+
 Cada perfil de nuvem tem um `api_key_env`. Os padrões são `GEMINI_API_KEY`,
 `OPENAI_API_KEY` e `ELEVENLABS_API_KEY`. Há duas formas de fornecer a chave:
 
@@ -158,8 +168,10 @@ ou `gpt-live-transcribe` no OpenAI. Isso não executa
 tradução ou síntese escondidas. No perfil local, somente Whisper é necessário
 nesse caminho: Ollama, Piper e o modelo de tradução podem ficar sem configuração.
 Gravação e passagem original, sem transcrição nem
-tradução, não usam os provedores. Consulte os guias de cada adaptador para os
-modelos de reconhecimento compatíveis; loopback não fornece transcrição.
+tradução, não usam os provedores. Para esse uso, desligue a tradução e a
+transcrição das origens desejadas; não é necessário selecionar um provedor
+especial nem fornecer uma chave. Consulte os guias de cada adaptador para os
+modelos de reconhecimento compatíveis.
 O idioma de origem continua disponível com a tradução desligada; ele pode ser
 usado pelo reconhecedor, em vez de herdar detecção automática de um modelo de
 tradução que não está em execução.

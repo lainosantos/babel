@@ -173,9 +173,6 @@ async fn run(cli: Cli, command: Command) -> Result<()> {
             let instance = dashboard::InstanceGuard::acquire(&cli.config)?;
             let cfg = AppConfig::load(instance.config_path())
                 .context("Execute `babel init` e configure os dispositivos primeiro")?;
-            if cfg.microphone.provider == "loopback" || cfg.speaker.provider == "loopback" {
-                println!("DIAGNÓSTICO LOCAL: áudio sem tradução e sem IA.");
-            }
             let controller = Controller::new(cfg, instance.config_path().to_owned())?;
             controller.start_named(session).await?;
             println!(

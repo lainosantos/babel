@@ -356,8 +356,8 @@ impl AppConfig {
             .and_then(|files| files.get("base_path"));
         // Only on-disk legacy loading accepts relative bases. New API values
         // go directly through validate(), which always requires an absolute path.
-        let migrate = stored_base.is_none() || !Path::new(&cfg.files.base_path).is_absolute();
-        if migrate {
+        let migrate_base = stored_base.is_none() || !Path::new(&cfg.files.base_path).is_absolute();
+        if migrate_base {
             let legacy_base = if stored_base.is_none() {
                 "."
             } else {
@@ -374,10 +374,28 @@ impl AppConfig {
                 .context("A pasta base migrada precisa ser representável em UTF-8")?
                 .to_owned();
         }
+        // A removed local diagnostic provider must never silently become cloud
+        // translation or recognition. Preserve its original-audio route, but
+        // require the user to explicitly enable either AI feature again.
+        let mut migrate_provider = false;
+        for (route, transcribe) in [
+            (&mut cfg.microphone, &mut cfg.transcription.microphone),
+            (&mut cfg.speaker, &mut cfg.transcription.speaker),
+        ] {
+            if route.provider == "loopback" {
+                route.provider = RouteConfig::default().provider;
+                route.enabled = false;
+                *transcribe = false;
+                migrate_provider = true;
+            }
+        }
+        if migrate_provider && !cfg.transcription.microphone && !cfg.transcription.speaker {
+            cfg.transcription.enabled = false;
+        }
         cfg.validate()?;
-        if migrate {
+        if migrate_base || migrate_provider {
             cfg.save(path)
-                .context("Não foi possível persistir a migração da pasta base")?;
+                .context("Não foi possível persistir a migração da configuração")?;
         }
         Ok(cfg)
     }
@@ -513,15 +531,9 @@ impl AppConfig {
             );
             crate::storage::validate_path(&self.transcription.directory, "Pasta de transcrições")?;
         }
-        for (name, route, transcribe) in [
-            ("microfone", &self.microphone, self.transcription.microphone),
-            ("saída", &self.speaker, self.transcription.speaker),
-        ] {
+        for (name, route) in [("microfone", &self.microphone), ("saída", &self.speaker)] {
             ensure!(
-                matches!(
-                    route.provider.as_str(),
-                    "gemini" | "openai" | "local" | "loopback"
-                ),
+                matches!(route.provider.as_str(), "gemini" | "openai" | "local"),
                 "Provider de tradução desconhecido em {name}"
             );
             for lang in [&route.source_language, &route.target_language] {
@@ -574,10 +586,6 @@ impl AppConfig {
                 );
             } else {
                 ensure!(
-                    route.provider != "loopback",
-                    "Loopback não produz texto traduzido para síntese"
-                );
-                ensure!(
                     !route.voice.voice_id.trim().is_empty(),
                     "Escolha uma voz para a síntese de {name}"
                 );
@@ -586,10 +594,6 @@ impl AppConfig {
                     "ElevenLabs não aceita este prompt livre de estilo; use uma voz de design"
                 );
             }
-            ensure!(
-                !(transcribe && self.transcription.enabled && route.provider == "loopback"),
-                "Loopback não produz transcrição"
-            );
             for device in [&route.capture_device, &route.playback_device] {
                 ensure!(
                     device.len() <= 1024 && !device.contains(['\0', '\n', '\r']),
@@ -714,6 +718,109 @@ mod tests {
         cfg.speaker.capture_device = "babel_speaker.monitor".into();
         cfg.speaker.playback_device = "physical-speakers".into();
         cfg
+    }
+
+    #[test]
+    fn removed_provider_is_rejected_in_new_configs_even_with_all_features_off() {
+        for microphone in [true, false] {
+            let mut cfg = configured_routes();
+            cfg.microphone.enabled = false;
+            cfg.speaker.enabled = false;
+            cfg.transcription.enabled = false;
+            cfg.recording.enabled = false;
+            let route = if microphone {
+                &mut cfg.microphone
+            } else {
+                &mut cfg.speaker
+            };
+            route.provider = "loopback".into();
+            // API deserialization must not perform the legacy disk migration.
+            let decoded: AppConfig =
+                serde_json::from_value(serde_json::to_value(&cfg).unwrap()).unwrap();
+            assert!(
+                decoded
+                    .validate()
+                    .unwrap_err()
+                    .to_string()
+                    .contains("Provider de tradução desconhecido")
+            );
+            let directory = tempfile::tempdir().unwrap();
+            let path = directory.path().join("new.toml");
+            assert!(decoded.save(&path).is_err());
+            assert!(!path.exists());
+        }
+    }
+
+    #[test]
+    fn loading_removed_provider_disables_its_ai_and_preserves_other_routes_and_recording() {
+        for (microphone, speaker) in [(true, false), (false, true), (true, true)] {
+            let directory = tempfile::tempdir().unwrap();
+            let path = directory.path().join("legacy.toml");
+            let mut cfg = configured_routes();
+            cfg.files.base_path = directory.path().join("saved").to_str().unwrap().into();
+            cfg.microphone.provider = "openai".into();
+            cfg.speaker.provider = "openai".into();
+            cfg.transcription.enabled = true;
+            cfg.recording.enabled = true;
+            cfg.recording.directory = "original-audio".into();
+            cfg.files.name_pattern = "legacy_{session}_{id}".into();
+            if microphone {
+                cfg.microphone.provider = "loopback".into();
+            }
+            if speaker {
+                cfg.speaker.provider = "loopback".into();
+            }
+            fs::write(&path, toml::to_string(&cfg).unwrap()).unwrap();
+            let mut expected = cfg;
+            if microphone {
+                expected.microphone.provider = RouteConfig::default().provider;
+                expected.microphone.enabled = false;
+                expected.transcription.microphone = false;
+            }
+            if speaker {
+                expected.speaker.provider = RouteConfig::default().provider;
+                expected.speaker.enabled = false;
+                expected.transcription.speaker = false;
+            }
+            if microphone && speaker {
+                expected.transcription.enabled = false;
+            }
+            let loaded = AppConfig::load(&path).unwrap();
+            assert_eq!(
+                toml::to_string(&loaded).unwrap(),
+                toml::to_string(&expected).unwrap()
+            );
+            if microphone && speaker {
+                // Both old diagnostic routes remain usable for recording without
+                // reading any cloud credentials or constructing a provider.
+                loaded.validate_for_start().unwrap();
+            }
+            let persisted = fs::read_to_string(&path).unwrap();
+            assert!(!persisted.contains("loopback"));
+            assert_eq!(
+                toml::to_string(&toml::from_str::<AppConfig>(&persisted).unwrap()).unwrap(),
+                toml::to_string(&expected).unwrap()
+            );
+            let with_comment = format!("# Migration is complete.\n{persisted}");
+            fs::write(&path, &with_comment).unwrap();
+            AppConfig::load(&path).unwrap();
+            assert_eq!(fs::read_to_string(&path).unwrap(), with_comment);
+            assert!(!directory.path().join("saved").exists());
+        }
+    }
+
+    #[test]
+    fn removed_provider_migration_does_not_rewrite_an_otherwise_invalid_config() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("invalid.toml");
+        let mut cfg = configured_routes();
+        cfg.microphone.provider = "loopback".into();
+        cfg.recording.enabled = true;
+        cfg.recording.directory.clear();
+        let text = toml::to_string(&cfg).unwrap();
+        fs::write(&path, &text).unwrap();
+        assert!(AppConfig::load(&path).is_err());
+        assert_eq!(fs::read_to_string(&path).unwrap(), text);
     }
 
     #[test]
@@ -951,7 +1058,8 @@ mod tests {
         );
         let mut cfg = configured_routes();
         cfg.microphone.enabled = false;
-        cfg.speaker.provider = "loopback".into();
+        cfg.speaker.enabled = false;
+        cfg.recording.enabled = true;
         cfg.validate_for_start().unwrap();
         cfg.speaker.playback_device = "babel_speaker".into();
         assert!(
@@ -988,7 +1096,7 @@ mod tests {
         cfg.providers.local.piper_endpoint.clear();
         cfg.providers.local.translation_model.clear();
         cfg.validate_for_start().unwrap();
-        cfg.microphone.provider = "loopback".into();
+        cfg.microphone.provider = "unknown".into();
         assert!(cfg.validate_for_start().is_err());
     }
     #[test]

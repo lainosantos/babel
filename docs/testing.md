@@ -148,7 +148,7 @@ com os nomes reservados. Não os execute durante uma tradução.
 
 ```sh
 cargo test --lib audio::linux::tests::live_virtual_routes_idempotence_interruption_and_cleanup -- --ignored --nocapture
-cargo test --test live_engine -- --ignored --nocapture
+cargo test --test live_engine synthetic_original_audio_crosses_controller_and_virtual_devices -- --ignored --nocapture
 ```
 
 Na máquina de desenvolvimento, as ferramentas Pulse foram extraídas localmente;
@@ -163,25 +163,32 @@ módulos pertencentes ao Babel, as duas pontes virtuais, interrupção de áudio
 antigo com fila cheia e remoção dos módulos. Também verificou que os dispositivos
 padrão da sessão não foram alterados.
 
-O teste completo passou **três vezes consecutivas** após a correção de uma corrida
-de cancelamento. O caminho exercitado é:
+O teste completo usa o encaminhamento original, com tradução e transcrição
+desligadas, sem selecionar um provedor de IA. Ele inicia uma sessão nomeada com
+gravação somente da saída. O caminho exercitado é:
 
 ```text
 tom sintético → babel_speaker → captura do Controller
-            → provider loopback → babel_mic_bus → babel_microphone
+            → encaminhamento original → babel_mic_bus → babel_microphone
             → captura de verificação
 ```
 
-`loopback` é um provider de diagnóstico que transforma o formato de áudio; não
-traduz nem acessa IA. O teste exige contadores de captura e saída positivos,
-áudio recebido no outro extremo, parada sem erro e remoção dos endpoints.
+O teste exige captura positiva, áudio recebido no outro extremo, gravação do tom
+original, parada sem erro e remoção dos endpoints. Os contadores de tradução
+permanecem zerados e nenhuma conexão de IA é aberta.
 Mesmo quando uma verificação falha, o teste para o Controller, cancela e aguarda
 os processos auxiliares e tenta remover os módulos antes de devolver o erro.
 
-Após a sequência, `ps -C parec -C pacat -o pid=,args=` não mostrou processos e
-`pactl list short sinks` / `pactl list short sources` não mostraram endpoints
+Nas execuções anteriores desse cenário, `ps -C parec -C pacat -o pid=,args=` não
+mostrou processos e `pactl list short sinks` / `pactl list short sources` não mostraram endpoints
 `babel_*`. Essa ausência vale para o encerramento dos testes; uma instalação
 posterior destinada ao uso normal naturalmente mantém os dispositivos presentes.
+
+As variantes atuais de `live_engine` e do primeiro teste de `recorded_session`
+substituem o adaptador de diagnóstico removido pelo encaminhamento original.
+A compilação e os testes sem dispositivos não equivalem a uma nova execução
+dessas variantes com o servidor de áudio; os resultados históricos abaixo não
+devem ser interpretados como uma rodada posterior a essa alteração.
 
 ## Gravação completa com os dispositivos de uso normal preservados
 
@@ -190,13 +197,14 @@ PATH="$PWD/.tools/pulse/usr/bin:$PATH" cargo test --test recorded_session origin
 ```
 
 Esse teste cria quatro sinks nulos com nomes aleatórios próprios e usa dois
-fluxos do Controller com provider loopback. Seus sinais são tons sintéticos de
+fluxos de áudio original do Controller, com tradução e transcrição desligadas
+e somente a gravação habilitada. Seus sinais são tons sintéticos de
 440 Hz e 880 Hz. A remoção verifica os identificadores e a propriedade dos quatro
 módulos temporários; o teste não chama instalação/desinstalação dos endpoints
 Babel destinados ao usuário e pode coexistir com eles.
 
-A execução real passou: gerou **um WAV de 3,53 s**, com as duas frequências na
-mesma janela de um segundo e o nome de sessão aplicado ao padrão de arquivo.
+Uma execução real anterior desse cenário gerou **um WAV de 3,53 s**, com as duas
+frequências na mesma janela de um segundo e o nome de sessão aplicado ao padrão de arquivo.
 A duração foi comparada com o relógio da sessão para detectar concatenação
 indevida. O Controller parou sem erro, nenhum `parec`/`pacat` do teste permaneceu
 e os endpoints Babel existentes eram os mesmos antes e depois.

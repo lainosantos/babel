@@ -125,7 +125,6 @@
         config[route].prompt = '';
         if (config[route].voice.engine === 'native') config[route].voice.voice_id = '';
       }
-      if (config[route].provider === 'loopback') config[route].voice = { ...config[route].voice, engine: 'native', voice_id: '', style: '' };
       if (config[route].voice.engine !== 'gemini') config[route].voice.style = '';
     }
     return config;
@@ -361,38 +360,33 @@
       const translating = byId(`${route}-enabled`).checked;
       const dedicated = dedicatedRoute(route) && translating;
       const provider = routeProvider(route);
-      const diagnostic = provider === 'loopback';
       const source = byId(`${route}-source_language`);
       source.disabled = dedicated;
       if (dedicated) { if (source.dataset.savedSource === undefined) source.dataset.savedSource = source.value; source.value = t("ui.automatic"); }
       else if (!dedicated && source.dataset.savedSource !== undefined) { source.value = source.dataset.savedSource; delete source.dataset.savedSource; }
       byId(`${route}-target_language`).disabled = !translating;
       byId(`${route}-gain`).disabled = !translating;
-      byId(`${route}-prompt`).disabled = !translating || dedicated || diagnostic;
+      byId(`${route}-prompt`).disabled = !translating || dedicated;
       byId(`${route}-prompt-hint`).textContent = dedicated
         ? t("ui.this_continuous_model_does_not_accept_prompts_saving_in_this_mode_clears_th")
         : !translating ? t("ui.translation_instructions_are_not_used_while_this_translation_is_off")
-        : diagnostic ? t("ui.diagnostics_transmit_original_audio_and_do_not_use_instructions") : t("ui.add_tone_terminology_and_proper_names_to_guide_translation");
+        : t("ui.add_tone_terminology_and_proper_names_to_guide_translation");
       byId(`${route}-provider-hint`).textContent = !translating
-        ? (diagnostic ? t("ui.original_audio_to_transcribe_this_source_select_a_provider_with_speech_reco") : t("ui.original_audio_if_transcription_is_enabled_for_this_source_this_provider_re"))
-        : diagnostic
-        ? t("ui.original_audio_without_ai_or_translation")
+        ? t("ui.original_audio_if_transcription_is_enabled_for_this_source_this_provider_re")
         : provider === 'local' ? t("ui.transcription_translation_and_voice_through_local_services_in_segments")
         : dedicated ? t("ui.continuous_translation_with_automatic_source_language_detection") : t("ui.conversation_model_usually_waits_for_pauses_before_responding");
       const engineControl = byId(`${route}-voice-engine`);
-      engineControl.disabled = diagnostic || !translating;
-      if (diagnostic) engineControl.value = 'native';
+      engineControl.disabled = !translating;
       const native = engineControl.value === 'native';
       const voice = byId(`${route}-voice-voice_id`);
-      const automaticVoice = native && (dedicated || diagnostic);
+      const automaticVoice = native && dedicated;
       voice.disabled = automaticVoice || !translating;
       if (automaticVoice && voice.dataset.savedVoice === undefined) { voice.dataset.savedVoice = voice.value; voice.value = ''; }
       else if (!automaticVoice && voice.dataset.savedVoice !== undefined) { voice.value = voice.dataset.savedVoice; delete voice.dataset.savedVoice; }
       voice.placeholder = automaticVoice ? (provider === 'gemini' ? t("ui.automatic_preservation_gemini") : t("ui.model_s_native_voice")) : provider === 'local' && native ? t("ui.piper_voice_or_profile_default") : t("ui.profile_s_default_voice_or_id");
-      byId(`${route}-voice-style`).disabled = engineControl.value !== 'gemini' || diagnostic || !translating;
-      byId(`${route}-voice-chunk_ms`).disabled = native || diagnostic || !translating;
+      byId(`${route}-voice-style`).disabled = engineControl.value !== 'gemini' || !translating;
+      byId(`${route}-voice-chunk_ms`).disabled = native || !translating;
       byId(`${route}-voice-hint`).textContent = !translating ? t("ui.this_route_transmits_the_original_voice_synthesis_options_are_only_used_wit")
-        : diagnostic ? t("ui.diagnostics_do_not_synthesize_a_new_voice")
         : native ? (dedicated ? (provider === 'gemini' ? t("ui.gemini_live_translate_attempts_to_preserve_original_voice_characteristics_w_2") : t("ui.openai_translate_uses_the_model_s_native_voice_vocal_identity_preservation_")) : provider === 'local' ? t("ui.uses_the_piper_service_enter_a_voice_available_in_that_service_or_leave_emp") : t("ui.uses_the_translator_s_own_audio_output_and_the_profile_s_default_voice_when"))
         : t("ui.re_synthesizes_translated_text_with_this_fixed_voice_adds_latency_translate");
     }
@@ -404,7 +398,7 @@
     const local = routeNames.every(route => {
       const translates = byId(`${route}-enabled`).checked;
       const transcribes = byId('transcription-enabled').checked && byId(`transcription-${route}`).checked;
-      return (!translates && !transcribes) || (['local', 'loopback'].includes(routeProvider(route)) && (!translates || byId(`${route}-voice-engine`).value === 'native'));
+      return (!translates && !transcribes) || (routeProvider(route) === 'local' && (!translates || byId(`${route}-voice-engine`).value === 'native'));
     });
     byId('footer-state').textContent = local ? t("ui.session_configured_for_local_processing") : t("ui.session_configured_with_cloud_providers");
     renderVoiceOptions();
@@ -429,7 +423,7 @@
     renderPlatformEndpoints();
     for (const route of routeNames) {
       const active = routeActive(route);
-      const translating = active && state.status?.running && state.config?.[route]?.enabled && state.config?.[route]?.provider !== 'loopback';
+      const translating = active && state.status?.running && state.config?.[route]?.enabled;
       const node = byId(`${route}-signal`);
       node.textContent = !active ? '—' : translating ? t("ui.ai") : t("ui.original");
       node.classList.toggle('original', Boolean(active && !translating));
