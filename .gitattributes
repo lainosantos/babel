@@ -1,0 +1,2 @@
+# Pinned source archives use LF; patch context must match on every platform.
+scripts/patches/*.patch text eol=lf
