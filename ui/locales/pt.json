@@ -507,7 +507,7 @@
   "stt.model": "Modelo de transcrição",
   "stt.help": "Guia de transcrição",
   "stt.independent_hint": "Escolha um reconhecedor e o idioma original de cada fonte. Estes ajustes são independentes da tradução. Use auto para detectar o idioma.",
-  "stt.gemini_hint": "Gemini Live Transcribe salva as palavras originais. Este perfil é separado da tradução Gemini; a conexão usa o endpoint oficial.",
+  "stt.gemini_hint": "O Gemini Live Transcribe salva a fala original. Se o Live travar, o áudio pendente é recuperado com gemini-3.5-transcribe usando a mesma chave; essa fonte passa a usar requisições finitas até o fim da sessão. É necessário acesso aos dois modelos, que podem gerar cobranças. Separado da tradução; somente endpoints oficiais.",
   "stt.openai_hint": "Reconhece a fala original sem tradução ou síntese de voz. O endpoint vazio usa o padrão do provedor.",
   "stt.deepgram_hint": "Use auto para o modo multilíngue compatível com o modelo escolhido. Rótulos de falantes e tempos de fala são salvos quando fornecidos pelo Deepgram; os rótulos identificam falantes nessa conexão, não pessoas pelo nome.",
   "stt.whisper_hint": "O Whisper integrado usa modelos multilíngues. O Base compacto é o padrão equilibrado; Tiny usa menos CPU com maior risco de erros; Small pode melhorar o reconhecimento com custo maior. Os tamanhos indicam download, não RAM. O modo externo usa o modelo do seu servidor. Tempos e transcrição são independentes da tradução.",
@@ -656,5 +656,13 @@
   "routing.speaker_audio": "Áudio do Babel Speaker",
   "routing.speaker_audio_short": "Áudio da saída",
   "routing.after_output_translation": "Após a tradução da saída",
-  "routing.played_audio": "Áudio reproduzido"
+  "routing.played_audio": "Áudio reproduzido",
+  "retention.title": "Arquivos de sessão precisam de recuperação",
+  "retention.hint": "O áudio original ainda está disponível para tentar concluir a gravação ou transcrição. Mantenha o Babel aberto até a recuperação terminar; ao fechá-lo, o áudio pendente não poderá ser recuperado.",
+  "retention.read_error": "Não foi possível verificar as sessões pendentes: {error}",
+  "retention.invalid_response": "Resposta inválida de sessões pendentes",
+  "retention.recover": "Recuperar sessão",
+  "retention.recovering": "Recuperando…",
+  "retention.available": "Áudio preservado: {size} MiB",
+  "retention.recovered": "Sessão recuperada: {name}"
 }

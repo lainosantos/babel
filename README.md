@@ -13,6 +13,11 @@ Translation, transcription and recording are independent. Outside a session,
 Babel routes original audio between the configured devices. Turning off a
 direction's translation preserves that routing during a session as well.
 
+> **Platform validation:** Babel has been validated on **Linux**.
+> **Windows and macOS still require validation on native systems**, including
+> installation, virtual devices and audio routing. Successful builds and CI
+> checks do not replace this validation.
+
 The command agent uses **only the original physical microphone**, with a
 configurable wake name (default: “Babel”), local Whisper, **Needle 3** and
 authenticated HTTP/stdio MCP integrations. It also works without a translation
@@ -224,6 +229,12 @@ An optional bounded memory history keeps both original directions on the same
 timeline. Its default retention is ten minutes and is configurable. Including
 recent history when starting a session is an explicit opt-in under the advanced
 start options; it applies to whichever file-producing features are enabled.
+
+Incomplete file sessions keep originals available for recovery while Babel stays
+open. Spill into the system temporary folder is encrypted with a per-session key
+held only in RAM; successful completion releases it. Recovery writes a new file
+pair and preserves earlier partial files. This does not survive process exit. See
+[session recovery and limits](docs/recording.md#recover-an-incomplete-session).
 
 Deepgram can assign speaker IDs to words, and Babel preserves those transcript
 metadata. IDs are connection-local labels, can be wrong and can restart after

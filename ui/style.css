@@ -145,6 +145,17 @@ code { font-size: .92em; }
 
 .notice { margin: 0 0 16px; padding: 13px 16px; border: 1px solid #bfdfd7; border-left: 3px solid var(--output); border-radius: 7px; background: #f0f9f5; color: #275e53; font-size: 12px; line-height: 1.7; overflow-wrap: anywhere; }
 .notice.error { border-color: #edc7cb; border-left-color: var(--danger); background: #fff4f4; color: #9a3543; }
+.retention-card { margin-bottom: 24px; padding: 20px 24px; border: 1px solid var(--line); border-radius: 10px; background: #fff; }
+.retention-card h2 { margin: 0 0 6px; font-size: 15px; }
+.retention-card > .field-hint { max-width: 850px; }
+.retention-sessions { margin: 12px 0 0; padding: 0; list-style: none; }
+.retention-session { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 12px 24px; padding: 14px 0 2px; border-top: 1px solid var(--line); }
+.retention-session + .retention-session { margin-top: 12px; }
+.retention-session-detail { flex: 1 1 240px; min-width: 0; overflow-wrap: anywhere; }
+.retention-session-detail strong { font-size: 13px; }
+.retention-session-detail p { margin: 5px 0 0; }
+.retention-session .button { min-height: 36px; font-size: 12px; }
+.retention-session-error { color: var(--danger); font-size: 12px; line-height: 1.6; overflow-wrap: anywhere; }
 .config-conflict { display: flex; align-items: center; gap: 20px; border-color: #e6d5ac; border-left-color: #ac7c2e; background: #fffaec; color: #76521b; }
 .config-conflict p { flex: 1; }
 .config-conflict .button { flex-shrink: 0; white-space: normal; }

@@ -21,6 +21,7 @@ use tokio_util::sync::CancellationToken;
 use super::{ProviderEvent, SessionConfig, SpeechProvider, TranscriptMetadata};
 
 mod languages;
+mod recovery;
 mod transcription;
 pub(crate) use languages::target_language_code as translation_target_language;
 
@@ -69,7 +70,7 @@ impl SpeechProvider for GeminiTranscriptionProvider {
     async fn run_history(
         &self,
         mut config: SessionConfig,
-        mut audio: mpsc::Receiver<Vec<i16>>,
+        audio: mpsc::Receiver<Vec<i16>>,
         events: mpsc::Sender<ProviderEvent>,
         cancel: CancellationToken,
     ) -> Result<()> {
@@ -86,13 +87,7 @@ impl SpeechProvider for GeminiTranscriptionProvider {
         );
         let key = crate::credentials::get(&config.api_key_env)?;
         ensure!(!key.trim().is_empty(), "Gemini API key is empty");
-        let mut resume = None;
-        tokio::select! {
-            biased;
-            _ = cancel.cancelled() => bail!("historical transcription was cancelled"),
-            result = run_connection_mode(&config, &key, ENDPOINT, &mut audio, &events, &mut resume, true) =>
-                result.map_err(|failure| anyhow::anyhow!(failure.message)),
-        }
+        transcription::history(&config, &key, audio, events, cancel).await
     }
 }
 
@@ -139,6 +134,18 @@ impl SpeechProvider for GeminiProvider {
         );
         // This private endpoint argument is only injected by local socket tests.
         // User configuration cannot redirect the authenticated connection.
+        if is_transcription_model(&config) {
+            return transcription::session(
+                &config,
+                &api_key,
+                ENDPOINT,
+                recovery::ENDPOINT,
+                audio,
+                events,
+                cancel,
+            )
+            .await;
+        }
         run_sessions(&config, &api_key, ENDPOINT, audio, events, cancel).await
     }
 }
@@ -407,17 +414,15 @@ async fn run_connection(
     .await
 }
 
-async fn run_connection_mode(
+async fn open_socket(
     config: &SessionConfig,
     api_key: &str,
     endpoint: &str,
-    audio: &mut mpsc::Receiver<Vec<i16>>,
-    events: &mpsc::Sender<ProviderEvent>,
-    resume_handle: &mut Option<String>,
-    history: bool,
-) -> SessionResult<()> {
+    resume_handle: Option<&str>,
+    manual: bool,
+) -> SessionResult<Socket> {
     // Reject unsupported targets before opening an authenticated connection.
-    let mut setup = setup_message(config, resume_handle.as_deref())
+    let mut setup = setup_message(config, resume_handle)
         .map_err(|_| Failure::fatal("Gemini Live Translate target language is unsupported"))?;
     let mut request = endpoint
         .into_client_request()
@@ -439,7 +444,7 @@ async fn run_connection_mode(
     .await
     .map_err(|_| Failure::retry("Gemini connection timed out"))?
     .map_err(socket_error)?;
-    if history || is_transcription_model(config) {
+    if manual {
         // A single explicit turn in flight makes its finalized input transcript
         // an unambiguous acknowledgement of the bounded original utterance.
         setup["setup"]["realtimeInputConfig"] =
@@ -484,6 +489,26 @@ async fn run_connection_mode(
     })
     .await
     .map_err(|_| Failure::retry("Gemini setup acknowledgement timed out"))??;
+    Ok(socket)
+}
+
+async fn run_connection_mode(
+    config: &SessionConfig,
+    api_key: &str,
+    endpoint: &str,
+    audio: &mut mpsc::Receiver<Vec<i16>>,
+    events: &mpsc::Sender<ProviderEvent>,
+    resume_handle: &mut Option<String>,
+    history: bool,
+) -> SessionResult<()> {
+    let socket = open_socket(
+        config,
+        api_key,
+        endpoint,
+        resume_handle.as_deref(),
+        history || is_transcription_model(config),
+    )
+    .await?;
     if !history && !is_transcription_model(config) {
         discard_queued_audio(audio);
     }
@@ -582,9 +607,7 @@ async fn transcribe_history(
                             ));
                         }
                         let decoded = decode_transcription_content(content)?;
-                        let complete = content
-                            .get("inputTranscription")
-                            .is_some_and(|v| v.get("text").and_then(Value::as_str).is_some());
+                        let complete = transcription_final(content)?;
                         for mut event in decoded {
                             if let ProviderEvent::Transcript { metadata, .. } = &mut event {
                                 // Live Transcribe does not promise word timings;
@@ -777,6 +800,20 @@ async fn read_events(
     }
 }
 
+/// Recognize authoritative ASR finals, including turns without recognized words.
+fn transcription_final(content: &Value) -> SessionResult<bool> {
+    let Some(transcript) = content.get("inputTranscription") else {
+        return Ok(false);
+    };
+    // Protobuf JSON can omit a default-valued string. An empty final object is
+    // a valid no-speech result, not a missing acknowledgement. A turnComplete
+    // alone is insufficient: transcription is delivered independently of it.
+    if !transcript.is_object() || transcript.get("text").is_some_and(|text| !text.is_string()) {
+        return Err(Failure::fatal("invalid Gemini final input transcription"));
+    }
+    Ok(content.get("interrupted").and_then(Value::as_bool) != Some(true))
+}
+
 /// Interim hypotheses replace earlier guesses; only the authoritative final
 /// inputTranscription is persisted. No generated content belongs in ASR.
 fn decode_transcription_content(content: &Value) -> SessionResult<Vec<ProviderEvent>> {
@@ -786,7 +823,7 @@ fn decode_transcription_content(content: &Value) -> SessionResult<Vec<ProviderEv
         ));
     }
     let mut events = decode_content(content)?;
-    if content.get("inputTranscription").is_some()
+    if transcription_final(content)?
         && !events
             .iter()
             .any(|e| matches!(e, ProviderEvent::TurnComplete))

@@ -567,40 +567,72 @@ pub async fn capture(
         .take()
         .context("missing parec stdout")?;
     let mut bytes = vec![0_u8; options.frame_samples() * 4];
+    let mut filled = 0;
     let result = loop {
         let received = tokio::select! {
             biased;
             _ = cancel.cancelled() => break Ok(()),
             status = process.child.wait() => break Err(anyhow::anyhow!("parec exited unexpectedly: {:?}", status?)),
-            received = stdout.read_exact(&mut bytes) => received,
+            // Unlike read_exact, read is cancellation safe. Keep the offset so
+            // a stop cannot erase bytes already delivered from the device.
+            received = stdout.read(&mut bytes[filled..]) => received,
         };
-        if let Err(error) = received {
-            break Err(error.into());
+        let count = match received {
+            Ok(0) => break Err(anyhow::anyhow!("parec capture stream ended unexpectedly")),
+            Ok(count) => count,
+            Err(error) => break Err(error.into()),
+        };
+        filled += count;
+        if filled < bytes.len() {
+            continue;
         }
-        let samples = bytes
-            .as_chunks::<4>()
-            .0
-            .iter()
-            .map(|s| f32::from_le_bytes([s[0], s[1], s[2], s[3]]))
-            .collect();
-        stats.captured_frames.fetch_add(1, Ordering::Relaxed);
-        let frame = OriginalFrame {
-            samples,
-            sample_rate: options.sample_rate,
-            channels: options.channels,
-            captured_at: Instant::now(),
-        };
-        match sink.try_send(frame) {
-            Ok(()) => (),
-            Err(mpsc::error::TrySendError::Full(_)) => {
-                stats.dropped_frames.fetch_add(1, Ordering::Relaxed);
-            }
-            Err(mpsc::error::TrySendError::Closed(_)) => break Ok(()),
+        filled = 0;
+        if !send_capture_bytes(&bytes, options, &sink, &stats) {
+            break Ok(());
         }
     };
+    let aligned =
+        filled / (usize::from(options.channels) * 4) * (usize::from(options.channels) * 4);
+    if aligned > 0 {
+        send_capture_bytes(&bytes[..aligned], options, &sink, &stats);
+    }
+    if aligned != filled {
+        stats.record_capture_loss();
+    }
     drop(stdout);
     let stderr = process.stop().await;
     result.with_context(|| format!("capture {device}: {stderr}"))
+}
+
+fn send_capture_bytes(
+    bytes: &[u8],
+    options: AudioOptions,
+    sink: &mpsc::Sender<OriginalFrame>,
+    stats: &AudioStats,
+) -> bool {
+    let samples = bytes
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .map(|sample| f32::from_le_bytes(*sample))
+        .collect();
+    stats.captured_frames.fetch_add(1, Ordering::Relaxed);
+    match sink.try_send(OriginalFrame {
+        samples,
+        sample_rate: options.sample_rate,
+        channels: options.channels,
+        captured_at: Instant::now(),
+    }) {
+        Ok(()) => true,
+        Err(mpsc::error::TrySendError::Full(_)) => {
+            stats.record_capture_loss();
+            true
+        }
+        Err(mpsc::error::TrySendError::Closed(_)) => {
+            stats.record_capture_loss();
+            false
+        }
+    }
 }
 
 fn spawn_playback(device: &str, options: AudioOptions) -> Result<(AudioProcess, ChildStdin)> {
@@ -735,6 +767,32 @@ pub async fn playback(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn capture_bytes_preserve_partial_stereo_tail_and_distinguish_rejections() {
+        let options = AudioOptions {
+            sample_rate: 48_000,
+            channels: 2,
+            frame_ms: 10,
+            latency_ms: 20,
+            queue_ms: 80,
+        };
+        let samples = [0.25_f32, -0.125, 0.75, -0.5];
+        let bytes: Vec<u8> = samples.into_iter().flat_map(f32::to_le_bytes).collect();
+        let stats = AudioStats::default();
+        let (sender, mut received) = mpsc::channel(1);
+        assert!(send_capture_bytes(&bytes, options, &sender, &stats));
+        assert!(send_capture_bytes(&bytes, options, &sender, &stats));
+        let tail = received.try_recv().unwrap();
+        assert_eq!(tail.samples.as_ref(), samples.as_slice());
+        assert_eq!(tail.channels, 2);
+        assert_eq!(tail.sample_rate, 48_000);
+        assert_eq!(stats.capture_lost_frames.load(Ordering::Relaxed), 1);
+        drop(received);
+        assert!(!send_capture_bytes(&bytes, options, &sender, &stats));
+        assert_eq!(stats.capture_lost_frames.load(Ordering::Relaxed), 2);
+        assert_eq!(stats.dropped_frames.load(Ordering::Relaxed), 2);
+    }
 
     #[test]
     fn audio_streams_keep_explicit_targets_and_stable_ownership_in_both_directions() {

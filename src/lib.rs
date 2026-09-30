@@ -1,5 +1,6 @@
 #![forbid(unsafe_code)]
 
+pub(crate) mod retention;
 mod session;
 
 pub mod audio;

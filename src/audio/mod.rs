@@ -133,6 +133,10 @@ pub struct AudioStats {
     pub(crate) playback_mirror: Option<std::sync::Arc<mirror::Source>>,
     pub captured_frames: AtomicU64,
     pub dropped_frames: AtomicU64,
+    /// Captured blocks discarded before original sidecars could retain them.
+    /// Native callbacks may contain multiple logical frames. Playback freshness
+    /// drops and auxiliary command/mirror copies must never increment this.
+    pub capture_lost_frames: AtomicU64,
     pub processing_dropped_frames: AtomicU64,
     pub sidecar_dropped_frames: AtomicU64,
     pub underruns: AtomicU64,
@@ -144,6 +148,17 @@ pub struct AudioStats {
     /// Set only by control workers; callbacks never lock these fields.
     pub capture_error: std::sync::Mutex<Option<String>>,
     pub playback_error: std::sync::Mutex<Option<String>>,
+}
+
+impl AudioStats {
+    /// Atomic-only accounting is safe on the native callback. Retention failure
+    /// reporting belongs to the separate original-processing consumer.
+    fn record_capture_loss(&self) {
+        self.capture_lost_frames
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.dropped_frames
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
 }
 
 #[cfg(test)]

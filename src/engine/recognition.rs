@@ -8,9 +8,10 @@ use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 const QUEUED_SAMPLES: usize = INPUT_RATE as usize * 20;
 const QUEUED_FRAMES: usize = 2048;
 const MAX_TIMELINE_SPANS: usize = 4096;
-// Leave time for the TXT writer to persist the incomplete marker before the
-// supervisor's 15-second file/processing deadline.
+// Leave time for the TXT writer to persist an incomplete marker before the
+// supervisor's corresponding 15/30-second file/processing deadline.
 const FINALIZE_TIMEOUT: Duration = Duration::from_secs(12);
+const GEMINI_FINALIZE_TIMEOUT: Duration = Duration::from_secs(27);
 
 struct Original {
     frame: PcmFrame,
@@ -35,9 +36,9 @@ impl Sink {
 
     /// Called only on the processing executor, after original audio forwarding.
     /// Neither provider startup nor network/inference congestion blocks capture.
-    pub(super) fn submit(&self, frame: PcmFrame, metrics: &RouteMetrics) {
+    pub(super) fn submit(&self, frame: PcmFrame, metrics: &RouteMetrics) -> bool {
         if frame.samples.is_empty() {
-            return;
+            return true;
         }
         let count = frame.samples.len();
         let budget = (count <= INPUT_RATE as usize && frame.sample_rate == INPUT_RATE)
@@ -64,6 +65,7 @@ impl Sink {
                 .fetch_add(1, Ordering::Relaxed);
             metrics.report_processing_error("Transcription could not retain original audio; its bounded queue is full or the recognizer is unavailable");
         }
+        accepted
     }
 }
 
@@ -127,6 +129,11 @@ async fn run(
     connected: &AtomicBool,
     losses: &AtomicU64,
 ) -> Result<()> {
+    let finalize_timeout = if provider.id() == "gemini" {
+        GEMINI_FINALIZE_TIMEOUT
+    } else {
+        FINALIZE_TIMEOUT
+    };
     let (audio, input) = mpsc::channel(8);
     let (events, mut output) = mpsc::channel(32);
     let cancel = CancellationToken::new();
@@ -144,7 +151,7 @@ async fn run(
     let mut finish_deadline = None;
     loop {
         if received.is_closed() && finish_deadline.is_none() {
-            finish_deadline = Some(tokio::time::Instant::now() + FINALIZE_TIMEOUT);
+            finish_deadline = Some(tokio::time::Instant::now() + finalize_timeout);
         }
         let dropped = losses.load(Ordering::Relaxed);
         if dropped != seen_losses {
@@ -180,6 +187,11 @@ async fn run(
                                 ready = false;
                                 connected.store(false, Ordering::Relaxed);
                                 timeline = Timeline::default();
+                                metrics.reconnects.fetch_add(1, Ordering::Relaxed);
+                            }
+                            ProviderEvent::RecoveringOriginal { .. } => {
+                                ready = false;
+                                connected.store(false, Ordering::Relaxed);
                                 metrics.reconnects.fetch_add(1, Ordering::Relaxed);
                             }
                             _ => {}

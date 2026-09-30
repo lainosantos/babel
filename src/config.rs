@@ -137,7 +137,7 @@ impl Default for RecordingMixConfig {
             microphone_gain_db: 0.0,
             speaker_gain_db: 0.0,
             microphone_priority: true,
-            ducking_db: 12.0,
+            ducking_db: 3.0,
             microphone_threshold_db: -50.0,
         }
     }
@@ -1794,7 +1794,9 @@ mod tests {
         assert!(legacy.mix.microphone_priority);
         assert_eq!(legacy.mix.microphone_gain_db, 0.0);
         assert_eq!(legacy.mix.speaker_gain_db, 0.0);
-        assert_eq!(legacy.mix.ducking_db, 12.0);
+        assert_eq!(legacy.mix.ducking_db, 3.0);
+        let previous: RecordingConfig = toml::from_str("[mix]\nducking_db = 12.0\n").unwrap();
+        assert_eq!(previous.mix.ducking_db, 12.0);
         let mut cfg = AppConfig::default();
         cfg.recording.mix.microphone_gain_db = 12.0;
         cfg.recording.mix.speaker_gain_db = -6.0;

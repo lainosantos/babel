@@ -225,13 +225,14 @@ async fn run_route_inner(
     jobs.spawn_on(
         async move {
             if let Some(sidecar) = sidecar {
-                forward_original(
+                forward_original_with_drain(
                     captured_rx,
                     play_tx,
                     Some(sidecar),
                     options,
                     worker_cancel,
                     stats,
+                    true,
                 )
                 .await
             } else {
@@ -331,68 +332,145 @@ async fn bridge_with_history(
 }
 
 /// The original transport never performs speech DSP, history locking or file I/O.
-/// Slow sidecars lose their copy, independently of the playback queue.
+/// Playback freshness does not limit original copies used by session processing.
 pub(crate) async fn forward_original(
-    mut captured: mpsc::Receiver<OriginalFrame>,
+    captured: mpsc::Receiver<OriginalFrame>,
     playback: mpsc::Sender<PlaybackCommand>,
     sidecar: Option<mpsc::Sender<OriginalFrame>>,
     options: AudioOptions,
     cancel: CancellationToken,
     stats: Arc<AudioStats>,
 ) -> Result<()> {
+    forward_original_with_drain(captured, playback, sidecar, options, cancel, stats, false).await
+}
+
+async fn forward_original_with_drain(
+    mut captured: mpsc::Receiver<OriginalFrame>,
+    playback: mpsc::Sender<PlaybackCommand>,
+    sidecar: Option<mpsc::Sender<OriginalFrame>>,
+    options: AudioOptions,
+    cancel: CancellationToken,
+    stats: Arc<AudioStats>,
+    drain_source: bool,
+) -> Result<()> {
     let _level_reset = LevelReset(stats.clone());
-    loop {
-        let frame = tokio::select! {
-            biased;
-            _ = cancel.cancelled() => return Ok(()),
-            frame = captured.recv() => match frame {
-                Some(frame) => frame,
-                None if cancel.is_cancelled() => return Ok(()),
-                None => return Err(anyhow!("Original passthrough capture ended")),
-            },
-        };
-        ensure!(
-            frame.sample_rate == options.sample_rate
-                && frame.channels == options.channels
-                && frame.samples.len() == options.frame_samples(),
-            "Unexpected PCM format in original passthrough"
-        );
-        if frame.captured_at.elapsed() > Duration::from_millis(100) {
-            stats.dropped_frames.fetch_add(1, Ordering::Relaxed);
-            continue;
-        }
-        let generation = stats.playback_generation.load(Ordering::Acquire);
-        match playback.try_send(PlaybackCommand::Original {
-            samples: frame.samples.clone(),
-            generation,
-        }) {
-            Ok(()) => (),
-            Err(mpsc::error::TrySendError::Full(_)) => {
+    let mut result = async {
+        loop {
+            let frame = tokio::select! {
+                biased;
+                _ = cancel.cancelled() => return Ok(()),
+                frame = captured.recv() => match frame {
+                    Some(frame) => frame,
+                    None if cancel.is_cancelled() => return Ok(()),
+                    None => return Err(anyhow!("Original passthrough capture ended")),
+                },
+            };
+            ensure!(
+                valid_original(&frame, options),
+                "Unexpected PCM format in original passthrough"
+            );
+            // An old frame is unsuitable for real-time playback, but remains
+            // original session data. Playback closure must not lose it either.
+            if sidecar.is_some() {
+                retain_original_copy(frame.clone(), sidecar.as_ref(), &stats);
+            }
+            if frame.captured_at.elapsed() > Duration::from_millis(100) {
                 stats.dropped_frames.fetch_add(1, Ordering::Relaxed);
+                continue;
             }
-            Err(mpsc::error::TrySendError::Closed(_)) if cancel.is_cancelled() => return Ok(()),
-            Err(mpsc::error::TrySendError::Closed(_)) => {
-                return Err(anyhow!("Original passthrough playback ended"));
+            let generation = stats.playback_generation.load(Ordering::Acquire);
+            match playback.try_send(PlaybackCommand::Original {
+                samples: frame.samples.clone(),
+                generation,
+            }) {
+                Ok(()) => (),
+                Err(mpsc::error::TrySendError::Full(_)) => {
+                    stats.dropped_frames.fetch_add(1, Ordering::Relaxed);
+                }
+                Err(mpsc::error::TrySendError::Closed(_)) if cancel.is_cancelled() => return Ok(()),
+                Err(mpsc::error::TrySendError::Closed(_)) => {
+                    return Err(anyhow!("Original passthrough playback ended"));
+                }
             }
+            let level = (frame
+                .samples
+                .iter()
+                .map(|&sample| f64::from(sample).powi(2))
+                .sum::<f64>()
+                / frame.samples.len() as f64)
+                .sqrt() as f32;
+            stats
+                .passthrough_level
+                .store(level.to_bits(), Ordering::Relaxed);
         }
-        let level = (frame
-            .samples
-            .iter()
-            .map(|&sample| f64::from(sample).powi(2))
-            .sum::<f64>()
-            / frame.samples.len() as f64)
-            .sqrt() as f32;
-        stats
-            .passthrough_level
-            .store(level.to_bits(), Ordering::Relaxed);
-        if let Some(sidecar) = &sidecar
-            && sidecar.try_send(frame).is_err()
-        {
+    }
+    .await;
+    if drain_source {
+        // Production capture owns this bounded source. Stop hardware first and
+        // accept its final PCM without restarting playback or waiting on AI.
+        cancel.cancel();
+        let drained = tokio::time::timeout(Duration::from_secs(1), async {
+            while let Some(frame) = captured.recv().await {
+                if valid_original(&frame, options) {
+                    retain_original_copy(frame, sidecar.as_ref(), &stats);
+                } else {
+                    stats.record_capture_loss();
+                    result = Err(anyhow!("Unexpected PCM format in original capture tail"));
+                }
+            }
+        })
+        .await;
+        if drained.is_err() && result.is_ok() {
+            result = Err(anyhow!(
+                "Original capture did not finish its bounded shutdown drain"
+            ));
+        }
+    }
+    // Freeze this bounded queue before draining. No new device audio is accepted
+    // and no playback is restarted after cancellation or a playback failure.
+    captured.close();
+    for _ in 0..captured.len() {
+        let Ok(frame) = captured.try_recv() else {
+            break;
+        };
+        if valid_original(&frame, options) {
+            retain_original_copy(frame, sidecar.as_ref(), &stats);
+        } else {
             stats.sidecar_dropped_frames.fetch_add(1, Ordering::Relaxed);
             stats
                 .processing_dropped_frames
                 .fetch_add(1, Ordering::Relaxed);
+            if result.is_ok() {
+                result = Err(anyhow!("Unexpected PCM format in original passthrough"));
+            }
         }
+    }
+    result
+}
+
+fn valid_original(frame: &OriginalFrame, options: AudioOptions) -> bool {
+    frame.sample_rate == options.sample_rate
+        && frame.channels == options.channels
+        && !frame.samples.is_empty()
+        && frame.samples.len() <= options.frame_samples()
+        && frame
+            .samples
+            .len()
+            .is_multiple_of(usize::from(options.channels))
+}
+
+fn retain_original_copy(
+    frame: OriginalFrame,
+    sidecar: Option<&mpsc::Sender<OriginalFrame>>,
+    stats: &AudioStats,
+) {
+    if let Some(sidecar) = sidecar
+        && sidecar.try_send(frame).is_err()
+    {
+        stats.sidecar_dropped_frames.fetch_add(1, Ordering::Relaxed);
+        stats
+            .processing_dropped_frames
+            .fetch_add(1, Ordering::Relaxed);
     }
 }
 
@@ -638,6 +716,66 @@ mod tests {
         assert_eq!(stats.passthrough_level.load(Ordering::Relaxed), 0);
     }
     #[tokio::test]
+    async fn production_shutdown_accepts_partial_original_tail_until_capture_closes() {
+        let options = AudioOptions {
+            channels: 2,
+            ..options()
+        };
+        let (capture, captured) = mpsc::channel(2);
+        let (playback, mut played) = mpsc::channel(2);
+        let (sidecar, mut originals) = mpsc::channel(2);
+        let cancel = CancellationToken::new();
+        cancel.cancel();
+        let stats = Arc::new(AudioStats::default());
+        let worker = tokio::spawn(forward_original_with_drain(
+            captured,
+            playback,
+            Some(sidecar),
+            options,
+            cancel,
+            stats.clone(),
+            true,
+        ));
+        tokio::task::yield_now().await;
+        assert!(!worker.is_finished());
+        let samples: Arc<[f32]> = [0.75, -0.125].repeat(7).into();
+        capture
+            .send(OriginalFrame {
+                samples: samples.clone(),
+                sample_rate: options.sample_rate,
+                channels: 2,
+                captured_at: std::time::Instant::now(),
+            })
+            .await
+            .unwrap();
+        drop(capture);
+        tokio::time::timeout(Duration::from_secs(2), worker)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        let preserved = originals.recv().await.unwrap();
+        assert_eq!(preserved.samples, samples);
+        assert_eq!(preserved.channels, 2);
+        assert!(originals.recv().await.is_none());
+        assert!(
+            played.try_recv().is_err(),
+            "Shutdown cannot restart playback"
+        );
+        assert_eq!(stats.capture_lost_frames.load(Ordering::Relaxed), 0);
+        assert_eq!(stats.sidecar_dropped_frames.load(Ordering::Relaxed), 0);
+        assert!(!valid_original(
+            &OriginalFrame {
+                samples: vec![1.0, 2.0, 3.0].into(),
+                sample_rate: options.sample_rate,
+                channels: 2,
+                captured_at: std::time::Instant::now(),
+            },
+            options
+        ));
+    }
+
+    #[tokio::test]
     async fn a_saturated_output_drops_bounded_frames_and_remains_cancellable() {
         let (capture_tx, capture_rx) = mpsc::channel(2);
         let (play_tx, mut play_rx) = mpsc::channel(1);
@@ -659,6 +797,7 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(play_rx.len(), 1);
+        assert_eq!(stats.capture_lost_frames.load(Ordering::Relaxed), 0);
         assert!(play_rx.try_recv().is_ok());
         cancel.cancel();
         tokio::time::timeout(Duration::from_millis(100), worker)
@@ -735,7 +874,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn stale_capture_is_discarded_instead_of_replayed_after_a_stall() {
+    async fn stale_capture_is_retained_for_processing_without_replaying_it() {
         let (tx, rx) = mpsc::channel(2);
         let (play_tx, mut play_rx) = mpsc::channel(2);
         let cancel = CancellationToken::new();
@@ -746,8 +885,17 @@ mod tests {
         stale.captured_at = Instant::now() - Duration::from_millis(150);
         tx.send(stale).await.unwrap();
         tx.send(frame(2222)).await.unwrap();
+        let (copies, mut retained) = mpsc::channel(2);
         let worker = tokio::spawn(async move {
-            bridge(rx, play_tx, options(), worker_cancel, worker_stats).await
+            forward_original(
+                rx,
+                play_tx,
+                Some(copies),
+                options(),
+                worker_cancel,
+                worker_stats,
+            )
+            .await
         });
         let Some(PlaybackCommand::Original { samples, .. }) = play_rx.recv().await else {
             panic!("Fresh PCM missing")
@@ -755,7 +903,82 @@ mod tests {
         assert_eq!(samples.as_ref(), vec![2222.0 / 32768.0; 480]);
         assert_eq!(stats.dropped_frames.load(Ordering::Relaxed), 1);
         assert!(play_rx.try_recv().is_err());
+        for value in [1111_i16, 2222] {
+            assert_eq!(
+                retained.recv().await.unwrap().samples.as_ref(),
+                vec![f32::from(value) / 32768.0; 480]
+            );
+        }
+        assert_eq!(stats.sidecar_dropped_frames.load(Ordering::Relaxed), 0);
         cancel.cancel();
         worker.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn cancelled_capture_preserves_its_existing_tail_without_playback_or_new_capture() {
+        let (capture, received) = mpsc::channel(3);
+        let (playback, mut played) = mpsc::channel(3);
+        let (copies, mut retained) = mpsc::channel(3);
+        for value in [111, 222, 333] {
+            capture.send(frame(value)).await.unwrap();
+        }
+        let cancel = CancellationToken::new();
+        cancel.cancel();
+        let stats = Arc::new(AudioStats::default());
+        tokio::time::timeout(
+            Duration::from_millis(100),
+            forward_original(
+                received,
+                playback,
+                Some(copies),
+                options(),
+                cancel,
+                stats.clone(),
+            ),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert!(capture.is_closed());
+        assert!(played.try_recv().is_err());
+        for value in [111_i16, 222, 333] {
+            assert_eq!(
+                retained.recv().await.unwrap().samples.as_ref(),
+                vec![f32::from(value) / 32768.0; 480]
+            );
+        }
+        assert!(retained.recv().await.is_none());
+        assert_eq!(stats.sidecar_dropped_frames.load(Ordering::Relaxed), 0);
+    }
+
+    #[tokio::test]
+    async fn playback_closure_preserves_current_and_queued_originals() {
+        let (capture, received) = mpsc::channel(3);
+        let (playback, played) = mpsc::channel(1);
+        drop(played);
+        let (copies, mut retained) = mpsc::channel(3);
+        for value in [111, 222, 333] {
+            capture.send(frame(value)).await.unwrap();
+        }
+        let stats = Arc::new(AudioStats::default());
+        let result = forward_original(
+            received,
+            playback,
+            Some(copies),
+            options(),
+            CancellationToken::new(),
+            stats.clone(),
+        )
+        .await;
+        assert!(result.unwrap_err().to_string().contains("playback"));
+        for value in [111_i16, 222, 333] {
+            assert_eq!(
+                retained.recv().await.unwrap().samples.as_ref(),
+                vec![f32::from(value) / 32768.0; 480]
+            );
+        }
+        assert!(capture.is_closed());
+        assert!(retained.recv().await.is_none());
+        assert_eq!(stats.sidecar_dropped_frames.load(Ordering::Relaxed), 0);
     }
 }

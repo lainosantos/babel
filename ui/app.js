@@ -10,6 +10,7 @@
   const filePathPreview = { revision: 0, timer: null, controller: null, phase: 'idle', paths: null, error: '' };
   const microphoneDraft = { source: 'physical_microphone', device: '' };
   const microphoneSources = Object.freeze({ speaker_original: 'babel-source:speaker_original', speaker_output: 'babel-source:speaker_output' });
+  const retention = { sessions: [], fresh: false, error: '', polling: false, generation: 0, recovering: new Set(), errors: new Map(), nodes: new Map() };
   let translationSelection = [...routeNames];
   let token = new URLSearchParams(location.hash.slice(1)).get('token');
   try {
@@ -279,7 +280,7 @@
     config.audio.microphone_source ??= 'physical_microphone';
     microphoneDraft.source = config.audio.microphone_source;
     microphoneDraft.device = config.microphone.capture_device || '';
-    config.recording.mix = { microphone_gain_db: 0, speaker_gain_db: 0, microphone_priority: true, ducking_db: 12, microphone_threshold_db: -50, ...config.recording.mix };
+    config.recording.mix = { microphone_gain_db: 0, speaker_gain_db: 0, microphone_priority: true, ducking_db: 3, microphone_threshold_db: -50, ...config.recording.mix };
     state.config = config;
     writeValue(byId('files-base_path'), config.files?.base_path ?? '');
     document.querySelectorAll('[data-field]').forEach((element) => {
@@ -748,6 +749,73 @@
         : state.dirty
           ? t("ui.you_have_unsaved_settings_starting_the_session_also_saves_them")
           : t("ui.choose_which_features_to_use_and_start_a_session_to_translate_transcribe_or");
+    renderRetention();
+  }
+
+  function renderRetention() {
+    const card = byId('retention-card');
+    card.hidden = retention.sessions.length === 0 && !retention.error;
+    byId('retention-read-error').textContent = retention.error ? t('retention.read_error', { error: retention.error }) : '';
+    byId('retention-read-error').hidden = !retention.error;
+    const present = new Set(retention.sessions.map(session => session.id));
+    for (const [id, row] of retention.nodes) {
+      if (!present.has(id)) { row.node.remove(); retention.nodes.delete(id); retention.errors.delete(id); }
+    }
+    for (const session of retention.sessions) {
+      let row = retention.nodes.get(session.id);
+      if (!row) {
+        const node = document.createElement('li'); node.className = 'retention-session';
+        const detail = document.createElement('div'); detail.className = 'retention-session-detail';
+        const name = document.createElement('strong');
+        const status = document.createElement('p'); status.className = 'field-hint';
+        const error = document.createElement('p'); error.className = 'retention-session-error';
+        const button = document.createElement('button'); button.type = 'button'; button.className = 'button secondary';
+        button.dataset.retentionId = session.id;
+        button.addEventListener('click', () => recoverRetainedSession(session.id));
+        detail.append(name, status, error); node.append(detail, button);
+        row = { node, name, status, error, button };
+        retention.nodes.set(session.id, row); byId('retention-sessions').append(node);
+      }
+      const recovering = Boolean(session.recovering) || retention.recovering.has(session.id);
+      const bytes = Math.max(0, Number(session.memory_bytes) || 0) + Math.max(0, Number(session.encrypted_bytes) || 0);
+      row.name.textContent = session.name || session.id;
+      row.status.textContent = recovering ? t('retention.recovering') : t('retention.available', { size: i18n.number(bytes / 1048576, { maximumFractionDigits: 1 }) });
+      row.error.textContent = retention.errors.get(session.id) || session.error || '';
+      row.error.hidden = !row.error.textContent;
+      row.button.textContent = t(recovering ? 'retention.recovering' : 'retention.recover');
+      row.button.disabled = recovering || !retention.fresh || !state.authenticated;
+      row.node.setAttribute('aria-busy', String(recovering));
+    }
+  }
+
+  async function refreshRetention() {
+    if (!state.authenticated || retention.polling) return;
+    retention.polling = true;
+    const generation = retention.generation;
+    try {
+      const sessions = await api('/retention');
+      if (generation !== retention.generation) return;
+      if (!Array.isArray(sessions) || sessions.some(session => !session || typeof session.id !== 'string')) throw new Error(t('retention.invalid_response'));
+      retention.sessions = sessions; retention.fresh = true; retention.error = '';
+    } catch (error) { if (generation === retention.generation) { retention.fresh = false; retention.error = error.message; } }
+    finally { retention.polling = false; renderRetention(); }
+  }
+
+  async function recoverRetainedSession(id) {
+    const session = retention.sessions.find(item => item.id === id);
+    if (!session || session.recovering || retention.recovering.has(id) || !retention.fresh || !state.authenticated) return;
+    retention.generation++; retention.recovering.add(id); retention.errors.delete(id); renderRetention();
+    try {
+      // Recovery can outlast an ordinary dashboard request. The controller
+      // owns the attempt; audio routing and status polling remain available.
+      await api('/retention/recover', { method: 'POST', body: { id }, signal: new AbortController().signal });
+      retention.sessions = retention.sessions.filter(item => item.id !== id);
+      announce(t('retention.recovered', { name: session.name || id }));
+    } catch (error) {
+      retention.errors.set(id, error.message);
+    } finally {
+      retention.generation++; retention.recovering.delete(id); renderRetention(); await refreshRetention();
+    }
   }
 
   function renderStatus(status, fresh = true) {
@@ -802,6 +870,7 @@
       if ((state.busy && !state.starting) || state.activity !== activity) return;
       renderStatus(status);
       if (!state.starting) await synchronizeConfig(status);
+      await refreshRetention();
     } catch (error) {
       state.statusFresh = false;
       renderHistoryBuffer();
@@ -1065,6 +1134,7 @@
     }
     renderPlatform();
     renderFilePathPreview();
+    renderRetention();
     if (state.config) {
       updateProviderControls(); updateGainLabels(); updateQualityHint();
       if (state.status) renderStatus(state.status, state.statusFresh);
@@ -1114,7 +1184,7 @@
       state.authenticated = true;
       applyConfig(snapshot.body);
       await refreshInterface();
-      const results = await Promise.allSettled([refreshDevices(), api('/status'), refreshAutostart(), refreshPlatform()]);
+      const results = await Promise.allSettled([refreshDevices(), api('/status'), refreshAutostart(), refreshPlatform(), refreshRetention()]);
       if (results[0].status === 'rejected') showError(results[0].reason.message);
       if (results[1].status === 'fulfilled') { renderStatus(results[1].value); await synchronizeConfig(results[1].value); }
       else showError(results[1].reason.message);

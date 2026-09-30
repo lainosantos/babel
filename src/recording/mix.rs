@@ -206,7 +206,7 @@ mod tests {
     }
 
     #[test]
-    fn quiet_microphone_becomes_audible_against_loud_incoming_music() {
+    fn default_and_configured_priority_reduce_only_the_incoming_source() {
         let sources: Vec<_> = (0..16_000)
             .map(|index| {
                 [
@@ -215,24 +215,36 @@ mod tests {
                 ]
             })
             .collect();
-        let config = RecordingMixConfig {
-            microphone_gain_db: 12.0,
-            ..Default::default()
-        };
-        let mut unbalanced = config.clone();
-        unbalanced.microphone_priority = false;
-        let before = render(&unbalanced, &sources);
-        let after = render(&config, &sources);
-        // Measure each independent source frequency after the attack settles.
-        // A blanket volume increase cannot pass this relative-intelligibility test.
-        let before_ratio = component(&before[8000..], 300.0) / component(&before[8000..], 900.0);
-        let after_ratio = component(&after[8000..], 300.0) / component(&after[8000..], 900.0);
-        let improvement = 20.0 * (after_ratio / before_ratio).log10();
-        assert!((11.8..12.2).contains(&improvement), "{improvement} dB");
-        assert!(
-            (component(&after[8000..], 300.0) / component(&before[8000..], 300.0) - 1.0).abs()
-                < 0.01
-        );
+        for (config, expected_reduction) in [
+            (RecordingMixConfig::default(), 3.0),
+            (
+                RecordingMixConfig {
+                    microphone_gain_db: 12.0,
+                    ducking_db: 12.0,
+                    ..Default::default()
+                },
+                12.0,
+            ),
+        ] {
+            let mut unbalanced = config.clone();
+            unbalanced.microphone_priority = false;
+            let before = render(&unbalanced, &sources);
+            let after = render(&config, &sources);
+            // Measure each source frequency after the attack settles. The default
+            // must remain subtle, while explicitly stronger settings still work.
+            let before_ratio =
+                component(&before[8000..], 300.0) / component(&before[8000..], 900.0);
+            let after_ratio = component(&after[8000..], 300.0) / component(&after[8000..], 900.0);
+            let improvement = 20.0 * (after_ratio / before_ratio).log10();
+            assert!(
+                (improvement - expected_reduction).abs() < 0.2,
+                "expected {expected_reduction} dB, measured {improvement} dB"
+            );
+            assert!(
+                (component(&after[8000..], 300.0) / component(&before[8000..], 300.0) - 1.0).abs()
+                    < 0.01
+            );
+        }
     }
 
     #[test]
@@ -279,8 +291,11 @@ mod tests {
             .map(|(input, output)| (f64::from(*output) * 2.0 - f64::from(input[0])) / 10_000.0)
             .collect();
         assert!(output_gains[..4000].iter().all(|gain| *gain == 1.0));
-        assert!(output_gains[19_000] < 0.26);
-        assert!(output_gains[21_500] < 0.26, "hold protects short pauses");
+        assert!((0.707..0.709).contains(&output_gains[19_000]));
+        assert!(
+            (0.707..0.709).contains(&output_gains[21_500]),
+            "hold protects short pauses without increasing the default reduction"
+        );
         assert!(
             output_gains[47_999] > 0.99,
             "incoming audio recovers after speech"

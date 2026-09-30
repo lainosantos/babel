@@ -23,7 +23,7 @@ directory = "recordings"
 microphone_gain_db = 0.0
 speaker_gain_db = 0.0
 microphone_priority = true
-ducking_db = 12.0
+ducking_db = 3.0
 microphone_threshold_db = -50.0
 
 [files]
@@ -122,8 +122,59 @@ duration_secs = 600
 PCM uses up to 38.4 MB for ten minutes of both sources (mono PCM16 at 16 kHz),
 plus metadata. During inclusion, selected history is shared with writers/recognizers
 without copying all audio. If retention keeps advancing during processing,
-those references can temporarily retain another PCM window. They are released
-as soon as the jobs using them finish.
+those references can temporarily retain another PCM window. A selected prefix
+also remains shared with session recovery until the selected files complete.
+
+## Recover an incomplete session
+
+Sessions with recording or transcription enabled retain the selected original
+sources independently of live processing queues. If a writer, recognizer or
+finalization fails, the **Session files need recovery** card offers **Recover session**, which
+reprocesses the retained originals. Keep Babel open until recovery completes.
+The optional pre-session prefix is retained too. Both sources keep their own
+timestamps and enter recognition separately; mixing happens only in the WAV.
+
+Recovery uses the session's original source selections, folders, mixing settings
+and STT profiles. It creates new uniquely named files with a shared stem, leaving
+the previous partial files untouched. Cloud recognition can incur additional
+charges. A failed retry keeps the originals available for another attempt;
+closing the dashboard does not cancel recovery. Original live routing continues.
+Recognition uses bounded windows of about thirty seconds, preserving cumulative
+source timestamps. Empty sources do not open a model connection; digital-silence
+windows advance the clock without an inference request.
+Provider-assigned speaker IDs may restart between requests; they are not
+persistent identities across windows or sources.
+
+Live retained PCM starts in memory. Above an 8 MiB working budget, a separate
+processing worker spills bounded batches encrypted with **XChaCha20-Poly1305**
+under a unique `.babel-retention-*` directory in the system temporary folder.
+The platform resolves that folder, including its temporary-directory environment
+overrides such as `TMPDIR` on Linux/macOS and `TMP`/`TEMP` on Windows. It is
+independent of `files.base_path`. Audio and capture metadata are encrypted before
+the first file write. Every session has a randomly generated key held only in
+process memory; Babel never writes it to
+configuration, files, logs or a credential store. Authenticated records detect
+tampering and truncation. UNIX directories use `0700` and files `0600`; Windows
+inherits the temporary parent folder's ACL. The final, explicitly requested
+TXT/WAV files still use the configured destination folders and base path. They
+are ordinary user files and are not encrypted by this temporary-storage scheme.
+
+Pending originals are not evicted by age or by a failed provider. They are
+released after all selected writers complete successfully, including their
+final filesystem sync. The already allocated optional history prefix stays
+shared in RAM. If spill fails, accepted live originals stay in memory; a 64 MiB
+live-retention ceiling reports an explicit failure rather than silently
+overwriting retained data. The ceiling excludes the separately configured
+rolling/history prefix and small in-flight encryption/decryption buffers.
+
+This is recovery while the process remains alive, **not crash recovery**.
+Normal cleanup removes temporary ciphertext and erases the key. Forced exit or
+power loss destroys the key; leftover encrypted files cannot be reopened. OS
+swap and crash dumps are outside this application's key-storage guarantee.
+Finite buffers cannot preserve audio that never reaches retention because of
+a device/capture overrun or exhausted memory/storage. Such a gap is reported,
+and replay of the surviving frames is never presented as complete recovery.
+These storage and recovery paths are shared Rust code on Linux, macOS and Windows.
 
 ## Format and volume
 
@@ -145,8 +196,12 @@ inaudible under louder music even though both original signals are present.
   exceeds the activity threshold, Babel smoothly reduces the incoming source in
   the recording. It never mutes or gates the microphone. Attack, hold and release
   prevent abrupt volume switches between syllables.
-- **Incoming audio reduction** sets that reduction from 0 to 30 dB, default 12 dB.
-  A larger value gives the microphone more space while both sources overlap.
+- **Incoming audio reduction** sets that reduction from 0 to 30 dB, default 3 dB.
+  This subtle default retains about 71% of the incoming signal's amplitude while
+  both sources overlap, before the shared mixing headroom. A larger value gives
+  the microphone more space; the previous 12 dB default retained about 25%.
+  Saved values remain unchanged when Babel is updated. Lower this control for a
+  lighter effect in an existing configuration, or set it to 0 to disable reduction.
 - **Microphone activity threshold** ranges from −60 to −20 dBFS, default −50.
   It is measured before microphone gain. A more negative value detects quieter
   activity; a less negative value rejects more background noise. This is level

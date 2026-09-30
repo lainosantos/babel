@@ -276,8 +276,11 @@ async fn capture_with(
                     let command_frame = frame.clone();
                     match output.try_send(frame) {
                         Ok(()) => (),
-                        Err(mpsc::error::TrySendError::Full(_)) => { stats.dropped_frames.fetch_add(1, Ordering::Relaxed); }
-                        Err(mpsc::error::TrySendError::Closed(_)) => break End::Disconnected,
+                        Err(mpsc::error::TrySendError::Full(_)) => { stats.record_capture_loss(); }
+                        Err(mpsc::error::TrySendError::Closed(_)) => {
+                            stats.record_capture_loss();
+                            break End::Disconnected;
+                        }
                     }
                     if let Some(mirror) = &mirror {
                         mirror.publish(&command_frame);
@@ -288,11 +291,28 @@ async fn capture_with(
         };
         drop(command_tap);
         drop(mirror);
-        stop_backend(&mut request, &worker_cancel, finished).await?;
+        let stopped = {
+            let stopping = stop_backend(&mut request, &worker_cancel, finished);
+            tokio::pin!(stopping);
+            let mut incoming_open = true;
+            loop {
+                tokio::select! {
+                    result = &mut stopping => break result,
+                    frame = incoming.recv(), if incoming_open => match frame {
+                        Some(frame) => forward_capture_tail(frame, &output, &stats),
+                        None => incoming_open = false,
+                    }
+                }
+            }
+        };
         drop(request);
-        while incoming.try_recv().is_ok() {
-            stats.dropped_frames.fetch_add(1, Ordering::Relaxed);
+        incoming.close();
+        for _ in 0..incoming.len() {
+            if let Ok(frame) = incoming.try_recv() {
+                forward_capture_tail(frame, &output, &stats);
+            }
         }
+        stopped?;
         match end {
             End::Cancelled => return Ok(()),
             End::Disconnected if cancel.is_cancelled() => return Ok(()),
@@ -323,6 +343,18 @@ async fn capture_with(
                 }
             }
         }
+    }
+}
+
+fn forward_capture_tail(
+    frame: OriginalFrame,
+    output: &mpsc::Sender<OriginalFrame>,
+    stats: &AudioStats,
+) {
+    // Hardware is stopping. Only original archival consumers may receive this
+    // tail; command and mirror publishers have already been revoked.
+    if output.try_send(frame).is_err() {
+        stats.record_capture_loss();
     }
 }
 

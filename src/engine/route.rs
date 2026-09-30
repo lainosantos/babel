@@ -17,6 +17,7 @@ pub(super) async fn run_route(
         mut capture_changes,
         mut playback_changes,
         history,
+        retained,
     } = io;
     if capture_changes.borrow().is_empty() || playback_changes.borrow().is_empty() {
         metrics.state("unconfigured");
@@ -130,7 +131,7 @@ pub(super) async fn run_route(
         let forward_stats = metrics.audio.clone();
         audio_jobs.spawn_on(
             async move {
-                forward_processing(device_rx, sidecar_tx, forward_cancel, forward_stats).await
+                forward_processing(device_rx, sidecar_tx, forward_cancel, forward_stats, true).await
             },
             &audio_handle,
         );
@@ -209,9 +210,12 @@ pub(super) async fn run_route(
         history: &history,
         recording: &mut audio_tx,
         recognition: recognition.as_ref(),
+        retained: retained.as_deref(),
         origin,
         metrics: &metrics,
-        copy_losses: metrics.audio.sidecar_dropped_frames.load(Ordering::Relaxed),
+        // Capture may have already reported a rejected sidecar by this point.
+        copy_losses: 0,
+        capture_losses: 0,
     };
     let result: Result<()> = async {
         loop {
@@ -265,7 +269,8 @@ pub(super) async fn run_route(
                         }
                         // STS may emit transcripts for its own synthesis protocol. Only
                         // the independently selected STT stream owns the saved original.
-                        ProviderEvent::Transcript { .. } | ProviderEvent::TurnComplete => {}
+                        ProviderEvent::Transcript { .. } | ProviderEvent::TurnComplete
+                            | ProviderEvent::RecoveringOriginal { .. } => {}
                     }
                 }
                 frame = captured_rx.recv() => {
@@ -310,12 +315,25 @@ pub(super) async fn run_route(
     processing_jobs.abort_all();
     let mut cleanup_result = Ok(());
     let audio_shutdown = tokio::time::timeout(Duration::from_secs(2), async {
-        while let Some(completed) = audio_jobs.join_next().await {
-            let completed = completed
-                .context("Transport task interrupted")
-                .and_then(|r| r);
-            if completed.is_err() && cleanup_result.is_ok() {
-                cleanup_result = completed;
+        let mut originals_open = true;
+        while !audio_jobs.is_empty() {
+            tokio::select! {
+                completed = audio_jobs.join_next() => {
+                    if let Some(completed) = completed {
+                        let completed = completed
+                            .context("Transport task interrupted")
+                            .and_then(|result| result);
+                        if completed.is_err() && cleanup_result.is_ok() {
+                            cleanup_result = completed;
+                        }
+                    }
+                }
+                original = captured_rx.recv(), if originals_open => {
+                    match original {
+                        Some(original) => { originals.retain(&original, false); }
+                        None => originals_open = false,
+                    }
+                }
             }
         }
     })
@@ -350,66 +368,129 @@ struct OriginalSidecar<'a> {
     history: &'a crate::history::HistoryBuffer,
     recording: &'a mut Option<mpsc::Sender<AudioRecord>>,
     recognition: Option<&'a recognition::Sink>,
+    retained: Option<&'a retained::RetainedSession>,
     origin: TranscriptOrigin,
     metrics: &'a RouteMetrics,
     copy_losses: u64,
+    capture_losses: u64,
 }
 
 impl OriginalSidecar<'_> {
-    fn retain(
-        &mut self,
-        original: &audio::OriginalFrame,
-        needs_translation: bool,
-    ) -> Option<audio::PcmFrame> {
+    fn report_incomplete(&self, reason: &str) {
+        self.metrics.report_processing_error(reason);
+        if let Some(retained) = self.retained {
+            retained.mark_incomplete(reason);
+        }
+    }
+
+    fn report_missing_originals(&self, reason: &str) {
+        self.metrics.report_processing_error(reason);
+        if let Some(retained) = self.retained {
+            retained.mark_unrecoverable(reason);
+        }
+    }
+
+    fn observe_copy_losses(&mut self) {
         let losses = self
             .metrics
             .audio
             .sidecar_dropped_frames
             .load(Ordering::Relaxed);
-        if losses > self.copy_losses && (self.recording.is_some() || self.recognition.is_some()) {
-            self.metrics.report_processing_error(
-                "Audio processing overloaded; the recording or transcript may contain gaps",
+        if losses > self.copy_losses
+            && (self.recording.is_some() || self.recognition.is_some() || self.retained.is_some())
+        {
+            self.report_missing_originals(
+                "Original audio was lost before session retention; those missing frames cannot be recovered",
             );
         }
         self.copy_losses = losses;
+        let capture_losses = self
+            .metrics
+            .audio
+            .capture_lost_frames
+            .load(Ordering::Relaxed);
+        if capture_losses > self.capture_losses
+            && (self.recording.is_some() || self.recognition.is_some() || self.retained.is_some())
+        {
+            self.report_missing_originals(
+                "Captured original audio was discarded before session processing; those missing frames cannot be recovered",
+            );
+        }
+        self.capture_losses = capture_losses;
+    }
+
+    fn retain(
+        &mut self,
+        original: &audio::OriginalFrame,
+        needs_translation: bool,
+    ) -> Option<audio::PcmFrame> {
+        self.observe_copy_losses();
         if !needs_translation
             && self.recognition.is_none()
             && self.recording.is_none()
+            && self.retained.is_none()
             && !self.history.enabled()
         {
             return None;
         }
         let frame = self.speech.convert(original);
+        // Preserve originals before either writer or recognizer can reject a
+        // frame. The store only copies into bounded RAM on this executor;
+        // encrypted spill runs independently of the original audio transport.
+        if let Some(retained) = self.retained
+            && !frame.samples.is_empty()
+            && let Err(error) = retained.capture(&frame, self.origin)
+        {
+            self.report_missing_originals(&format!(
+                "Original audio retention failed; this frame cannot be guaranteed for recovery: {error}"
+            ));
+        }
         let lane = match self.origin {
             TranscriptOrigin::Microphone => RecordingLane::Microphone,
             TranscriptOrigin::Speaker => RecordingLane::Speaker,
         };
         self.history.push(lane, &frame.samples, frame.captured_at);
-        if let Some(sender) = self.recording.as_ref()
-            && sender
-                .try_send(AudioRecord {
-                    lane,
-                    samples: frame.samples.clone(),
-                    captured_at: frame.captured_at,
-                })
-                .is_err()
-        {
-            self.metrics.report_processing_error(
-                "Audio recording interrupted: destination unavailable or slow; the file may be incomplete",
-            );
-            *self.recording = None;
+        if let Some(sender) = self.recording.as_ref() {
+            let result = sender.try_send(AudioRecord {
+                lane,
+                samples: frame.samples.clone(),
+                captured_at: frame.captured_at,
+            });
+            if result.is_err() {
+                self.report_incomplete(if self.retained.is_some() {
+                    "Audio recording needs recovery: its writer is unavailable or slow; accepted originals remain retained"
+                } else {
+                    "Audio recording interrupted: destination unavailable or slow; the file may be incomplete"
+                });
+                // A temporary full queue must not disable all subsequent
+                // recording. The session owner can replay retained originals
+                // after either congestion or a permanently closed writer.
+            }
         }
-        if let Some(recognizer) = self.recognition
-            && recognizer.available()
-        {
-            recognizer.submit(
-                audio::PcmFrame {
-                    samples: frame.samples.clone(),
-                    sample_rate: frame.sample_rate,
-                    captured_at: frame.captured_at,
-                },
-                self.metrics,
-            );
+        if let Some(recognizer) = self.recognition {
+            if recognizer.available() {
+                let accepted = recognizer.submit(
+                    audio::PcmFrame {
+                        samples: frame.samples.clone(),
+                        sample_rate: frame.sample_rate,
+                        captured_at: frame.captured_at,
+                    },
+                    self.metrics,
+                );
+                if !accepted {
+                    self.report_incomplete(if self.retained.is_some() {
+                        "Transcription needs recovery: its input queue rejected audio; accepted originals remain retained"
+                    } else {
+                        "Transcription interrupted: its input queue rejected audio; the transcript may be incomplete"
+                    });
+                }
+            } else {
+                self.report_incomplete(if self.retained.is_some() {
+                    "Transcription needs recovery: its recognizer is unavailable; accepted originals remain retained"
+                } else {
+                    "Transcription interrupted: its recognizer is unavailable; the transcript may be incomplete"
+                });
+            }
         }
         Some(frame)
     }
@@ -418,29 +499,15 @@ impl OriginalSidecar<'_> {
         // Closing rejects new sends even if a malfunctioning device has not
         // released every task yet. Never await a producer or a model here.
         captured.close();
+        self.observe_copy_losses();
         let count = captured.len();
-        let deadline = Instant::now() + Duration::from_millis(500);
-        for index in 0..count {
-            if Instant::now() >= deadline {
-                let skipped = (count - index) as u64;
-                self.metrics
-                    .audio
-                    .processing_dropped_frames
-                    .fetch_add(skipped, Ordering::Relaxed);
-                self.metrics
-                    .audio
-                    .sidecar_dropped_frames
-                    .fetch_add(skipped, Ordering::Relaxed);
-                self.metrics.report_processing_error(
-                    "Original audio finalization exceeded its bounded drain time; files may be incomplete",
-                );
-                break;
-            }
+        for _ in 0..count {
             let Ok(original) = captured.try_recv() else {
                 break;
             };
             self.retain(&original, false);
         }
+        self.observe_copy_losses();
     }
 }
 
@@ -497,28 +564,66 @@ async fn forward_processing(
     processing: mpsc::Sender<audio::OriginalFrame>,
     cancel: CancellationToken,
     stats: Arc<AudioStats>,
+    drain_source: bool,
 ) -> Result<()> {
-    let forward = |frame| {
-        if processing.try_send(frame).is_err() {
-            stats
-                .processing_dropped_frames
-                .fetch_add(1, Ordering::Relaxed);
-            stats.sidecar_dropped_frames.fetch_add(1, Ordering::Relaxed);
-        }
-    };
-    loop {
-        let frame = tokio::select! { biased; _ = cancel.cancelled() => break, frame = captured.recv() => frame };
+    let stopped_frame = loop {
+        let frame = tokio::select! { biased; _ = cancel.cancelled() => break None, frame = captured.recv() => frame };
         let Some(frame) = frame else {
             return Err(anyhow!("Audio capture ended"));
         };
-        forward(frame);
-    }
+        if cancel.is_cancelled() {
+            break Some(frame);
+        }
+        match processing.try_send(frame) {
+            Ok(()) => {}
+            Err(mpsc::error::TrySendError::Full(frame)) if cancel.is_cancelled() => {
+                break Some(frame);
+            }
+            Err(_) => {
+                stats
+                    .processing_dropped_frames
+                    .fetch_add(1, Ordering::Relaxed);
+                stats.sidecar_dropped_frames.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+    };
     // Translated routes have this additional original-only queue. Preserve its
     // accepted frames for the session sidecar, with no network/playback work.
+    // The route consumes sidecars concurrently during its bounded shutdown, so
+    // a full destination can retain this tail without waiting for an AI model.
+    if drain_source {
+        let result = tokio::time::timeout(Duration::from_secs(1), async {
+            if let Some(frame) = stopped_frame {
+                processing
+                    .send(frame)
+                    .await
+                    .context("Original processing closed during shutdown")?;
+            }
+            while let Some(frame) = captured.recv().await {
+                processing
+                    .send(frame)
+                    .await
+                    .context("Original processing closed during shutdown")?;
+            }
+            Ok::<_, anyhow::Error>(())
+        })
+        .await;
+        return result.context("Original capture did not finish its bounded shutdown drain")?;
+    }
     captured.close();
-    for _ in 0..captured.len() {
+    let count = captured.len();
+    if let Some(frame) = stopped_frame {
+        processing
+            .send(frame)
+            .await
+            .context("Original processing closed during shutdown")?;
+    }
+    for _ in 0..count {
         if let Ok(frame) = captured.try_recv() {
-            forward(frame);
+            processing
+                .send(frame)
+                .await
+                .context("Original processing closed during shutdown")?;
         }
     }
     Ok(())
@@ -535,6 +640,185 @@ mod tests {
             channels: 1,
             captured_at,
         }
+    }
+
+    #[tokio::test]
+    async fn originals_remain_retained_when_recording_is_full_closed_or_unselected() {
+        for origin in [TranscriptOrigin::Microphone, TranscriptOrigin::Speaker] {
+            let directory = tempfile::tempdir().unwrap();
+            let store = crate::retention::SessionRetention::create_in(directory.path(), "fixture")
+                .await
+                .unwrap();
+            let clock = Instant::now();
+            let retained =
+                retained::RetainedSession::new(store, clock, &tokio::runtime::Handle::current());
+            let history = crate::history::HistoryBuffer::new(&crate::config::HistoryConfig {
+                enabled: false,
+                ..Default::default()
+            });
+            let metrics = RouteMetrics::default();
+            let (sender, mut recorded) = mpsc::channel(1);
+            let mut recording = Some(sender);
+            let mut sidecar = OriginalSidecar {
+                speech: audio::speech::SpeechTap::new(),
+                history: &history,
+                recording: &mut recording,
+                recognition: None,
+                retained: Some(&retained),
+                origin,
+                metrics: &metrics,
+                copy_losses: 0,
+                capture_losses: 0,
+            };
+            // The writer accepts the first frame, rejects the second, and then
+            // recovers capacity. Its temporary backlog must not disable it.
+            sidecar.retain(&original(clock + Duration::from_millis(10)), false);
+            sidecar.retain(&original(clock + Duration::from_millis(20)), false);
+            assert_eq!(
+                recorded.try_recv().unwrap().captured_at,
+                clock + Duration::from_millis(10)
+            );
+            sidecar.retain(&original(clock + Duration::from_millis(30)), false);
+            assert_eq!(
+                recorded.try_recv().unwrap().captured_at,
+                clock + Duration::from_millis(30)
+            );
+            drop(recorded);
+            sidecar.retain(&original(clock + Duration::from_millis(40)), false);
+            assert!(sidecar.recording.is_some());
+            // Retention itself remains sufficient to consume originals even
+            // when no live consumer or rolling history remains selected.
+            *sidecar.recording = None;
+            sidecar.retain(&original(clock + Duration::from_millis(50)), false);
+            assert_eq!(retained.status().retained_frames, 5);
+            assert!(retained.status().error.unwrap().contains("recording"));
+            assert!(!retained.status().completed);
+            assert!(history.snapshot(600, clock).frames.is_empty());
+            let lane = match origin {
+                TranscriptOrigin::Microphone => RecordingLane::Microphone,
+                TranscriptOrigin::Speaker => RecordingLane::Speaker,
+            };
+            let mut replay = retained.snapshot().unwrap();
+            for end in [10, 20, 30, 40, 50] {
+                let frame = replay.next().await.unwrap().unwrap();
+                assert_eq!(frame.lane, lane);
+                assert_eq!(frame.samples, vec![4096; 160]);
+                assert_eq!(frame.captured_at, clock + Duration::from_millis(end));
+            }
+            assert!(replay.next().await.unwrap().is_none());
+        }
+    }
+
+    #[tokio::test]
+    async fn empty_shutdown_tail_still_reports_originals_lost_before_retention() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = crate::retention::SessionRetention::create_in(directory.path(), "fixture")
+            .await
+            .unwrap();
+        let clock = Instant::now();
+        let retained =
+            retained::RetainedSession::new(store, clock, &tokio::runtime::Handle::current());
+        let history = crate::history::HistoryBuffer::new(&crate::config::HistoryConfig::default());
+        let metrics = RouteMetrics::default();
+        let mut recording = None;
+        let mut sidecar = OriginalSidecar {
+            speech: audio::speech::SpeechTap::new(),
+            history: &history,
+            recording: &mut recording,
+            recognition: None,
+            retained: Some(&retained),
+            origin: TranscriptOrigin::Speaker,
+            metrics: &metrics,
+            copy_losses: 0,
+            capture_losses: 0,
+        };
+        sidecar.retain(&original(clock + Duration::from_millis(10)), false);
+        let (capture, mut captured) = mpsc::channel(1);
+        metrics.audio.dropped_frames.store(10, Ordering::Relaxed);
+        sidecar.drain(&mut captured);
+        assert!(
+            retained.status().error.is_none(),
+            "Playback drops are not original loss"
+        );
+        metrics
+            .audio
+            .sidecar_dropped_frames
+            .store(1, Ordering::Relaxed);
+        metrics
+            .audio
+            .capture_lost_frames
+            .store(1, Ordering::Relaxed);
+        sidecar.drain(&mut captured);
+        assert!(capture.is_closed());
+        assert_eq!(retained.status().retained_frames, 1);
+        assert!(retained.status().missing_audio);
+        assert!(
+            retained
+                .status()
+                .error
+                .unwrap()
+                .contains("cannot be recovered"),
+            "Later replay cannot recover a frame rejected before retention"
+        );
+        assert!(
+            metrics
+                .snapshot()
+                .processing_error
+                .unwrap()
+                .contains("before session retention")
+        );
+        assert!(
+            metrics
+                .snapshot()
+                .processing_error
+                .unwrap()
+                .contains("before session processing")
+        );
+    }
+
+    #[tokio::test]
+    async fn retention_failure_is_visible_without_blocking_original_consumer_delivery() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = crate::retention::SessionRetention::create_in(directory.path(), "fixture")
+            .await
+            .unwrap();
+        let clock = Instant::now();
+        let retained =
+            retained::RetainedSession::new(store, clock, &tokio::runtime::Handle::current());
+        retained.close_capture();
+        let history = crate::history::HistoryBuffer::new(&crate::config::HistoryConfig::default());
+        let metrics = RouteMetrics::default();
+        let (sender, mut recorded) = mpsc::channel(1);
+        let mut recording = Some(sender);
+        let mut sidecar = OriginalSidecar {
+            speech: audio::speech::SpeechTap::new(),
+            history: &history,
+            recording: &mut recording,
+            recognition: None,
+            retained: Some(&retained),
+            origin: TranscriptOrigin::Microphone,
+            metrics: &metrics,
+            copy_losses: 0,
+            capture_losses: 0,
+        };
+        sidecar.retain(&original(clock + Duration::from_millis(10)), false);
+        assert_eq!(recorded.try_recv().unwrap().samples, vec![4096; 160]);
+        assert_eq!(retained.status().retained_frames, 0);
+        assert!(retained.status().missing_audio);
+        assert!(
+            retained
+                .status()
+                .error
+                .unwrap()
+                .contains("retention failed")
+        );
+        assert!(
+            metrics
+                .snapshot()
+                .processing_error
+                .unwrap()
+                .contains("retention failed")
+        );
     }
 
     #[tokio::test]
@@ -583,6 +867,7 @@ mod tests {
                 TranscriptSink {
                     sender: text,
                     origin,
+                    retained: None,
                 },
                 metrics.clone(),
                 clock,
@@ -598,9 +883,11 @@ mod tests {
                 history: &history,
                 recording: &mut recording,
                 recognition: Some(&sink),
+                retained: None,
                 origin,
                 metrics: &metrics,
                 copy_losses: 0,
+                capture_losses: 0,
             };
             // The first frame was already dequeued when cancellation was
             // noticed. The other two remain in the bounded sidecar queue.
@@ -668,34 +955,90 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn stopped_capture_forwards_only_the_existing_bounded_original_tail() {
+    async fn production_processing_shutdown_preserves_frames_delivered_after_cancel() {
+        let clock = Instant::now();
+        let (capture, captured) = mpsc::channel(2);
+        let (sidecar, mut received) = mpsc::channel(2);
+        let cancel = CancellationToken::new();
+        cancel.cancel();
+        let stats = Arc::new(AudioStats::default());
+        let worker = tokio::spawn(forward_processing(
+            captured,
+            sidecar,
+            cancel,
+            stats.clone(),
+            true,
+        ));
+        tokio::task::yield_now().await;
+        assert!(!worker.is_finished());
+        capture.send(original(clock)).await.unwrap();
+        drop(capture);
+        tokio::time::timeout(Duration::from_secs(2), worker)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert_eq!(received.recv().await.unwrap().captured_at, clock);
+        assert!(received.recv().await.is_none());
+        assert_eq!(stats.capture_lost_frames.load(Ordering::Relaxed), 0);
+        assert_eq!(stats.sidecar_dropped_frames.load(Ordering::Relaxed), 0);
+    }
+
+    #[tokio::test]
+    async fn stopped_capture_preserves_its_bounded_tail_when_the_processing_queue_is_full() {
         for capacity in [1, 4] {
+            let clock = Instant::now();
             let (capture, captured) = mpsc::channel(4);
-            for _ in 0..3 {
-                capture.send(original(Instant::now())).await.unwrap();
+            for index in capacity..capacity + 3 {
+                capture
+                    .send(original(clock + Duration::from_millis(index as u64)))
+                    .await
+                    .unwrap();
             }
             let (sidecar, mut received) = mpsc::channel(capacity);
+            for index in 0..capacity {
+                sidecar
+                    .send(original(clock + Duration::from_millis(index as u64)))
+                    .await
+                    .unwrap();
+            }
             let cancel = CancellationToken::new();
             cancel.cancel();
             let stats = Arc::new(AudioStats::default());
-            tokio::time::timeout(
-                Duration::from_secs(1),
-                forward_processing(captured, sidecar, cancel, stats.clone()),
-            )
+            let forwarding = tokio::spawn(forward_processing(
+                captured,
+                sidecar,
+                cancel,
+                stats.clone(),
+                false,
+            ));
+            tokio::time::timeout(Duration::from_secs(5), async {
+                while !capture.is_closed() {
+                    tokio::task::yield_now().await;
+                }
+            })
             .await
-            .unwrap()
             .unwrap();
-            assert!(capture.is_closed());
-            let mut retained = 0;
-            while let Ok(frame) = received.try_recv() {
-                assert_eq!(frame.samples.as_ref(), &[0.125; 160]);
-                retained += 1;
-            }
-            assert_eq!(retained, capacity.min(3));
-            assert_eq!(
-                stats.sidecar_dropped_frames.load(Ordering::Relaxed),
-                (3 - retained) as u64
+            assert!(
+                !forwarding.is_finished(),
+                "A full queue must retain the accepted tail"
             );
+            tokio::time::timeout(Duration::from_secs(5), async {
+                for index in 0..capacity + 3 {
+                    let frame = received.recv().await.unwrap();
+                    assert_eq!(frame.samples.as_ref(), &[0.125; 160]);
+                    assert_eq!(
+                        frame.captured_at,
+                        clock + Duration::from_millis(index as u64)
+                    );
+                }
+                forwarding.await.unwrap().unwrap();
+                assert!(received.recv().await.is_none());
+            })
+            .await
+            .unwrap();
+            assert_eq!(stats.sidecar_dropped_frames.load(Ordering::Relaxed), 0);
+            assert_eq!(stats.processing_dropped_frames.load(Ordering::Relaxed), 0);
         }
     }
 

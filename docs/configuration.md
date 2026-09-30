@@ -427,7 +427,7 @@ directory = "recordings"
 microphone_gain_db = 0.0 # -24..24 dB, saved WAV only
 speaker_gain_db = 0.0 # -24..24 dB, saved WAV only
 microphone_priority = true # Smoothly lower incoming audio during microphone activity
-ducking_db = 12.0 # 0..30 dB reduction
+ducking_db = 3.0 # 0..30 dB reduction
 microphone_threshold_db = -50.0 # -60..-20 dBFS, before microphone gain
 ```
 

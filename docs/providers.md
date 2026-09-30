@@ -93,15 +93,22 @@ The legacy `providers.gemini.transcription_model` field does not control the new
 running profile; see [STT configuration and migration](transcription.md).
 See the [official Live Transcribe guide](https://ai.google.dev/gemini-api/docs/live-api/live-transcribe).
 
-The adapter ignores partial hypotheses to avoid duplicating TXT content. Model
-sessions have a ten-minute limit; `goAway` triggers controlled reconnection.
-This streaming mode has no diarization or word timestamps. Babel uses explicit
-speech turns on one persistent ASR connection, finalizing on an input pause,
-exact digital silence, or a bounded continuous segment. It waits up to five
-seconds for each final response. Stopping capture flushes the last turn while
-original routing can restart independently. WAV recording remains a separate path. The
-[official limits](https://ai.google.dev/gemini-api/docs/live-api/live-transcribe#limitations)
-are not a guarantee of lossless continuity across reconnection.
+The adapter ignores partial hypotheses to avoid duplicating TXT content. It
+bounds explicit Live turns to five seconds plus at most one input chunk and
+waits up to five seconds for a final result, including a valid empty result.
+If Live stalls, disconnects or requests rotation, Babel retains all uncommitted
+original PCM and recovers it through `gemini-3.5-transcribe` using the same key.
+The finite request contains inline WAV audio and `store:false`; it does not
+upload a Files API resource. The source then uses finite recognition for the
+rest of the session. This automatic fallback requires access to that additional
+model and may add cost and latency. Microphone and output recover independently.
+
+A successful recovery preserves timestamps and produces no gap marker. Only
+explicitly completed requests commit recovered text; real recovery failure or
+buffer exhaustion remains an incomplete-transcript error. Stopping capture
+drains already captured originals while original routing can restart
+independently. WAV recording remains a separate path. See
+[recovery bounds and behavior](transcription.md#gemini-live-transcribe).
 
 ## Participants, timestamps and voice identity
 
@@ -153,6 +160,9 @@ of legacy voice settings. Transcription speaker labels do not choose or change
 translation voices.
 
 ## Gemini limits and recovery
+
+The reconnect/playback rules below describe speech translation. Dedicated STT
+uses the original-audio recovery path documented above.
 
 - WebSocket messages: up to 512 KiB; output PCM fragment: up to 48,000 bytes
   (one second); input: up to 16,000 samples per send. MIME, rate, channels,

@@ -96,6 +96,134 @@ fn command(sample: i16, generation: u64) -> PlaybackCommand {
     }
 }
 
+#[tokio::test(start_paused = true)]
+async fn capture_congestion_is_distinct_from_playback_discard() {
+    let (events, mut received) = mpsc::channel(8);
+    let backend = MockBackend { events };
+    let (_device, selected) = watch::channel("old".to_owned());
+    let (output, _originals) = mpsc::channel(1);
+    output
+        .send(OriginalFrame {
+            samples: vec![0.5].into(),
+            sample_rate: options().sample_rate,
+            channels: 1,
+            captured_at: Instant::now(),
+        })
+        .await
+        .unwrap();
+    let cancel = CancellationToken::new();
+    let stats = Arc::new(AudioStats::default());
+    let worker_stats = stats.clone();
+    let worker_cancel = cancel.clone();
+    let worker = tokio::spawn(async move {
+        capture_with(
+            &backend,
+            "old",
+            options(),
+            output,
+            selected,
+            worker_cancel,
+            worker_stats,
+        )
+        .await
+    });
+    assert_eq!(event(&mut received).await, Event::Started("old".into()));
+    tokio::time::timeout(Duration::from_secs(1), async {
+        while stats.capture_lost_frames.load(Ordering::Relaxed) == 0 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    cancel.cancel();
+    worker.await.unwrap().unwrap();
+    assert_eq!(stats.capture_lost_frames.load(Ordering::Relaxed), 1);
+    discard_audio(command(42, 0), &stats);
+    assert_eq!(stats.dropped_frames.load(Ordering::Relaxed), 2);
+    assert_eq!(stats.capture_lost_frames.load(Ordering::Relaxed), 1);
+}
+
+struct ShutdownTailBackend;
+#[async_trait]
+impl Backend for ShutdownTailBackend {
+    async fn capture(
+        &self,
+        _: &str,
+        options: AudioOptions,
+        output: mpsc::Sender<OriginalFrame>,
+        cancel: CancellationToken,
+        _: Arc<AudioStats>,
+    ) -> Result<()> {
+        output
+            .send(OriginalFrame {
+                samples: vec![1.0].into(),
+                sample_rate: options.sample_rate,
+                channels: options.channels,
+                captured_at: Instant::now(),
+            })
+            .await?;
+        cancel.cancelled().await;
+        for sample in [2.0, 3.0] {
+            output
+                .send(OriginalFrame {
+                    samples: vec![sample].into(),
+                    sample_rate: options.sample_rate,
+                    channels: options.channels,
+                    captured_at: Instant::now(),
+                })
+                .await?;
+        }
+        Ok(())
+    }
+    async fn playback(
+        &self,
+        _: &str,
+        _: AudioOptions,
+        _: mpsc::Receiver<PlaybackCommand>,
+        _: CancellationToken,
+        _: Arc<AudioStats>,
+    ) -> Result<()> {
+        unreachable!("Capture-only fixture")
+    }
+}
+
+#[tokio::test]
+async fn capture_shutdown_preserves_backend_tail_after_cancellation() {
+    let (_device, selected) = watch::channel("old".to_owned());
+    let (output, mut originals) = mpsc::channel(4);
+    let cancel = CancellationToken::new();
+    let stats = Arc::new(AudioStats::default());
+    let worker_stats = stats.clone();
+    let worker_cancel = cancel.clone();
+    let worker = tokio::spawn(async move {
+        capture_with(
+            &ShutdownTailBackend,
+            "old",
+            options(),
+            output,
+            selected,
+            worker_cancel,
+            worker_stats,
+        )
+        .await
+    });
+    assert_eq!(originals.recv().await.unwrap().samples.as_ref(), &[1.0]);
+    cancel.cancel();
+    tokio::time::timeout(Duration::from_secs(2), worker)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    for expected in [2.0, 3.0] {
+        assert_eq!(
+            originals.recv().await.unwrap().samples.as_ref(),
+            &[expected]
+        );
+    }
+    assert!(originals.recv().await.is_none());
+    assert_eq!(stats.capture_lost_frames.load(Ordering::Relaxed), 0);
+}
+
 #[test]
 fn mirror_acceptance_never_relabels_old_audio_after_a_concurrent_interruption() {
     let stats = AudioStats::default();

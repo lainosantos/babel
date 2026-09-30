@@ -132,6 +132,8 @@ fn router(state: DashboardState) -> Router {
             get(|| async { Json(crate::platform::PlatformInfo::current()) }),
         )
         .route("/status", get(status))
+        .route("/retention", get(retained_sessions))
+        .route("/retention/recover", post(recover_retained_session))
         .route("/devices", get(devices))
         .route("/start", post(start))
         .route("/stop", post(stop))
@@ -640,6 +642,37 @@ async fn devices() -> Response {
     }
 }
 
+async fn retained_sessions(State(state): State<DashboardState>) -> impl IntoResponse {
+    Json(state.controller.retained_sessions().await)
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RetainedSessionRequest {
+    id: String,
+}
+
+async fn recover_retained_session(
+    State(state): State<DashboardState>,
+    Json(request): Json<RetainedSessionRequest>,
+) -> Response {
+    if request.id.is_empty()
+        || request.id.len() > 128
+        || !request
+            .id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || b"-_".contains(&byte))
+    {
+        return api_error(
+            StatusCode::BAD_REQUEST,
+            "Invalid retained session identifier",
+        );
+    }
+    // Recovery may wait on storage or a provider. Its controller-owned guard
+    // prevents duplicate attempts without blocking Stop or settings requests.
+    operation_result(state.controller.recover_retained_session(&request.id).await)
+}
+
 #[derive(Debug, Default, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 struct StartRequest {
@@ -804,6 +837,87 @@ mod tests {
     use super::*;
     use axum::body::Body;
     use tower::ServiceExt;
+
+    #[tokio::test]
+    async fn retained_sessions_require_auth_and_reject_invalid_recovery_without_audio() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("config.toml");
+        let controller = Arc::new(Controller::new(AppConfig::default(), path.clone()).unwrap());
+        let app = router(DashboardState {
+            controller: controller.clone(),
+            token: Arc::from("test-capability"),
+            port: 8765,
+            mutations: Arc::new(tokio::sync::Mutex::new(())),
+        });
+        for (method, uri) in [
+            ("GET", "/api/retention"),
+            ("POST", "/api/retention/recover"),
+        ] {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method(method)
+                        .uri(uri)
+                        .header(header::HOST, "127.0.0.1:8765")
+                        .header(header::CONTENT_TYPE, "application/json")
+                        .body(Body::from(r#"{"id":"unknown"}"#))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        }
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/retention")
+                    .header(header::HOST, "127.0.0.1:8765")
+                    .header(header::AUTHORIZATION, "Bearer test-capability")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), 1024)
+            .await
+            .unwrap();
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&body).unwrap(),
+            json!([])
+        );
+        for (body, expected) in [
+            (r#"{"id":""}"#, StatusCode::BAD_REQUEST),
+            (r#"{"id":"../other"}"#, StatusCode::BAD_REQUEST),
+            (r#"{"id":"missing-session"}"#, StatusCode::BAD_REQUEST),
+            (r#"{"id":[]}"#, StatusCode::UNPROCESSABLE_ENTITY),
+            (
+                r#"{"id":"missing-session","discard":true}"#,
+                StatusCode::UNPROCESSABLE_ENTITY,
+            ),
+        ] {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/api/retention/recover")
+                        .header(header::HOST, "127.0.0.1:8765")
+                        .header(header::AUTHORIZATION, "Bearer test-capability")
+                        .header(header::CONTENT_TYPE, "application/json")
+                        .body(Body::from(body))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), expected);
+        }
+        let status = controller.status().await;
+        assert!(!status.running && !status.routing_active);
+        assert!(!path.exists());
+    }
 
     #[tokio::test]
     async fn dynamic_binding_owns_a_unique_loopback_port_and_preserves_an_occupied_port() {

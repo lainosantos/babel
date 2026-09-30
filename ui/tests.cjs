@@ -23,7 +23,7 @@ function defaults() {
         whisper: { endpoint: 'auto', model: 'base', api_key_env: '', segment_ms: 2000, silence_ms: 300, vad_threshold: 0.01, request_timeout_secs: 30 },
       } },
     files: { base_path: '/home/test/Babel', name_pattern: '{date}-{time}-{session}-{id}' },
-    recording: { enabled: false, microphone: true, speaker: true, directory: 'recordings', mix: { microphone_gain_db: 0, speaker_gain_db: 0, microphone_priority: true, ducking_db: 12, microphone_threshold_db: -50 } },
+    recording: { enabled: false, microphone: true, speaker: true, directory: 'recordings', mix: { microphone_gain_db: 0, speaker_gain_db: 0, microphone_priority: true, ducking_db: 3, microphone_threshold_db: -50 } },
     history: { enabled: true, duration_secs: 600 },
   };
 }
@@ -65,6 +65,9 @@ async function page(t, options = {}) {
   let localRuntime = { phase: 'idle', message: null, download: null, services: [] };
   let audioHistory = { enabled: true, capacity_secs: 600, available_secs: 180, combined_audio_secs: 180, microphone_secs: 180, speaker_secs: 90, ...options.history };
   let historySession = { history_included_secs: 0, history_transcription_pending: false, ...options.historySession };
+  let retainedSessions = options.retainedSessions || [];
+  let retentionRequest = options.retentionRequest;
+  let recoveryRequest = options.recoveryRequest;
   let routingActive = true;
   let routingError = null;
   let sessionName = null;
@@ -107,6 +110,14 @@ async function page(t, options = {}) {
       if (value instanceof Response) return value;
     }
     else if (parsed.pathname === '/api/devices') value = [{ id: 'physical-mic', name: 'Physical mic', direction: 'input', is_virtual: false }, { id: 'physical-speaker', name: 'Headphones', direction: 'output', is_virtual: false }, { id: 'babel_mic_bus', name: platformOs === 'macos' ? 'Babel Microphone' : platformOs === 'windows' ? 'Babel Microphone Feed' : 'Virtual microphone', direction: 'output', is_virtual: true }, { id: 'babel_speaker.monitor', name: platformOs === 'macos' ? 'Babel Speaker' : platformOs === 'windows' ? 'Babel Speaker Monitor' : 'Virtual output', direction: 'input', is_virtual: true }, ...extraInputDevices];
+    else if (parsed.pathname === '/api/retention') {
+      value = retentionRequest ? await retentionRequest() : retainedSessions;
+      if (value instanceof Response) return value;
+    }
+    else if (parsed.pathname === '/api/retention/recover') {
+      if (recoveryRequest) { const response = await recoveryRequest(body.id); if (response instanceof Response) return response; }
+      retainedSessions = retainedSessions.filter(session => session.id !== body.id);
+    }
     else if (parsed.pathname === '/api/status') {
       if (statusRequest) await statusRequest();
       if (firstStatus && initialChange) { initialChange(config); revision++; }
@@ -127,7 +138,7 @@ async function page(t, options = {}) {
   window.eval(fs.readFileSync(path.join(__dirname, 'workspace.js'), 'utf8'));
   await settle(() => !byId('start').disabled && calls.some(call => call.path === '/api/platform'), 'dashboard did not initialize');
   const set = (id, value) => { const input = byId(id); if (input.type === 'checkbox') input.checked = value; else input.value = value; input.dispatchEvent(new window.Event('input', { bubbles: true })); };
-  return { window, doc, byId, calls, set, history: status => { audioHistory = status; }, historySession: status => { historySession = status; }, runtime: status => { localRuntime = status; }, config: () => config, poll: () => interval(), externalChange: callback => { callback(config); revision++; }, filePaths: handler => { filePathsHandler = handler; }, platformFailure: failure => { platformFailure = failure; }, routing: (active, error = null) => { routingActive = active; routingError = error; }, routeStatus: (route, status) => { routeStatuses[route] = status; } };
+  return { window, doc, byId, calls, set, history: status => { audioHistory = status; }, historySession: status => { historySession = status; }, retention: sessions => { retainedSessions = sessions; }, retentionRequest: handler => { retentionRequest = handler; }, recoveryRequest: handler => { recoveryRequest = handler; }, runtime: status => { localRuntime = status; }, config: () => config, poll: () => interval(), externalChange: callback => { callback(config); revision++; }, filePaths: handler => { filePathsHandler = handler; }, platformFailure: failure => { platformFailure = failure; }, routing: (active, error = null) => { routingActive = active; routingError = error; }, routeStatus: (route, status) => { routeStatuses[route] = status; } };
 }
 
 test('the real dashboard separates routing, translation, transcription and recording into six workspace destinations', async t => {
@@ -639,7 +650,7 @@ test('recording balance disables excluded sources and inactive priority without 
   for (const id of ['recording-ducking', 'recording-microphone-threshold']) assert.equal(p.byId(id).disabled, true);
   p.byId('save').click();
   await settle(() => p.config().recording.mix.microphone_priority === false && !p.byId('settings').disabled);
-  assert.deepEqual(p.config().recording.mix, { microphone_gain_db: 12, speaker_gain_db: -6, microphone_priority: false, ducking_db: 12, microphone_threshold_db: -50 });
+  assert.deepEqual(p.config().recording.mix, { microphone_gain_db: 12, speaker_gain_db: -6, microphone_priority: false, ducking_db: 3, microphone_threshold_db: -50 });
   p.set('recording-microphone-gain', 25);
   assert.equal(p.byId('recording-microphone-gain').checkValidity(), false);
   p.set('recording-microphone-gain', -24);
@@ -655,18 +666,24 @@ test('recording balance disables excluded sources and inactive priority without 
   assert.equal(p.byId('recording-microphone-threshold').checkValidity(), true);
 });
 
-test('older recording settings receive complete balance defaults before editing and saving', async t => {
-  const p = await page(t, { initialChange: config => { delete config.recording.mix; } });
-  assert.equal(p.byId('recording-microphone-gain').value, '0');
-  assert.equal(p.byId('recording-speaker-gain').value, '0');
-  assert.equal(p.byId('recording-microphone-priority').checked, true);
-  assert.equal(p.byId('recording-ducking').value, '12');
-  assert.equal(p.byId('recording-microphone-threshold').value, '-50');
-  p.set('recording-enabled', true);
-  p.set('recording-microphone-gain', 6);
-  p.byId('save').click();
-  await settle(() => p.config().recording.mix?.microphone_gain_db === 6);
-  assert.deepEqual(p.config().recording.mix, { ...defaults().recording.mix, microphone_gain_db: 6 });
+test('missing recording balance fields use subtle defaults while saved reductions survive', async t => {
+  for (const savedReduction of [undefined, 12, 0]) {
+    const p = await page(t, { initialChange: config => {
+      if (savedReduction === undefined) delete config.recording.mix;
+      else config.recording.mix = { ducking_db: savedReduction };
+    } });
+    const reduction = savedReduction ?? 3;
+    assert.equal(p.byId('recording-microphone-gain').value, '0');
+    assert.equal(p.byId('recording-speaker-gain').value, '0');
+    assert.equal(p.byId('recording-microphone-priority').checked, true);
+    assert.equal(p.byId('recording-ducking').value, String(reduction));
+    assert.equal(p.byId('recording-microphone-threshold').value, '-50');
+    p.set('recording-enabled', true);
+    p.set('recording-microphone-gain', 6);
+    p.byId('save').click();
+    await settle(() => p.config().recording.mix?.microphone_gain_db === 6);
+    assert.deepEqual(p.config().recording.mix, { ...defaults().recording.mix, microphone_gain_db: 6, ducking_db: reduction });
+  }
 });
 
 test('base and destination folders are editable and previewed with both file features off, and save for future sessions', async t => {
@@ -2071,4 +2088,96 @@ test('a legacy virtual capture stays unavailable rather than becoming a selectab
   p.externalChange(config => { config.audio.microphone_source = 'speaker_output'; }); await p.poll();
   assert.equal(selectedMicrophoneSource(p), 'speaker_output');
   assert.equal(p.byId('microphone-enabled').disabled, true);
+});
+
+test('retained sessions render safe localized recovery actions without changing settings', async t => {
+  const session = { id: 'pending-one', name: '<img src=x onerror=alert(1)>', frames: 20, memory_bytes: 1048576, encrypted_bytes: 2097152, error: '<script>provider failed</script>', recovering: false };
+  const p = await page(t, { language: 'en', retainedSessions: [session] });
+  await settle(() => p.byId('retention-sessions').children.length === 1);
+  assert.equal(p.byId('retention-card').hidden, false);
+  assert.equal(p.byId('retention-card').querySelectorAll('img,script').length, 0);
+  assert.equal(p.byId('retention-card').querySelector('strong').textContent, session.name);
+  assert.match(p.byId('retention-card').textContent, /Retained audio: 3 MiB/);
+  assert.match(p.byId('retention-card').textContent, /Keep Babel open/);
+  const button = p.byId('retention-card').querySelector('button');
+  button.focus();
+  await p.poll();
+  assert.equal(p.doc.activeElement, button, 'polling must keep the same keyboard-focused recovery action');
+  await chooseInterface(p, 'pt');
+  assert.equal(button.textContent, 'Recuperar sessão');
+  assert.match(p.byId('retention-card').textContent, /Mantenha o Babel aberto/);
+  assert.equal(p.calls.some(call => ['/api/start', '/api/stop', '/api/retention/recover'].includes(call.path)), false);
+});
+
+test('a long retained-session recovery keeps routing controls responsive and prevents duplicate attempts', async t => {
+  let release;
+  const pending = new Promise(resolve => { release = resolve; });
+  const p = await page(t, { language: 'en', retainedSessions: [{ id: 'pending', name: 'Earlier session', memory_bytes: 32, encrypted_bytes: 0, recovering: false }], recoveryRequest: () => pending });
+  await settle(() => p.byId('retention-card').querySelector('button'));
+  const button = p.byId('retention-card').querySelector('button');
+  button.click(); button.click();
+  await settle(() => p.calls.some(call => call.path === '/api/retention/recover'));
+  assert.equal(button.disabled, true);
+  assert.equal(button.textContent, 'Recovering…');
+  assert.equal(p.byId('start').disabled, false);
+  const before = p.calls.filter(call => call.path === '/api/status').length;
+  await p.poll();
+  assert.equal(p.calls.filter(call => call.path === '/api/status').length, before + 1);
+  assert.equal(p.calls.filter(call => call.path === '/api/retention/recover').length, 1);
+  assert.deepEqual(p.calls.find(call => call.path === '/api/retention/recover').body, { id: 'pending' });
+  assert.equal(button.disabled, true, 'an older server snapshot cannot unlock the local in-flight attempt');
+  release();
+  await settle(() => p.byId('retention-card').hidden);
+  assert.equal(p.byId('notice').textContent, 'Session recovered: Earlier session');
+  assert.equal(p.calls.some(call => ['/api/start', '/api/stop'].includes(call.path)), false);
+});
+
+test('failed recovery preserves the pending session for retry and successful recovery removes it', async t => {
+  const p = await page(t, { language: 'en', retainedSessions: [{ id: 'retry-me', name: 'Preserved session', memory_bytes: 200, encrypted_bytes: 0, recovering: false }], recoveryRequest: () => new Response(JSON.stringify({ error: 'Provider temporarily unavailable' }), { status: 503, headers: { 'Content-Type': 'application/json' } }) });
+  await settle(() => p.byId('retention-card').querySelector('button'));
+  const button = p.byId('retention-card').querySelector('button');
+  button.click();
+  await settle(() => p.byId('retention-card').textContent.includes('Provider temporarily unavailable') && !button.disabled);
+  assert.equal(p.byId('retention-sessions').children.length, 1);
+  await p.poll();
+  assert.equal(p.byId('retention-card').hidden, false);
+  assert.match(p.byId('retention-card').textContent, /Provider temporarily unavailable/);
+  p.recoveryRequest(() => undefined);
+  button.click();
+  await settle(() => p.byId('retention-card').hidden);
+  assert.equal(p.calls.filter(call => call.path === '/api/retention/recover').length, 2);
+});
+
+test('retention read failures keep cached sessions visible without misreporting audio as disconnected', async t => {
+  const p = await page(t, { language: 'en', retainedSessions: [{ id: 'remote-attempt', name: 'Pending', memory_bytes: 0, encrypted_bytes: 1024, recovering: true }] });
+  await settle(() => p.byId('retention-card').querySelector('button'));
+  const button = p.byId('retention-card').querySelector('button');
+  assert.equal(button.disabled, true);
+  p.retentionRequest(() => new Response(JSON.stringify({ error: 'Temporary list failure' }), { status: 503, headers: { 'Content-Type': 'application/json' } }));
+  await p.poll();
+  assert.match(p.byId('retention-read-error').textContent, /Temporary list failure/);
+  assert.equal(p.byId('retention-card').hidden, false);
+  assert.equal(p.byId('session-state').textContent, 'Original audio');
+  assert.equal(button.disabled, true);
+  p.retentionRequest(() => []);
+  await p.poll();
+  assert.equal(p.byId('retention-card').hidden, true);
+});
+
+test('a stale retained-session snapshot cannot restore an already recovered session', async t => {
+  const session = { id: 'completed-recovery', name: 'Retained', memory_bytes: 100, encrypted_bytes: 0, recovering: false };
+  const p = await page(t, { language: 'en', retainedSessions: [session] });
+  await settle(() => p.byId('retention-card').querySelector('button'));
+  let release;
+  const stale = new Promise(resolve => { release = resolve; });
+  p.retentionRequest(() => stale);
+  const before = p.calls.filter(call => call.path === '/api/retention').length;
+  const polling = p.poll();
+  await settle(() => p.calls.filter(call => call.path === '/api/retention').length > before);
+  p.byId('retention-card').querySelector('button').click();
+  await settle(() => p.byId('retention-card').hidden);
+  release([session]);
+  await polling;
+  assert.equal(p.byId('retention-card').hidden, true);
+  assert.equal(p.byId('retention-sessions').children.length, 0);
 });

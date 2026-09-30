@@ -318,7 +318,7 @@ where
             let frames = data.len();
             // Dropping a whole hardware callback avoids partially spliced frames.
             if queue.capacity() - queue.len() < frames {
-                stats.dropped_frames.fetch_add(1, Ordering::Relaxed);
+                stats.record_capture_loss();
                 return;
             }
             for sample in data {
@@ -333,6 +333,9 @@ where
                 }
                 cpal::ErrorKind::Xrun => {
                     error_stats.underruns.fetch_add(1, Ordering::Relaxed);
+                    // This is the input callback: a reported overrun means
+                    // original samples never reached the processing sidecar.
+                    error_stats.record_capture_loss();
                     return;
                 }
                 cpal::ErrorKind::DeviceChanged => return,
@@ -414,30 +417,54 @@ pub async fn capture(
         stream
             .play()
             .context("starting native microphone capture; check OS microphone permission")?;
+        let mut stream = Some(stream);
         let mut last_samples = Instant::now();
-        while !cancel.is_cancelled() && !sink.is_closed() {
+        let mut draining = None;
+        let mut result = Ok(());
+        loop {
+            if draining.is_none()
+                && (cancel.is_cancelled() || sink.is_closed() || failed.load(Ordering::Acquire))
+            {
+                if failed.load(Ordering::Acquire) {
+                    result = Err(anyhow::anyhow!("native input stream failed or the device was disconnected"));
+                }
+                // Closing the callback precedes the snapshot. The remaining
+                // queue is now finite and contains only already accepted PCM.
+                drop(stream.take());
+                draining = Some(queue.len());
+            }
+            if draining == Some(0) { break; }
             if stats.realtime_denied.swap(false, Ordering::Relaxed) { tracing::warn!("OS denied real-time audio priority; routing continues at the available priority"); }
-            ensure!(
-                !failed.load(Ordering::Acquire),
-                "native input stream failed or the device was disconnected"
-            );
             input.clear();
             input.append(&mut pending);
             while input.len() < 4096 / usize::from(config.channels) * usize::from(config.channels) {
+                if draining == Some(0) { break; }
                 let Some(sample) = queue.pop() else {
                     break;
                 };
+                if let Some(remaining) = &mut draining { *remaining -= 1; }
                 input.push(sample);
             }
             if input.is_empty() {
-                ensure!(last_samples.elapsed() < Duration::from_secs(2), "native input stopped delivering samples; check the device connection and microphone permission");
+                if last_samples.elapsed() >= Duration::from_secs(2) {
+                    result = Err(anyhow::anyhow!("native input stopped delivering samples; check the device connection and microphone permission"));
+                    drop(stream.take());
+                    draining = Some(queue.len());
+                    continue;
+                }
                 thread::sleep(Duration::from_millis(2));
                 continue;
             }
             let complete = input.len() / usize::from(config.channels) * usize::from(config.channels);
             pending.extend_from_slice(&input[complete..]);
             if complete == 0 {
-                ensure!(last_samples.elapsed() < Duration::from_secs(2), "native input stopped delivering complete audio frames");
+                if draining == Some(0) { break; }
+                if last_samples.elapsed() >= Duration::from_secs(2) {
+                    result = Err(anyhow::anyhow!("native input stopped delivering complete audio frames"));
+                    drop(stream.take());
+                    draining = Some(queue.len());
+                    continue;
+                }
                 thread::sleep(Duration::from_millis(2));
                 continue;
             }
@@ -464,15 +491,33 @@ pub async fn capture(
                     }) {
                         Ok(()) => (),
                         Err(mpsc::error::TrySendError::Full(_)) => {
-                            stats.dropped_frames.fetch_add(1, Ordering::Relaxed);
+                            stats.record_capture_loss();
                         }
-                        Err(mpsc::error::TrySendError::Closed(_)) => return Ok(()),
+                        Err(mpsc::error::TrySendError::Closed(_)) => {
+                            stats.record_capture_loss();
+                        }
                     }
                 }
             }
         }
         drop(stream);
-        Ok(())
+        if !frame.is_empty() {
+            stats.captured_frames.fetch_add(1, Ordering::Relaxed);
+            if sink.try_send(OriginalFrame {
+                samples: frame.into(),
+                sample_rate: options.sample_rate,
+                channels: options.channels,
+                captured_at: Instant::now(),
+            }).is_err() {
+                stats.record_capture_loss();
+            }
+        }
+        if !pending.is_empty() {
+            // An incomplete interleaved hardware frame cannot be fabricated or
+            // padded while claiming to preserve an original sample frame.
+            stats.record_capture_loss();
+        }
+        result
     })
     .await
     .context("native capture worker failed")?

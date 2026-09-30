@@ -144,6 +144,7 @@ async fn original_tones_share_one_recorded_timeline_without_changing_babel_devic
     let names: [String; 4] = std::array::from_fn(|i| format!("babeltestrec_{owner}_{i}"));
     let mut modules = Vec::new();
     let mut cfg = AppConfig::default();
+    cfg.files.base_path = directory.path().to_string_lossy().into_owned();
     cfg.microphone.enabled = false;
     cfg.speaker.enabled = false;
     cfg.microphone.capture_device = format!("{}.monitor", names[0]);

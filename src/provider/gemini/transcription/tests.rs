@@ -318,6 +318,157 @@ async fn missing_final_is_an_error_after_five_seconds_not_success_or_retry() {
 }
 
 #[tokio::test]
+async fn empty_finals_preserve_later_speech_and_acknowledge_silent_eof() {
+    for empty in [json!({}), json!({"text":""}), json!({"finished":true})] {
+        let (listener, endpoint) = bind().await;
+        let server = tokio::spawn(async move {
+            let mut socket = accept(&listener).await;
+            assert_eq!(turn(&mut socket).await, vec![1; 1600]);
+            socket
+                .send(Message::Text(
+                    json!({"serverContent":{"inputTranscription":empty}})
+                        .to_string()
+                        .into(),
+                ))
+                .await
+                .unwrap();
+            assert_eq!(turn(&mut socket).await, vec![120; 1600]);
+            final_text(
+                &mut socket,
+                "Original microphone speech after a quiet turn.",
+            )
+            .await;
+            assert_eq!(turn(&mut socket).await, vec![1; 1600]);
+            socket
+                .send(Message::Text(
+                    json!({"serverContent":{"inputTranscription":empty}})
+                        .to_string()
+                        .into(),
+                ))
+                .await
+                .unwrap();
+            wait_closed(&mut socket).await;
+        });
+        let (worker, input, mut events) = spawn(endpoint);
+        assert_eq!(event(&mut events).await, ProviderEvent::Connected);
+        input.send(vec![1; 1600]).await.unwrap();
+        assert_eq!(event(&mut events).await, ProviderEvent::TurnComplete);
+        input.send(vec![120; 1600]).await.unwrap();
+        assert!(
+            matches!(event(&mut events).await, ProviderEvent::Transcript {text, metadata, ..}
+            if text == "Original microphone speech after a quiet turn." && metadata.alignment_ms == Some(100))
+        );
+        assert_eq!(event(&mut events).await, ProviderEvent::TurnComplete);
+        input.send(vec![1; 1600]).await.unwrap();
+        drop(input);
+        assert_eq!(event(&mut events).await, ProviderEvent::TurnComplete);
+        success(worker).await;
+        server.await.unwrap();
+        assert!(events.recv().await.is_none());
+    }
+}
+
+#[tokio::test]
+async fn missing_live_final_reconnects_and_accepts_later_original_speech() {
+    let (listener, endpoint) = bind().await;
+    let server = tokio::spawn(async move {
+        let mut socket = accept(&listener).await;
+        assert_eq!(turn(&mut socket).await, vec![30; 1600]);
+        timeout(Duration::from_secs(7), async {
+            while let Some(Ok(_)) = socket.next().await {}
+        })
+        .await
+        .unwrap();
+        let mut replacement = accept(&listener).await;
+        assert_eq!(turn(&mut replacement).await, vec![120; 1600]);
+        final_text(&mut replacement, "Original speech after recovery.").await;
+        wait_closed(&mut replacement).await;
+    });
+    let (worker, input, mut events) = spawn(endpoint);
+    assert_eq!(event(&mut events).await, ProviderEvent::Connected);
+    input.send(vec![30; 1600]).await.unwrap();
+    assert_eq!(
+        timeout(Duration::from_secs(7), events.recv())
+            .await
+            .unwrap()
+            .unwrap(),
+        ProviderEvent::Interrupted
+    );
+    assert_eq!(
+        event(&mut events).await,
+        ProviderEvent::Reconnecting { attempt: 1 }
+    );
+    assert_eq!(event(&mut events).await, ProviderEvent::Connected);
+    input.send(vec![120; 1600]).await.unwrap();
+    drop(input);
+    assert!(
+        matches!(event(&mut events).await, ProviderEvent::Transcript {text, ..}
+        if text == "Original speech after recovery.")
+    );
+    assert_eq!(event(&mut events).await, ProviderEvent::TurnComplete);
+    success(worker).await;
+    server.await.unwrap();
+}
+
+#[tokio::test]
+async fn generic_turn_completion_does_not_discard_a_later_final_transcript() {
+    let (listener, endpoint) = bind().await;
+    let (release, released) = tokio::sync::oneshot::channel();
+    let server = tokio::spawn(async move {
+        let mut socket = accept(&listener).await;
+        assert_eq!(turn(&mut socket).await, vec![120; 1600]);
+        socket
+            .send(Message::Text(
+                json!({"serverContent":{"turnComplete":true}})
+                    .to_string()
+                    .into(),
+            ))
+            .await
+            .unwrap();
+        released.await.unwrap();
+        final_text(&mut socket, "Final delivered after turnComplete.").await;
+        wait_closed(&mut socket).await;
+    });
+    let (worker, input, mut events) = spawn(endpoint);
+    assert_eq!(event(&mut events).await, ProviderEvent::Connected);
+    input.send(vec![120; 1600]).await.unwrap();
+    drop(input);
+    assert_eq!(event(&mut events).await, ProviderEvent::TurnComplete);
+    assert!(!worker.is_finished());
+    release.send(()).unwrap();
+    assert!(
+        matches!(event(&mut events).await, ProviderEvent::Transcript {text, ..}
+        if text == "Final delivered after turnComplete.")
+    );
+    assert_eq!(event(&mut events).await, ProviderEvent::TurnComplete);
+    success(worker).await;
+    server.await.unwrap();
+}
+
+#[test]
+fn only_valid_final_transcription_objects_acknowledge_original_audio() {
+    for final_value in [json!({}), json!({"text":""}), json!({"text":"Original."})] {
+        assert!(transcription_final(&json!({"inputTranscription":final_value})).unwrap());
+    }
+    for value in [
+        Value::Null,
+        json!(false),
+        json!("text"),
+        json!([]),
+        json!({"text":42}),
+    ] {
+        assert!(transcription_final(&json!({"inputTranscription":value})).is_err());
+    }
+    for content in [
+        json!({"turnComplete":true}),
+        json!({"interimInputTranscription":{"text":"Guess"}}),
+        json!({"interrupted":true,"inputTranscription":{}}),
+    ] {
+        assert!(!transcription_final(&content).unwrap());
+    }
+}
+
+#[tokio::test]
 async fn source_closing_during_backoff_cannot_succeed_on_an_empty_replacement() {
     let (listener, endpoint) = bind().await;
     let server = tokio::spawn(async move {

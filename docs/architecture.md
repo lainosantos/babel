@@ -164,6 +164,19 @@ Enabling a feature with no selected source is a configuration error. The source
 must be selected and configured, but its translation may be off. Writers work
 outside audio callbacks.
 
+Original file sessions also own a recovery archive outside provider and writer
+task lifetimes. The processing sidecar retains selected PCM before either
+consumer can reject it. RAM above an 8 MiB working budget spills in encrypted
+batches to the platform's temporary directory on processing workers; neither
+crypto nor filesystem I/O runs on the original audio executor. This cache is
+independent of the configured final-file base path. Each archive owns an ephemeral
+XChaCha20-Poly1305 key, never a key file. The optional historical prefix shares its
+existing PCM arcs.
+Failed sessions remain Controller-owned for explicit replay into new final files.
+Selected writers must finish and sync before originals can be acknowledged;
+translation-only errors do not invalidate already committed files. Cleanup runs
+without the Controller state lock. See [recovery limits and privacy](recording.md#recover-an-incomplete-session).
+
 The recording worker aligns the two original sources before applying its own
 source gains and optional microphone-priority attenuation of incoming audio.
 Boosted mixes use bounded lookahead peak protection. This processing is confined
@@ -231,8 +244,10 @@ connections/channels, so delayed translated audio cannot enter the new one.
 Separate epochs per direction preserve even rapid off/on changes coalesced by
 the control channel. The session name/ID and TXT/WAV writers remain; the
 WAV retains the session clock. A normal pause no longer creates a spurious
-transcription interruption marker; actual provider reconnects or processing
-losses still do. Inspection failure closes routes and appears in the dashboard.
+transcription interruption marker. Gemini original STT keeps unacknowledged PCM
+across Live failures and uses finite recognition; successful recovery preserves
+its clock without a gap marker. Other interruptions and processing losses remain
+visible. Inspection failure closes routes and appears in the dashboard.
 On Windows, a COM MTA worker queries the system's default microphone and checks
 WASAPI sessions on the opposite side of each Babel cable (or optional VB-Audio
 cable), excluding Babel's PID. Pairing uses endpoint IDs and driver metadata;

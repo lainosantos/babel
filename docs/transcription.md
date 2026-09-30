@@ -59,13 +59,15 @@ provider quota. Stopping before completion may interrupt the historical prefix;
 live finals still drain into the same file after that incomplete prefix is marked.
 
 The default in-memory capacity is ten minutes, adjustable under **Settings →
-Recent audio history**. The dashboard shows the audio available per source;
+Recent audio history**. The dashboard shows the combined audio available;
 if less than requested is available, it includes only that interval. History
 accumulates only while routing captures audio, is not persisted before explicit
 inclusion, and disappears when Babel closes. The same controls are available
 on Linux, macOS, and Windows. See [retention and inclusion in recordings](recording.md#include-audio-from-before-session-start).
 
 History recognition uses a separate STT connection from live transcription.
+Gemini history and explicit session recovery use `gemini-3.5-transcribe` finite
+requests, so the key needs access to that model as well as Live Transcribe.
 Provider quotas, costs, and session limits still apply. If a connection expires
 or the session ends before completion, Babel reports that history is incomplete;
 it does not present the result as full recovery. Speaker identifiers are not
@@ -102,14 +104,41 @@ or reaches five seconds of PCM (plus at most one input chunk). Quiet nonzero
 samples are retained. Each explicit boundary waits up to five seconds for its
 authoritative final result. This prevents continuous incoming speech from
 remaining only an unsaved hypothesis until the session stops.
-`auto` omits the language restriction; an explicit code is sent in
-`languageCodes`. Current streaming does not guarantee diarization or word-level
-timestamps. Features of the **file** API should not be confused with Live
-Transcribe features. The documented maximum Live session duration is ten
-minutes; reconnecting may create a gap and reset the provider's clock.
+An empty final result (including an omitted `text` field) acknowledges a turn
+with no recognized words; it does not stop recognition. Missing Live results,
+transport interruptions and session rotation use finite recognition recovery:
+Babel retains the unacknowledged original PCM in memory and submits it to
+`gemini-3.5-transcribe`, the separate file-transcription model in the same Gemini
+service. The request contains an inline WAV, `store:false` and verbatim mode; it
+creates no Files API resource or temporary audio file. Only an explicitly
+completed response commits text (or an empty result). Neither an absent Live
+message nor a generic `turnComplete` is treated as successful transcription.
 
-Sources: [Live Transcribe](https://ai.google.dev/gemini-api/docs/live-api/live-transcribe)
-and [model capabilities](https://ai.google.dev/gemini-api/docs/models/gemini-3.5-transcribe).
+After recovery, that source continues with finite requests for the rest of the
+session, avoiding repeated Live stalls on quiet/noisy input. The other source
+remains independent. This fallback is automatic and can add API charges and
+request latency; the key must have access to **both** Gemini transcription
+models. Original audio routing remains independent of both paths.
+
+Each source retains at most six seconds of in-flight PCM (192 KB), in addition
+to the existing bounded input queue. Recovery requests have an eight-second
+whole-request deadline and a bounded retry budget. EOF also drains retained
+originals; Gemini finalization has a bounded 27-second drain inside the session's
+30-second processing limit. A successful recovery keeps timestamps and writes
+no gap marker. Failed recovery, exhausted buffering or finalization still reports
+incomplete transcription. The session retains its original sources separately
+from provider queues and offers [session recovery](recording.md#recover-an-incomplete-session)
+if finalization cannot finish. Optional encrypted spill uses a RAM-only key;
+the ten-minute rolling history is a separate memory-only feature.
+
+`auto` omits the language restriction; an explicit code is sent in
+`languageCodes` (Live) or `language_codes` (recovery). This adapter provides
+submitted-turn alignment, not diarization or word-level timestamps. Live
+sessions have a documented ten-minute limit; that boundary also uses recovery.
+
+Sources: [Live Transcribe](https://ai.google.dev/gemini-api/docs/live-api/live-transcribe),
+[finite transcription](https://ai.google.dev/gemini-api/docs/transcribe) and
+[Interactions API](https://ai.google.dev/api/interactions-api).
 
 ### OpenAI Realtime Transcription
 
@@ -287,7 +316,8 @@ not prevent the session.
 - Timestamps are optional. Provider offsets are mapped to the captured session
   timeline, preserving microphone/output pauses; unavailable metadata uses receipt
   time. Gemini provides submitted-turn alignment, not word boundaries. Network
-  reconnections may lose audio and are marked in the TXT file.
+  failures that leave audio untranscribed are marked in the TXT file. Successful
+  Gemini recovery preserves the existing timeline and does not add a gap.
 - Transcription, translation, and recording are enabled separately. Recording
   audio alone does not open STT. If both directions are selected for transcription,
   there will be two independent connections/requests, even with the same provider.
@@ -305,9 +335,12 @@ not prevent the session.
   Up to 20 seconds of original PCM are retained while it connects or catches up,
   with separate frame-count and sample-count bounds. This queue is independent
   of the optional ten-minute history buffer and is not saved before a session.
-  Congestion beyond the bound reports a gap rather than blocking audio routing.
+  Congestion beyond the bound reports an incomplete transcript without blocking
+  audio routing. Session-owned originals are retained separately for explicit
+  recovery, with encrypted spill when needed; the queue does not own their lifetime.
 - **Stop** closes physical session routes first, then flushes the recognizers'
-  unfinished speech and drains text/files for up to 15 seconds. Original routing
+  unfinished speech and drains text/files for up to 15 seconds, or 30 seconds
+  when a selected source uses Gemini STT. Original routing
   can resume during this drain. A missing provider acknowledgement or timeout
   reports an incomplete transcript; closing a connection is not treated as proof
   that the last words were saved. Recognizer failures do not stop original audio.

@@ -9,6 +9,7 @@ async fn recoverable_recognition_warning_records_a_gap_without_interrupting_audi
     metrics.state("transcribing");
     let (tx, mut rx) = mpsc::channel(8);
     let transcript = Some(TranscriptSink {
+        retained: None,
         sender: tx,
         origin: TranscriptOrigin::Microphone,
     });
@@ -68,10 +69,31 @@ async fn full_or_disconnected_stt_queue_does_not_block_translation_and_vice_vers
 }
 
 #[tokio::test]
+async fn preserved_original_recovery_does_not_record_a_gap_or_interrupt_playback() {
+    let metrics = RouteMetrics::default();
+    let (tx, mut rx) = mpsc::channel(1);
+    let transcript = Some(TranscriptSink {
+        retained: None,
+        sender: tx,
+        origin: TranscriptOrigin::Microphone,
+    });
+    record_recognition_event(
+        ProviderEvent::RecoveringOriginal { attempt: 1 },
+        &transcript,
+        &metrics,
+    )
+    .unwrap();
+    assert!(rx.try_recv().is_err());
+    assert!(metrics.snapshot().processing_error.is_none());
+    assert_eq!(metrics.audio.playback_generation.load(Ordering::Relaxed), 0);
+}
+
+#[tokio::test]
 async fn stt_never_records_generated_text_or_audio() {
     let metrics = RouteMetrics::default();
     let (tx, mut rx) = mpsc::channel(8);
     let transcript = Some(TranscriptSink {
+        retained: None,
         sender: tx,
         origin: TranscriptOrigin::Speaker,
     });

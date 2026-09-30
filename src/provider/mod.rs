@@ -41,6 +41,12 @@ pub enum ProviderEvent {
     Reconnecting {
         attempt: u32,
     },
+    /// Original STT retains every unacknowledged input sample while recovering.
+    /// Subsequent offsets use the same logical PCM stream; consumers must keep
+    /// its timeline and must not mark audio missing for this event alone.
+    RecoveringOriginal {
+        attempt: u32,
+    },
     /// A recoverable processing limitation. Diagnostics must not contain speech
     /// or credentials; the provider continues and keeps its queues bounded.
     Warning {
