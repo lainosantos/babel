@@ -216,7 +216,9 @@ pub(super) struct Bundle {
     pub services: BTreeMap<String, Service>,
 }
 impl Bundle {
-    pub async fn discover() -> Result<Self> {
+    /// Locate a bundle without touching native components. Asset-only work
+    /// verifies model bytes against the pinned catalog and never executes code.
+    pub fn locate() -> Result<PathBuf> {
         let system = if cfg!(target_os = "macos") {
             "macos"
         } else {
@@ -234,8 +236,21 @@ impl Bundle {
                 .join("artifacts/local-runtime")
                 .join(&platform),
         ];
-        let root=candidates.into_iter().find(|p|p.join("manifest.json").is_file()).context("Bundled local inference components are missing; reinstall Babel with its local-runtime package")?;
-        Self::load(&root, system, arch).await
+        Self::locate_in(candidates)
+    }
+    fn locate_in(candidates: impl IntoIterator<Item = PathBuf>) -> Result<PathBuf> {
+        candidates.into_iter().find(|p| p.join("manifest.json").is_file())
+            .context("Bundled local inference components are missing; reinstall Babel with its local-runtime package")?
+            .canonicalize().context("Could not resolve the local inference bundle")
+    }
+    pub async fn discover() -> Result<Self> {
+        let root = Self::locate()?;
+        let system = if cfg!(target_os = "macos") {
+            "macos"
+        } else {
+            std::env::consts::OS
+        };
+        Self::load(&root, system, std::env::consts::ARCH).await
     }
     async fn load(root: &Path, system: &str, arch: &str) -> Result<Self> {
         let root = root.canonicalize()?;
@@ -305,6 +320,21 @@ mod tests {
     #[test]
     fn catalog_is_pinned_and_language_specific() {
         let c = Catalog::read();
+        assert!(c.whisper.contains_key(crate::config::DEFAULT_WHISPER_MODEL));
+        assert!(
+            c.whisper
+                .keys()
+                .all(|model| crate::config::is_managed_whisper_model(model))
+        );
+        for original in ["tiny", "base", "small"] {
+            let compact = &c.whisper[&format!("{original}-q5_1")];
+            let unquantized = &c.whisper[original];
+            assert!(compact.size < unquantized.size / 2);
+            // Old and compact models must coexist in offline caches; choosing
+            // the compact form must never overwrite an explicitly chosen file.
+            assert_ne!(compact.name, unquantized.name);
+            assert_ne!(compact.sha256, unquantized.sha256);
+        }
         assert_eq!(c.voice("auto", "pt-BR").unwrap(), "pt_BR-faber-medium");
         assert!(c.voice("auto", "xx").is_err());
         assert!(c.voice("../../voice", "en").is_err());
@@ -390,6 +420,12 @@ mod tests {
         assert!(Bundle::load(temp.path(), "linux", "x86_64").await.is_ok());
         assert!(Bundle::load(temp.path(), "linux", "aarch64").await.is_err());
         tokio::fs::write(helper, b"edited").await.unwrap();
+        // Merely caching selected model assets must not read/hash unused native
+        // helpers. Loading inference still checks all helper bytes before use.
+        assert_eq!(
+            Bundle::locate_in([temp.path().to_path_buf()]).unwrap(),
+            temp.path().canonicalize().unwrap()
+        );
         assert!(Bundle::load(temp.path(), "linux", "x86_64").await.is_err());
     }
     #[test]

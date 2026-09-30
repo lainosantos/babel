@@ -12,7 +12,7 @@ use serde::Serialize;
 use std::{
     collections::{BTreeMap, BTreeSet},
     path::Path,
-    sync::{Arc, Mutex},
+    sync::{Arc, Mutex, Weak},
     time::Duration,
 };
 use tokio::{process::Command, sync::watch, task::JoinHandle};
@@ -36,6 +36,7 @@ pub struct DownloadProgress {
 struct Plan {
     directory: String,
     threads: u32,
+    idle_unload_secs: u64,
     whisper: BTreeSet<String>,
     translation: Option<String>,
     voices: BTreeSet<String>,
@@ -45,8 +46,8 @@ fn automatic(endpoint: &str) -> bool {
     endpoint.is_empty() || endpoint == "auto"
 }
 impl Plan {
-    /// Selection can warm an inactive provider in the background, but only
-    /// enabled features may make a session wait for local inference.
+    /// Only enabled features load models into memory. Selection separately
+    /// prepares their assets on disk, without launching inference processes.
     fn active(cfg: &AppConfig) -> Result<Self> {
         let mut active = cfg.clone();
         for route in [&mut active.microphone, &mut active.speaker] {
@@ -71,6 +72,7 @@ impl Plan {
         let mut plan = Self {
             directory: cfg.local_runtime.directory.clone(),
             threads: cfg.local_runtime.threads,
+            idle_unload_secs: u64::from(cfg.local_runtime.idle_unload_secs),
             whisper: BTreeSet::new(),
             translation: None,
             voices: BTreeSet::new(),
@@ -149,12 +151,37 @@ struct Endpoints {
 }
 struct State {
     plan: Option<Plan>,
+    inference: bool,
+    leases: usize,
+    idle_task: Option<JoinHandle<()>>,
+    idle_epoch: u64,
     generation: u64,
     status: RuntimeStatus,
     endpoints: Endpoints,
     cancel: CancellationToken,
     task: Option<JoinHandle<()>>,
 }
+/// An active session owns this lease. Releasing the last one permits the
+/// manager to unload inference after a short, configurable reuse window.
+pub struct RuntimeLease {
+    manager: Weak<RuntimeManager>,
+    generation: u64,
+}
+impl std::fmt::Debug for RuntimeLease {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RuntimeLease")
+            .field("generation", &self.generation)
+            .finish_non_exhaustive()
+    }
+}
+impl Drop for RuntimeLease {
+    fn drop(&mut self) {
+        if let Some(manager) = self.manager.upgrade() {
+            manager.release(self.generation);
+        }
+    }
+}
+
 pub struct RuntimeManager {
     state: Arc<Mutex<State>>,
     changed: watch::Sender<u64>,
@@ -163,6 +190,9 @@ impl Drop for RuntimeManager {
     fn drop(&mut self) {
         let state = self.state.lock().expect("runtime state");
         state.cancel.cancel();
+        if let Some(task) = &state.idle_task {
+            task.abort();
+        }
     }
 }
 impl RuntimeManager {
@@ -171,6 +201,10 @@ impl RuntimeManager {
         Arc::new(Self {
             state: Arc::new(Mutex::new(State {
                 plan: None,
+                inference: false,
+                leases: 0,
+                idle_task: None,
+                idle_epoch: 0,
                 generation: 0,
                 status: RuntimeStatus {
                     phase: "idle".into(),
@@ -187,18 +221,23 @@ impl RuntimeManager {
         self.state.lock().expect("runtime state").status.clone()
     }
     pub fn reconcile(self: &Arc<Self>, cfg: &AppConfig) {
-        self.reconcile_inner(cfg, true)
+        self.reconcile_inner(Plan::from_config(cfg), false, true)
     }
-    fn reconcile_inner(self: &Arc<Self>, cfg: &AppConfig, retry: bool) {
-        let desired = Plan::from_config(cfg);
+    fn reconcile_inner(self: &Arc<Self>, desired: Result<Plan>, inference: bool, retry: bool) {
         let mut state = self.state.lock().expect("runtime state");
         if let Ok(plan) = &desired
             && state.plan.as_ref() == Some(plan)
+            && state.inference == inference
             && !(retry && state.status.phase == "error")
         {
             return;
         }
         state.cancel.cancel();
+        if let Some(task) = state.idle_task.take() {
+            task.abort();
+        }
+        state.inference = inference;
+        state.leases = 0;
         state.generation += 1;
         state.endpoints = Endpoints::default();
         state.cancel = CancellationToken::new();
@@ -213,6 +252,7 @@ impl RuntimeManager {
                     message: Some(error.to_string()),
                     ..Default::default()
                 };
+                state.task = previous;
                 self.changed.send_replace(state.generation);
                 return;
             }
@@ -229,11 +269,13 @@ impl RuntimeManager {
                 ..Default::default()
             };
             state.plan = Some(plan);
+            state.task = previous;
             self.changed.send_replace(state.generation);
             return;
         }
         let Ok(handle) = tokio::runtime::Handle::try_current() else {
             state.plan = None;
+            state.task = previous;
             return;
         };
         state.plan = Some(plan.clone());
@@ -265,7 +307,7 @@ impl RuntimeManager {
                     changed.send_replace(generation);
                 }
             };
-            let prepared=tokio::select! {_=cancel.cancelled()=>return,result=prepare(&plan,&cancel,&update,&publish)=>result};
+            let prepared=tokio::select! {_=cancel.cancelled()=>return,result=prepare(&plan,inference,&cancel,&update,&publish)=>result};
             let (mut resources, prepared_result) = prepared;
             // A failed optional download must not retire a recognizer that is
             // already serving an independent active feature.
@@ -274,8 +316,9 @@ impl RuntimeManager {
             {
                 let mut state=shared.lock().expect("runtime state");
                 if state.generation!=generation || cancel.is_cancelled() {return}
-                state.endpoints=resources.endpoints.clone();state.status=RuntimeStatus {phase:if issues.is_empty() {"ready"} else {"error"}.into(),message:(!issues.is_empty()).then(|| issues.join("; ")),services:resources.names.clone(),..Default::default()};changed.send_replace(generation);
+                state.endpoints=resources.endpoints.clone();state.status=RuntimeStatus {phase:if !issues.is_empty() {"error"} else if inference {"ready"} else {"cached"}.into(),message:(!issues.is_empty()).then(|| issues.join("; ")),services:resources.names.clone(),..Default::default()};changed.send_replace(generation);
             }
+            if !inference { return; }
             loop {
                 tokio::select! {_=cancel.cancelled()=>break,_=tokio::time::sleep(Duration::from_secs(2))=> {if !resources.healthy() {
                     { let mut state=shared.lock().expect("runtime state"); if state.generation==generation { state.endpoints=Endpoints::default(); } }
@@ -286,32 +329,110 @@ impl RuntimeManager {
         }));
         self.changed.send_replace(generation);
     }
+    fn acquire(self: &Arc<Self>, desired: &Plan) -> Result<RuntimeLease> {
+        let mut state = self.state.lock().expect("runtime state");
+        if state.plan.as_ref() != Some(desired) || !state.inference {
+            bail!("Local provider selection changed during preparation")
+        }
+        if let Some(task) = state.idle_task.take() {
+            task.abort();
+        }
+        state.idle_epoch = state.idle_epoch.wrapping_add(1);
+        state.leases += 1;
+        Ok(RuntimeLease {
+            manager: Arc::downgrade(self),
+            generation: state.generation,
+        })
+    }
+
+    fn release(&self, generation: u64) {
+        let mut state = self.state.lock().expect("runtime state");
+        if state.generation != generation || state.leases == 0 {
+            return;
+        }
+        state.leases -= 1;
+        if state.leases != 0 {
+            return;
+        }
+        // An abandoned download/loading attempt must stop immediately. Only
+        // ready models benefit from the reuse window between short sessions.
+        let delay = if state.status.phase == "ready" {
+            Duration::from_secs(state.plan.as_ref().map_or(0, |plan| plan.idle_unload_secs))
+        } else {
+            Duration::ZERO
+        };
+        state.idle_epoch = state.idle_epoch.wrapping_add(1);
+        let idle_epoch = state.idle_epoch;
+        let weak = Arc::downgrade(&self.state);
+        let changed = self.changed.clone();
+        let unload = move || {
+            let Some(shared) = weak.upgrade() else {
+                return;
+            };
+            let mut state = shared.lock().expect("runtime state");
+            if state.generation != generation || state.leases != 0 || state.idle_epoch != idle_epoch
+            {
+                return;
+            }
+            state.cancel.cancel();
+            state.generation += 1;
+            state.inference = false;
+            state.plan = None;
+            state.endpoints = Endpoints::default();
+            if state.status.phase != "error" {
+                state.status = RuntimeStatus {
+                    phase: if state.status.phase == "ready" {
+                        "cached"
+                    } else {
+                        "idle"
+                    }
+                    .into(),
+                    ..Default::default()
+                };
+            } else {
+                state.status.services.clear();
+            }
+            changed.send_replace(state.generation);
+        };
+        if let Ok(handle) = tokio::runtime::Handle::try_current() {
+            state.idle_task = Some(handle.spawn(async move {
+                tokio::time::sleep(delay).await;
+                unload();
+            }));
+        } else {
+            drop(state);
+            unload();
+        }
+    }
+
     pub async fn resolve(
         self: &Arc<Self>,
         cfg: &AppConfig,
         cancel: CancellationToken,
-    ) -> Result<AppConfig> {
+    ) -> Result<(AppConfig, Option<RuntimeLease>)> {
         let active = Plan::active(cfg)?;
         if active.empty() {
-            return Ok(cfg.clone());
+            return Ok((cfg.clone(), None));
         }
-        let desired = Plan::from_config(cfg)?;
         let mut updates = self.changed.subscribe();
-        {
+        let reusable = {
             let state = self.state.lock().expect("runtime state");
-            if state.plan.as_ref() == Some(&desired) && active.satisfied_by(&state.endpoints) {
-                return apply_endpoints(cfg, &state.endpoints);
-            }
+            state.inference
+                && state.plan.as_ref() == Some(&active)
+                && active.satisfied_by(&state.endpoints)
+        };
+        if !reusable {
+            self.reconcile_inner(Ok(active.clone()), true, true);
         }
-        self.reconcile_inner(cfg, true);
+        let lease = self.acquire(&active)?;
         loop {
             {
                 let state = self.state.lock().expect("runtime state");
-                if state.plan.as_ref() != Some(&desired) {
+                if state.plan.as_ref() != Some(&active) || !state.inference {
                     bail!("Local provider selection changed during preparation")
                 }
                 if active.satisfied_by(&state.endpoints) {
-                    return apply_endpoints(cfg, &state.endpoints);
+                    return Ok((apply_endpoints(cfg, &state.endpoints)?, Some(lease)));
                 }
                 match state.status.phase.as_str() {
                     "ready" => {
@@ -335,6 +456,11 @@ impl RuntimeManager {
         let task = {
             let mut state = self.state.lock().expect("runtime state");
             state.cancel.cancel();
+            if let Some(task) = state.idle_task.take() {
+                task.abort();
+            }
+            state.leases = 0;
+            state.inference = false;
             state.generation += 1;
             state.endpoints = Endpoints::default();
             state.plan = None;
@@ -414,6 +540,7 @@ impl Resources {
 }
 async fn prepare(
     plan: &Plan,
+    inference: bool,
     cancel: &CancellationToken,
     update: &impl Fn(RuntimeStatus),
     publish: &impl Fn(&Resources),
@@ -424,20 +551,25 @@ async fn prepare(
         http: Vec::new(),
         piper: None,
     };
-    let result = prepare_into(plan, cancel, update, publish, &mut resources).await;
+    let result = prepare_into(plan, inference, cancel, update, publish, &mut resources).await;
     (resources, result)
 }
 
 async fn prepare_into(
     plan: &Plan,
+    inference: bool,
     cancel: &CancellationToken,
     update: &impl Fn(RuntimeStatus),
     publish: &impl Fn(&Resources),
     resources: &mut Resources,
 ) -> Result<()> {
-    let bundle = Bundle::discover().await?;
     let catalog = Catalog::read();
     let cache = assets::cache_directory(&plan.directory)?;
+    if !inference {
+        let root = Bundle::locate()?;
+        return cache_selected_assets(plan, &catalog, &cache, &root, cancel, update).await;
+    }
+    let bundle = Bundle::discover().await?;
     let mut errors = Vec::new();
     for id in &plan.whisper {
         let result: Result<ServiceProcess> = async {
@@ -579,6 +711,38 @@ async fn prepare_into(
     }
     Ok(())
 }
+/// Asset-only preparation deliberately has no executable/process dependency.
+/// Selecting a provider can make its first use offline without holding its
+/// inference state or model tensors in memory for the lifetime of the app.
+async fn cache_selected_assets(
+    plan: &Plan,
+    catalog: &Catalog,
+    cache: &Path,
+    bundle: &Path,
+    cancel: &CancellationToken,
+    update: &impl Fn(RuntimeStatus),
+) -> Result<()> {
+    let mut selected = Vec::new();
+    selected.extend(plan.whisper.iter().map(|id| &catalog.whisper[id]));
+    if let Some(id) = &plan.translation {
+        selected.push(&catalog.translation[id]);
+    }
+    for id in &plan.voices {
+        let voice = &catalog.voices[id];
+        selected.extend([&voice.model, &voice.config, &voice.license]);
+    }
+    let mut errors = Vec::new();
+    for asset in selected {
+        if let Err(error) = obtain(asset, cache, bundle, cancel, update).await {
+            errors.push(format!("{}: {error:#}", asset.name));
+        }
+    }
+    if !errors.is_empty() {
+        bail!("{}", errors.join("; "));
+    }
+    Ok(())
+}
+
 async fn obtain(
     asset: &Asset,
     cache: &Path,
@@ -605,7 +769,7 @@ mod tests {
     use super::*;
 
     #[tokio::test]
-    async fn active_stt_resolves_incrementally_without_restarting_optional_background_work() {
+    async fn active_stt_ignores_inactive_models_and_reuses_loaded_recognizer() {
         let manager = RuntimeManager::new();
         let mut cfg = AppConfig::default();
         cfg.microphone.provider = "local".into();
@@ -623,7 +787,8 @@ mod tests {
         assert!(Plan::active(&cfg).unwrap().issues.is_empty());
         let preparation = {
             let mut state = manager.state.lock().unwrap();
-            state.plan = Some(desired);
+            state.plan = Some(Plan::active(&cfg).unwrap());
+            state.inference = true;
             state.generation = 7;
             state.status.phase = "preparing".into();
             state.cancel.clone()
@@ -636,13 +801,13 @@ mod tests {
         assert!(!request.is_finished());
         {
             let mut state = manager.state.lock().unwrap();
-            state
-                .endpoints
-                .whisper
-                .insert("base".into(), "http://127.0.0.1:49321/inference".into());
+            state.endpoints.whisper.insert(
+                cfg.transcription.providers.whisper.model.clone(),
+                "http://127.0.0.1:49321/inference".into(),
+            );
             manager.changed.send_replace(7);
         }
-        let resolved = tokio::time::timeout(Duration::from_secs(1), request)
+        let (resolved, _lease) = tokio::time::timeout(Duration::from_secs(1), request)
             .await
             .unwrap()
             .unwrap()
@@ -679,9 +844,11 @@ mod tests {
         cfg.transcription.microphone_recognition.provider = "whisper".into();
         {
             let mut state = manager.state.lock().unwrap();
-            state.plan = Some(Plan::from_config(&cfg).unwrap());
+            state.plan = Some(Plan::active(&cfg).unwrap());
+            state.inference = true;
             state.status.phase = "preparing".into();
         }
+        let _other_demand = manager.acquire(&Plan::active(&cfg).unwrap()).unwrap();
         let cancelled = CancellationToken::new();
         cancelled.cancel();
         let result = tokio::time::timeout(Duration::from_secs(1), manager.resolve(&cfg, cancelled))
@@ -725,10 +892,11 @@ mod tests {
         }
         assert_eq!(manager.status().phase, "error");
         let original = serde_json::to_value(&cfg).unwrap();
-        let resolved = manager
+        let (resolved, lease) = manager
             .resolve(&cfg, CancellationToken::new())
             .await
             .unwrap();
+        assert!(lease.is_none());
         assert_eq!(serde_json::to_value(resolved).unwrap(), original);
         cfg.microphone.enabled = true;
         assert!(Plan::active(&cfg).unwrap().empty());
@@ -790,16 +958,149 @@ mod tests {
         manager.reconcile(&cfg);
         assert_eq!(manager.status().phase, "idle");
     }
+    fn ready_fixture(manager: &Arc<RuntimeManager>) -> (AppConfig, CancellationToken) {
+        let mut cfg = AppConfig::default();
+        cfg.microphone.enabled = false;
+        cfg.speaker.enabled = false;
+        cfg.transcription.enabled = true;
+        cfg.transcription.speaker = false;
+        cfg.transcription.microphone_recognition.provider = "whisper".into();
+        cfg.local_runtime.idle_unload_secs = 60;
+        let mut state = manager.state.lock().unwrap();
+        state.plan = Some(Plan::active(&cfg).unwrap());
+        state.inference = true;
+        state.status.phase = "ready".into();
+        state.status.services = vec!["Whisper".into()];
+        state.endpoints.whisper.insert(
+            cfg.transcription.providers.whisper.model.clone(),
+            "http://127.0.0.1:49321/inference".into(),
+        );
+        (cfg, state.cancel.clone())
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn idle_models_release_memory_and_fast_restart_reuses_one_generation() {
+        let manager = RuntimeManager::new();
+        let (cfg, resources) = ready_fixture(&manager);
+        let (_, first) = manager
+            .resolve(&cfg, CancellationToken::new())
+            .await
+            .unwrap();
+        let (_, second) = manager
+            .resolve(&cfg, CancellationToken::new())
+            .await
+            .unwrap();
+        drop(first);
+        tokio::time::advance(Duration::from_secs(65)).await;
+        assert!(
+            !resources.is_cancelled(),
+            "another demand still owns the model"
+        );
+        drop(second);
+        tokio::task::yield_now().await;
+        tokio::time::advance(Duration::from_secs(30)).await;
+        let (_, resumed) = manager
+            .resolve(&cfg, CancellationToken::new())
+            .await
+            .unwrap();
+        assert!(!resources.is_cancelled());
+        tokio::time::advance(Duration::from_secs(65)).await;
+        assert!(
+            !resources.is_cancelled(),
+            "old idle timers cannot stop a resumed session"
+        );
+        drop(resumed);
+        tokio::task::yield_now().await;
+        tokio::time::advance(Duration::from_secs(61)).await;
+        tokio::task::yield_now().await;
+        assert!(resources.is_cancelled());
+        assert_eq!(manager.status().phase, "cached");
+        assert!(manager.status().services.is_empty());
+        assert!(manager.state.lock().unwrap().endpoints.whisper.is_empty());
+        manager.shutdown().await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn cancelled_preparation_stops_immediately_and_old_lease_cannot_cancel_new_selection() {
+        let manager = RuntimeManager::new();
+        let (cfg, resources) = ready_fixture(&manager);
+        {
+            let mut state = manager.state.lock().unwrap();
+            state.endpoints = Endpoints::default();
+            state.status.phase = "preparing".into();
+        }
+        let cancelled = CancellationToken::new();
+        cancelled.cancel();
+        assert!(manager.resolve(&cfg, cancelled).await.is_err());
+        tokio::task::yield_now().await;
+        tokio::time::advance(Duration::from_millis(1)).await;
+        tokio::task::yield_now().await;
+        assert!(
+            resources.is_cancelled(),
+            "cancelled model loading cannot run for the idle grace period"
+        );
+        assert_eq!(manager.status().phase, "idle");
+
+        let (_, _) = ready_fixture(&manager);
+        let (_, old_lease) = manager
+            .resolve(&cfg, CancellationToken::new())
+            .await
+            .unwrap();
+        manager.reconcile(&AppConfig::default());
+        let (_, _) = ready_fixture(&manager);
+        let fresh = CancellationToken::new();
+        manager.state.lock().unwrap().cancel = fresh.clone();
+        drop(old_lease);
+        tokio::time::advance(Duration::from_secs(65)).await;
+        assert!(
+            !fresh.is_cancelled(),
+            "stale leases cannot unload a different configuration"
+        );
+        manager.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn selection_caches_bundled_weights_without_an_inference_executable() {
+        use sha2::{Digest, Sha256};
+        let temporary = tempfile::tempdir().unwrap();
+        let cache = temporary.path().join("cache");
+        let bundle = temporary.path().join("bundle");
+        std::fs::create_dir_all(bundle.join("models")).unwrap();
+        let bytes = b"small offline fixture, never a real model";
+        let hash = format!("{:x}", Sha256::digest(bytes));
+        let filename = format!("{}-fixture.bin", &hash[..16]);
+        std::fs::write(bundle.join("models").join(&filename), bytes).unwrap();
+        let catalog: Catalog = serde_json::from_value(serde_json::json!({
+            "whisper": { "fixture": { "name": "fixture.bin", "size": bytes.len(), "sha256": hash, "url": "https://invalid.example/no-network" } },
+            "translation": {}, "voices": {}
+        })).unwrap();
+        let mut plan = Plan::from_config(&AppConfig::default()).unwrap();
+        plan.whisper.insert("fixture".into());
+        cache_selected_assets(
+            &plan,
+            &catalog,
+            &cache,
+            &bundle,
+            &CancellationToken::new(),
+            &|_| {},
+        )
+        .await
+        .unwrap();
+        assert_eq!(std::fs::read(cache.join(&filename)).unwrap(), bytes);
+        assert!(!bundle.join("bin").exists());
+    }
+
     #[tokio::test]
     async fn external_profiles_never_start_managed_services() {
         let manager = RuntimeManager::new();
         let mut cfg = AppConfig::default();
         cfg.transcription.microphone_recognition.provider = "whisper".into();
         cfg.transcription.providers.whisper.endpoint = "http://127.0.0.1:32145/inference".into();
-        let resolved = manager
+        let (resolved, lease) = manager
             .resolve(&cfg, CancellationToken::new())
             .await
             .unwrap();
+        assert!(lease.is_none());
         assert_eq!(
             resolved.transcription.providers.whisper.endpoint,
             cfg.transcription.providers.whisper.endpoint

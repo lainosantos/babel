@@ -141,8 +141,10 @@ pub(super) struct ManagedServices {
     default_root: Option<PathBuf>,
     root: Option<PathBuf>,
     whisper: Option<ServiceProcess>,
+    whisper_key: Option<(PathBuf, u32)>,
     needle: Option<ServiceProcess>,
     needle_key: Option<zeroize::Zeroizing<String>>,
+    needle_limits: Option<(u32, u32)>,
 }
 
 impl ManagedServices {
@@ -151,8 +153,10 @@ impl ManagedServices {
             default_root,
             root: None,
             whisper: None,
+            whisper_key: None,
             needle: None,
             needle_key: None,
+            needle_limits: None,
         }
     }
 
@@ -160,6 +164,8 @@ impl ManagedServices {
         let whisper = self.whisper.take();
         let needle = self.needle.take();
         self.needle_key = None;
+        self.whisper_key = None;
+        self.needle_limits = None;
         tokio::join!(
             async {
                 if let Some(process) = whisper {
@@ -211,19 +217,27 @@ impl ManagedServices {
             self.needle = None;
         }
         if config.whisper_endpoint == "auto" {
+            let model = whisper_model(&root, &config.whisper_model)?;
+            let threads = config
+                .local_threads
+                .min(std::thread::available_parallelism().map_or(1, |n| n.get() as u32));
+            let key = (model.clone(), threads);
+            if self.whisper_key.as_ref() != Some(&key)
+                && let Some(process) = self.whisper.take()
+            {
+                process.stop().await;
+            }
             if self.whisper.is_none() {
                 let executable = whisper_binary(&root).context("Whisper is not installed in the local services folder; run scripts/setup_whisper.py")?;
-                let model = root.join(".tools/whisper.cpp/models/ggml-base.bin");
-                ensure!(
-                    model.is_file(),
-                    "Whisper model is missing; run scripts/setup_whisper.py"
-                );
                 let mut command = Command::new(executable);
                 command
-                    .args(["--host", "127.0.0.1", "--port", "0", "-t", "4", "-m"])
+                    .args(["--host", "127.0.0.1", "--port", "0", "-t"])
+                    .arg(threads.to_string())
+                    .arg("-m")
                     .arg(model);
                 self.whisper =
                     Some(ServiceProcess::start(command, "babel-whisper", "/inference").await?);
+                self.whisper_key = Some(key);
             }
             effective.whisper_endpoint = self.whisper.as_ref().unwrap().endpoint.clone();
         } else if let Some(process) = self.whisper.take() {
@@ -235,7 +249,8 @@ impl ManagedServices {
             } else {
                 Some(crate::credentials::get(&config.needle_api_key_env)?)
             };
-            if self.needle_key != key
+            let limits = (config.idle_unload_secs, config.timeout_secs);
+            if (self.needle_key != key || self.needle_limits != Some(limits))
                 && let Some(process) = self.needle.take()
             {
                 process.stop().await;
@@ -254,7 +269,10 @@ impl ManagedServices {
                 let mut command = Command::new(python);
                 command
                     .arg(script)
-                    .args(["--port", "0"])
+                    .args(["--port", "0", "--idle-unload-secs"])
+                    .arg(config.idle_unload_secs.to_string())
+                    .arg("--timeout-secs")
+                    .arg(config.timeout_secs.to_string())
                     .env("NEEDLE_TELEMETRY", "0")
                     .env("DO_NOT_TRACK", "1")
                     .env("HF_HUB_OFFLINE", "1");
@@ -266,6 +284,7 @@ impl ManagedServices {
                 self.needle =
                     Some(ServiceProcess::start(command, "babel-needle", "/complete").await?);
                 self.needle_key = key;
+                self.needle_limits = Some(limits);
             }
             effective.needle_endpoint = self.needle.as_ref().unwrap().endpoint.clone();
         } else {
@@ -290,6 +309,24 @@ impl ManagedServices {
     }
 }
 
+fn whisper_model(root: &Path, model: &str) -> Result<PathBuf> {
+    let directory = root.join(".tools/whisper.cpp/models");
+    let path = directory.join(format!("ggml-{model}.bin"));
+    if path.is_file() {
+        return Ok(path);
+    }
+    // Preserve installations made before the compact default was introduced.
+    // The next setup upgrades the model; an explicit tiny/small selection must
+    // never silently load a different, larger model.
+    let legacy = directory.join("ggml-base.bin");
+    if model == crate::config::DEFAULT_WHISPER_MODEL && legacy.is_file() {
+        return Ok(legacy);
+    }
+    bail!(
+        "Selected command Whisper model is not installed; run scripts/setup_whisper.py or install its ggml model in the local services folder"
+    )
+}
+
 fn whisper_binary(root: &Path) -> Option<PathBuf> {
     let name = if cfg!(windows) {
         "whisper-server.exe"
@@ -311,6 +348,29 @@ mod tests {
 
     const FIXTURE_MODE: &str = "BABEL_TEST_LOCAL_VOICE_HELPER_MODE";
     const FIXTURE_REPORT: &str = "BABEL_TEST_LOCAL_VOICE_HELPER_REPORT";
+
+    #[test]
+    fn compact_model_preferred_legacy_installation_survives_and_explicit_models_never_fall_back() {
+        let root = tempfile::tempdir().unwrap();
+        let directory = root.path().join(".tools/whisper.cpp/models");
+        std::fs::create_dir_all(&directory).unwrap();
+        assert!(whisper_model(root.path(), crate::config::DEFAULT_WHISPER_MODEL).is_err());
+        let legacy = directory.join("ggml-base.bin");
+        std::fs::write(&legacy, b"fixture").unwrap();
+        assert_eq!(
+            whisper_model(root.path(), crate::config::DEFAULT_WHISPER_MODEL).unwrap(),
+            legacy
+        );
+        let compact = directory.join("ggml-base-q5_1.bin");
+        std::fs::write(&compact, b"fixture").unwrap();
+        assert_eq!(
+            whisper_model(root.path(), crate::config::DEFAULT_WHISPER_MODEL).unwrap(),
+            compact
+        );
+        assert_eq!(whisper_model(root.path(), "base").unwrap(), legacy);
+        assert!(whisper_model(root.path(), "tiny-q5_1").is_err());
+        assert!(whisper_model(root.path(), "small").is_err());
+    }
 
     // Invoked only by this module's child-process tests. A normal --ignored test
     // run without its private environment variable performs no I/O or waiting.

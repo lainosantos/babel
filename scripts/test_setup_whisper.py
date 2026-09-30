@@ -16,7 +16,7 @@ class ModelTests(unittest.TestCase):
         self.temporary = tempfile.TemporaryDirectory()
         self.addCleanup(self.temporary.cleanup)
         self.directory = Path(self.temporary.name)
-        self.model = self.directory / "ggml-base.bin"
+        self.model = self.directory / setup.MODEL["name"]
         self.content = b"test model bytes"
         size = patch.object(setup, "MODEL_SIZE", len(self.content))
         checksum = patch.object(setup, "MODEL_SHA256", hashlib.sha256(self.content).hexdigest())

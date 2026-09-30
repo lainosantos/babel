@@ -179,8 +179,9 @@ o [contrato Listen v1](https://developers.deepgram.com/reference/speech-to-text/
 ## Provider local integrado: Whisper → Qwen → Piper
 
 Escolha **Local** na rota de tradução e mantenha **Integrado ao Babel** nos
-componentes de reconhecimento, tradução e voz. Ao salvar, o Babel inicia os
-motores incluídos no instalador e baixa os modelos ausentes. Isso funciona com
+componentes de reconhecimento, tradução e voz. Ao salvar, o Babel baixa e
+verifica os modelos ausentes, mantendo os arquivos em disco. Os motores do
+instalador são carregados quando a sessão usa as funções habilitadas. Isso funciona com
 o mesmo fluxo no Linux, macOS e Windows, sem instalar Python, CMake, Ollama ou
 Piper separadamente. O painel acompanha preparação e download.
 
@@ -193,7 +194,7 @@ inicia llama.cpp, não exige um serviço Ollama.
 ```toml
 [providers.local]
 whisper_endpoint = "auto"
-whisper_model = "base"
+whisper_model = "base-q5_1"
 ollama_endpoint = "auto"
 translation_model = "qwen3-0.6b"
 piper_endpoint = "auto"
@@ -205,7 +206,8 @@ request_timeout_secs = 30
 
 [local_runtime]
 directory = ""
-threads = 4
+threads = 2
+idle_unload_secs = 60
 
 [microphone]
 provider = "local"
@@ -227,6 +229,13 @@ identidade vocal, não clona vozes e não diariza. O texto intermediário de
 reconhecimento não alimenta o TXT: selecione um STT independente na página
 **Transcrição**. Whisper STT e Whisper da tradução têm configuração própria.
 
+Whisper Base Q5_1 é o padrão para novas configurações, com pesos de 59,7 MB.
+Tiny Q5_1 usa 32,2 MB e Small Q5_1 usa 190,1 MB. As variantes originais continuam
+selecionáveis e escolhas salvas são preservadas. O tradutor Qwen3 0.6B permanece
+em Q8, com 639 MB; cada voz Piper medium ocupa cerca de 63–64 MB. Esses valores
+são de download, não de RAM. Consulte os limites e a medição pontual no
+[catálogo integrado](local-inference.md).
+
 O reconhecimento é segmentado e a latência acumula reconhecimento, tradução
 e síntese. Um modelo pequeno pode errar mais em frases ambíguas, idiomas pouco
 representados ou contexto técnico. Filas são limitadas, e a máquina precisa
@@ -240,12 +249,21 @@ seleção precisa de internet para obter os pesos. Os executáveis dos motores
 fazem parte do instalador; uma compilação de desenvolvimento precisa gerar o
 pacote de runtimes antes de usar o modo integrado.
 
+O padrão novo é de até dois threads para Whisper/Qwen, conforme CPUs disponíveis.
+O limite configurável é 1–64; Piper conserva seu próprio controle interno.
+`idle_unload_secs` aceita 1–3600 segundos, padrão 60: quando a última sessão
+libera os motores, esse prazo permite reutilização antes de encerrar os
+processos gerenciados e liberar a RAM. Os pesos continuam em cache no disco.
+Salvar um provider numa função desligada prepara arquivos, mas não faz uma
+sessão que só grava áudio carregar IA.
+
 Os componentes podem usar **Servidor externo (avançado)** individualmente.
 Informe o endpoint real de cada serviço; o Babel não descobre servidores por
 portas padrão. O Whisper aceita multipart WAV em `/inference`. Para tradução,
 `translation_api = "ollama"` usa a API de chat Ollama e `"openai"` usa chat
 completions compatível. O Piper externo deve aceitar texto/voz e retornar WAV.
 Endpoints remotos HTTPS recebem o áudio ou texto da etapa correspondente.
+Servidores externos não são encerrados pela política de inatividade do Babel.
 
 A API Ollama recebe mensagens de tradução, `stream=false`, `think=false`,
 temperatura zero e limite de tokens. O modelo do servidor precisa aceitar esse

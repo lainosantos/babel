@@ -81,6 +81,17 @@ fn only_loopback_inference_and_bounded_configuration_are_allowed() {
         assert!(config.validate().is_err());
     }
     config.min_confidence = 0.85;
+    for (threads, idle_seconds) in [(0, 60), (33, 60), (2, 0), (2, 3601)] {
+        config.local_threads = threads;
+        config.idle_unload_secs = idle_seconds;
+        assert!(config.validate().is_err());
+    }
+    config.local_threads = 2;
+    config.idle_unload_secs = 60;
+    config.whisper_model = "../../unexpected-model".into();
+    assert!(config.validate().is_err());
+    config.whisper_model = crate::config::DEFAULT_WHISPER_MODEL.into();
+    config.validate().unwrap();
     config.max_calls = 0;
     assert!(config.validate().is_err());
     assert!(serde_json::from_value::<AgentConfig>(json!({"unknown":true})).is_err());

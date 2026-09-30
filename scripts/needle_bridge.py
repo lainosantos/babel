@@ -8,10 +8,15 @@ import argparse
 import hmac
 import json
 import os
+import queue
+import select
+import socket
+import subprocess
 import sys
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from socketserver import TCPServer
-from threading import BoundedSemaphore, Lock
+from threading import BoundedSemaphore, Event, Lock, Thread
 
 # Set before importing Needle so its optional usage telemetry stays disabled.
 os.environ["NEEDLE_TELEMETRY"] = "0"
@@ -20,15 +25,204 @@ MAX_BODY = 256 * 1024
 MAX_RESPONSE = 256 * 1024
 
 
+class ModelWorker:
+    """SDK globals retain native weights after Needle.close(). Own their process
+    so idle unload really returns that memory to the OS on all three platforms.
+    """
+    def __init__(self, deadline, cancelled=None, **kwargs):
+        self.deadline = deadline
+        self.cancelled = cancelled
+        self.responses = queue.Queue(maxsize=1)
+        self.process = subprocess.Popen(
+            [sys.executable, os.path.abspath(__file__), "--model-worker"],
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+            creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
+        )
+        output = self.process.stdout
+
+        def receive():
+            while True:
+                try:
+                    raw = output.readline(MAX_RESPONSE + 1)
+                    self.responses.put_nowait(raw)
+                except (OSError, ValueError, queue.Full):
+                    return
+                if not raw or not raw.endswith(b"\n"):
+                    return
+
+        self.reader = Thread(target=receive, daemon=True)
+        self.reader.start()
+        try:
+            self._exchange({"operation": "load", "kwargs": kwargs})
+        except BaseException:
+            self.close()
+            raise
+
+    def _exchange(self, request):
+        body = json.dumps(request, ensure_ascii=False, allow_nan=False,
+                          separators=(",", ":")).encode() + b"\n"
+        if len(body) > MAX_BODY:
+            raise ValueError("Needle worker request exceeds the limit")
+        finished, interrupted = Event(), Event()
+        process = self.process
+
+        def guard():
+            # A model load schema may exceed pipe capacity. Cover the write as
+            # well as reading the response; killing the reader unblocks a full
+            # pipe without trying to acquire the writer's buffered-I/O lock.
+            while not finished.is_set():
+                remaining = self.deadline - time.monotonic()
+                if self.cancelled is not None and self.cancelled.is_set() or remaining <= 0:
+                    interrupted.set()
+                    try:
+                        process.kill()
+                    except OSError:
+                        pass
+                    return
+                finished.wait(min(0.1, remaining))
+
+        watchdog = Thread(target=guard, daemon=True)
+        watchdog.start()
+        try:
+            self.process.stdin.write(body)
+            self.process.stdin.flush()
+            while True:
+                if interrupted.is_set():
+                    raise RuntimeError("Needle worker request cancelled or timed out")
+                try:
+                    raw = self.responses.get(timeout=min(0.1, max(0.001, self.deadline - time.monotonic())))
+                    break
+                except queue.Empty:
+                    continue
+            if not raw.endswith(b"\n") or len(raw) > MAX_RESPONSE:
+                if interrupted.is_set():
+                    raise RuntimeError("Needle worker request cancelled or timed out")
+                raise RuntimeError("Needle worker exited or exceeded the response limit")
+            value = json.loads(raw)
+        except (OSError, ValueError) as error:
+            if interrupted.is_set():
+                raise RuntimeError("Needle worker request cancelled or timed out") from error
+            raise RuntimeError("Needle worker communication failed") from error
+        finally:
+            finished.set()
+            watchdog.join(timeout=1)
+        if value.get("error") == "import":
+            raise ImportError("Needle SDK unavailable")
+        if "error" in value:
+            raise RuntimeError("Needle worker inference failed")
+        return value.get("result")
+
+    def reset(self):
+        self._exchange({"operation": "reset"})
+
+    def complete(self, text, max_new_tokens):
+        return self._exchange({"operation": "complete", "text": text,
+                               "max_new_tokens": max_new_tokens})
+
+    def close(self):
+        process, self.process = self.process, None
+        if process is None:
+            return
+        # EOF also lets the child release memory if the owning HTTP bridge dies.
+        try:
+            process.stdin.close()
+        except OSError:
+            pass
+        try:
+            process.wait(timeout=1)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait(timeout=5)
+        finally:
+            process.stdout.close()
+            self.reader.join(timeout=1)
+
+
+def model_worker():
+    # Keep the protocol separate from native runtime stdout and never log speech.
+    output = os.fdopen(os.dup(sys.stdout.fileno()), "wb", buffering=0)
+    os.dup2(sys.stderr.fileno(), sys.stdout.fileno())
+    requests = queue.Queue(maxsize=1)
+
+    def receive():
+        while True:
+            raw = sys.stdin.buffer.readline(MAX_BODY + 1)
+            if not raw:
+                # An SDK call may be in flight when Babel exits. A pipe monitor
+                # avoids leaving native inference alive after its owner dies.
+                os._exit(0)
+            if not raw.endswith(b"\n") or len(raw) > MAX_BODY:
+                os._exit(1)
+            try:
+                requests.put(json.loads(raw))
+            except ValueError:
+                os._exit(1)
+
+    Thread(target=receive, daemon=True).start()
+    agent = None
+    while True:
+        request = requests.get()
+        try:
+            operation = request.get("operation")
+            if operation == "load" and agent is None:
+                from needle import Needle
+                agent = Needle(**request["kwargs"])
+                result = None
+            elif operation == "reset" and agent is not None:
+                agent.reset()
+                result = None
+            elif operation == "complete" and agent is not None:
+                result = agent.complete(request["text"], max_new_tokens=request["max_new_tokens"])
+            else:
+                raise ValueError("invalid worker operation")
+            response = {"result": result}
+        except ImportError:
+            response = {"error": "import"}
+        except Exception:
+            response = {"error": "inference"}
+        try:
+            encoded = json.dumps(response, ensure_ascii=False, allow_nan=False,
+                                 separators=(",", ":")).encode() + b"\n"
+            if len(encoded) > MAX_RESPONSE:
+                encoded = b'{"error":"limit"}\n'
+            output.write(encoded)
+        except (ValueError, OSError):
+            return
+
+
 class Planner:
-    def __init__(self, weights=None, factory=None):
+    def __init__(self, weights=None, factory=None, idle_unload_secs=60,
+                 timeout_secs=20, clock=time.monotonic):
         self.weights = weights
         self.factory = factory
         self.agent = None
         self.catalog = None
         self.lock = Lock()
+        self.idle_unload_secs = idle_unload_secs
+        self.clock = clock
+        self.last_used = None
+        self.timeout_secs = timeout_secs
 
-    def complete(self, payload):
+    def close(self):
+        previous, self.agent = self.agent, None
+        self.catalog = None
+        self.last_used = None
+        if previous is not None:
+            previous.close()
+
+    def unload_idle(self):
+        # The HTTP request owns this same lock throughout a completion. An idle
+        # check never interrupts inference or waits behind a slow command.
+        if not self.lock.acquire(blocking=False):
+            return
+        try:
+            if (self.agent is not None and self.last_used is not None
+                    and self.clock() - self.last_used >= self.idle_unload_secs):
+                self.close()
+        finally:
+            self.lock.release()
+
+    def complete(self, payload, cancelled=None):
         if not isinstance(payload, dict):
             raise ValueError("request must be an object")
         text, tools = payload.get("text"), payload.get("tools")
@@ -61,23 +255,30 @@ class Planner:
         if type(maximum) is not int or not 32 <= maximum <= 512:
             raise ValueError("max_new_tokens must be 32..512")
         catalog = json.dumps([clean_tools, system], sort_keys=True, ensure_ascii=False)
+        deadline = time.monotonic() + self.timeout_secs
         if self.agent is None or self.catalog != catalog:
-            if self.factory is None:
-                from needle import Needle
-                self.factory = Needle
+            # Close before opening the replacement to bound peak native memory.
+            self.close()
             kwargs = {"tools": clean_tools, "system": system}
             if self.weights:
                 kwargs["weights"] = self.weights
-            replacement = self.factory(**kwargs)
-            previous = self.agent
-            self.agent = replacement
+            self.agent = (self.factory(**kwargs) if self.factory is not None
+                          else ModelWorker(deadline=deadline, cancelled=cancelled, **kwargs))
             self.catalog = catalog
-            if previous is not None:
-                previous.close()
         # Each wake activation is a new command; previous users/tool results must
         # never leak into arguments for a later activation.
-        self.agent.reset()
-        result = self.agent.complete(text, max_new_tokens=maximum)
+        if isinstance(self.agent, ModelWorker):
+            self.agent.deadline = deadline
+            self.agent.cancelled = cancelled
+        try:
+            self.agent.reset()
+            result = self.agent.complete(text, max_new_tokens=maximum)
+        except BaseException:
+            # A timeout or invalid worker must never poison the next activation.
+            self.close()
+            raise
+        finally:
+            self.last_used = self.clock()
         if not isinstance(result, dict):
             raise RuntimeError("Needle returned a non-object response")
         return result
@@ -95,13 +296,13 @@ def make_handler(planner, api_key=""):
             body = json.dumps(value, ensure_ascii=False, allow_nan=False).encode()
             if len(body) > MAX_RESPONSE:
                 status, body = 502, b'{"error":"Needle response exceeds the memory limit"}'
-            self.send_response(status)
-            self.send_header("Content-Type", "application/json")
-            self.send_header("Content-Length", str(len(body)))
-            self.send_header("Cache-Control", "no-store")
-            self.send_header("X-Content-Type-Options", "nosniff")
-            self.end_headers()
             try:
+                self.send_response(status)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.send_header("Cache-Control", "no-store")
+                self.send_header("X-Content-Type-Options", "nosniff")
+                self.end_headers()
                 self.wfile.write(body)
             except (BrokenPipeError, ConnectionResetError):
                 pass
@@ -143,12 +344,30 @@ def make_handler(planner, api_key=""):
                 return self.reply(413, {"error": "request body exceeds the limit"})
             if not planner.lock.acquire(blocking=False):
                 return self.reply(503, {"error": "Needle is processing another command"})
+            cancelled = Event()
+            finished = Event()
+            monitor = None
             try:
                 raw = self.rfile.read(length)
                 if len(raw) != length:
                     return self.reply(400, {"error": "incomplete request"})
                 payload = json.loads(raw)
-                result = planner.complete(payload)
+                # Rust cancels inference by closing the HTTP request. Watch only
+                # while this request is in progress so cancellation also frees
+                # native work instead of waiting for a model timeout.
+                def monitor_disconnect():
+                    while not finished.wait(0.1):
+                        try:
+                            readable, _, _ = select.select([self.connection], [], [], 0)
+                            if readable and not self.connection.recv(1, socket.MSG_PEEK):
+                                cancelled.set()
+                                return
+                        except OSError:
+                            cancelled.set()
+                            return
+                monitor = Thread(target=monitor_disconnect, daemon=True)
+                monitor.start()
+                result = planner.complete(payload, cancelled=cancelled)
                 self.reply(200, result)
             except (ValueError, UnicodeError):
                 self.reply(400, {"error": "invalid command request"})
@@ -157,6 +376,9 @@ def make_handler(planner, api_key=""):
             except Exception:
                 self.reply(502, {"error": "Needle inference failed; verify the installed runtime and model"})
             finally:
+                finished.set()
+                if monitor is not None:
+                    monitor.join(timeout=1)
                 planner.lock.release()
 
     return Handler
@@ -168,7 +390,18 @@ class Server(ThreadingHTTPServer):
 
     def __init__(self, *args, **kwargs):
         self.connections = BoundedSemaphore(8)
+        self.planner = kwargs.pop("planner", None)
         super().__init__(*args, **kwargs)
+
+    def service_actions(self):
+        if self.planner is not None:
+            self.planner.unload_idle()
+
+    def server_close(self):
+        super().server_close()
+        if self.planner is not None:
+            with self.planner.lock:
+                self.planner.close()
 
     def server_bind(self):
         # HTTPServer normally resolves the bound address with getfqdn(). This
@@ -200,13 +433,23 @@ def main():
     parser.add_argument("--port", type=int, default=0, help="loopback port; 0 asks the OS for an available port")
     parser.add_argument("--weights", help="optional local Needle 3 .cact model")
     parser.add_argument("--api-key-env", default="", help="environment variable holding an optional bearer key")
+    parser.add_argument("--idle-unload-secs", type=int, default=60,
+                        help="release native model memory after 1..3600 idle seconds")
+    parser.add_argument("--timeout-secs", type=int, default=20,
+                        help="maximum duration of a model request, including loading (1..120)")
     args = parser.parse_args()
     if not 0 <= args.port <= 65535:
         parser.error("port must be 0..65535")
+    if not 1 <= args.idle_unload_secs <= 3600:
+        parser.error("idle-unload-secs must be 1..3600")
+    if not 1 <= args.timeout_secs <= 120:
+        parser.error("timeout-secs must be 1..120")
     key = os.environ.get(args.api_key_env, "") if args.api_key_env else ""
     if args.api_key_env and not key:
         parser.error("the configured API key environment variable is absent or empty")
-    server = Server(("127.0.0.1", args.port), make_handler(Planner(args.weights), key))
+    planner = Planner(args.weights, idle_unload_secs=args.idle_unload_secs,
+                      timeout_secs=args.timeout_secs)
+    server = Server(("127.0.0.1", args.port), make_handler(planner, key), planner=planner)
     port = server.server_address[1]
     endpoint = f"http://127.0.0.1:{port}/complete"
     # Bind before announcing readiness: the selected port remains reserved by
@@ -223,4 +466,7 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    if sys.argv[1:] == ["--model-worker"]:
+        model_worker()
+    else:
+        main()

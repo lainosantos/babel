@@ -10,12 +10,18 @@ pub struct AgentConfig {
     pub desktop_notifications: bool,
     pub wake_name: String,
     pub whisper_endpoint: String,
+    pub whisper_model: String,
     pub whisper_language: String,
     pub whisper_api_key_env: String,
     pub needle_endpoint: String,
     pub needle_api_key_env: String,
     /// Empty uses the configuration file's directory, never a guessed port.
     pub services_directory: String,
+    /// CPU threads for the managed Whisper runtime, capped to available CPUs.
+    pub local_threads: u32,
+    /// Retire managed helpers after the microphone stops; Needle also unloads
+    /// its model after this many seconds without a completed command.
+    pub idle_unload_secs: u32,
     pub max_calls: usize,
     pub integrations: Vec<crate::mcp_client::McpIntegration>,
     pub min_confidence: f64,
@@ -33,11 +39,14 @@ impl Default for AgentConfig {
             desktop_notifications: true,
             wake_name: "Babel".into(),
             whisper_endpoint: "auto".into(),
+            whisper_model: crate::config::DEFAULT_WHISPER_MODEL.into(),
             whisper_language: "auto".into(),
             whisper_api_key_env: String::new(),
             needle_endpoint: "auto".into(),
             needle_api_key_env: String::new(),
             services_directory: String::new(),
+            local_threads: 2,
+            idle_unload_secs: 60,
             max_calls: 4,
             integrations: Vec::new(),
             min_confidence: 0.85,
@@ -72,6 +81,18 @@ impl AgentConfig {
         if !self.services_directory.is_empty() {
             crate::storage::resolve_base(&self.services_directory)?;
         }
+        ensure!(
+            crate::config::is_managed_whisper_model(&self.whisper_model),
+            "unknown command Whisper model"
+        );
+        ensure!(
+            (1..=32).contains(&self.local_threads),
+            "command local threads must be 1..32"
+        );
+        ensure!(
+            (1..=3600).contains(&self.idle_unload_secs),
+            "command idle unload must be 1..3600 seconds"
+        );
         ensure!(
             self.whisper_endpoint != "auto" || self.whisper_api_key_env.is_empty(),
             "Managed Whisper does not use an API key; use an explicit local endpoint for authenticated servers"

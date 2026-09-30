@@ -134,6 +134,7 @@ impl RouteMetrics {
 
 struct Running {
     _cancel_on_drop: tokio_util::sync::DropGuard,
+    _local_runtime: Option<crate::local_runtime::RuntimeLease>,
     session: crate::session::SessionIdentity,
     cancel: CancellationToken,
     task: JoinHandle<Result<()>>,
@@ -534,7 +535,7 @@ impl Controller {
             return Err(ConfigurationChanged.into());
         }
         ensure!(state.running.is_none(), "Uma sessão já está em execução");
-        let cfg = resolved?;
+        let (cfg, local_runtime_lease) = resolved?;
         drop(prepare_guard);
         let devices = audio::devices().await?;
         for (name, route, transcribe, record) in [
@@ -619,6 +620,7 @@ impl Controller {
             },
         ));
         state.running = Some(Running {
+            _local_runtime: local_runtime_lease,
             _cancel_on_drop: cancel.clone().drop_guard(),
             session,
             cancel,
@@ -1721,6 +1723,7 @@ mod tests {
         let (input, _) = watch::channel("my-mic".into());
         let (output, _) = watch::channel("my-speakers".into());
         controller.state.lock().await.running = Some(Running {
+            _local_runtime: None,
             _cancel_on_drop: cancel.clone().drop_guard(),
             session,
             cancel: cancel.clone(),

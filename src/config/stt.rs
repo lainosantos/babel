@@ -101,7 +101,7 @@ impl Default for WhisperSttConfig {
     fn default() -> Self {
         Self {
             endpoint: "auto".into(),
-            model: "base".into(),
+            model: super::DEFAULT_WHISPER_MODEL.into(),
             api_key_env: String::new(),
             segment_ms: 2000,
             silence_ms: 300,
@@ -221,7 +221,7 @@ impl SttProviderProfiles {
                 let profile = &self.whisper;
                 if profile.endpoint == "auto" {
                     ensure!(
-                        matches!(profile.model.as_str(), "tiny" | "base" | "small"),
+                        super::is_managed_whisper_model(&profile.model),
                         "Unknown managed Whisper model"
                     );
                 } else {

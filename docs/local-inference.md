@@ -1,6 +1,7 @@
 # Modelos locais integrados
 
-O Babel inicia os providers locais selecionados e gerencia os modelos necessários.
+O Babel gerencia os modelos locais e carrega os motores quando uma função ativa
+da sessão precisa deles.
 O instalador inclui os motores de inferência para Linux, macOS e Windows. O usuário
 não precisa instalar Python, Ollama, CMake, um compilador ou um servidor separado.
 Os pesos dos modelos são baixados automaticamente na primeira seleção e ficam em
@@ -9,29 +10,40 @@ cache para as próximas execuções.
 ## Começar pela interface
 
 Para transcrição, abra **Transcrição**, escolha **whisper.cpp** em uma ou nas duas
-origens e mantenha **Integrado ao Babel** no perfil. Escolha Whisper Tiny, Base ou
-Small e salve os ajustes. O Babel prepara o reconhecedor mesmo antes de iniciar
-uma sessão. Ativar a transcrição continua sendo uma escolha independente.
+origens e mantenha **Integrado ao Babel** no perfil. O padrão para novas
+configurações é Whisper Base Q5_1. Salvar baixa e verifica os pesos ausentes,
+sem manter o reconhecedor carregado. Ativar a transcrição continua sendo uma
+escolha independente.
 
 Para tradução, abra **Tradução e vozes**, escolha **Local** na rota desejada e
 mantenha os componentes de reconhecimento, tradução e voz em **Integrado ao
-Babel**. Salvar prepara Whisper, Qwen e Piper conforme a configuração selecionada.
+Babel**. Salvar prepara os arquivos de Whisper, Qwen e Piper conforme a seleção.
 A opção de voz automática escolhe uma voz disponível para o idioma de destino.
 
 O estado aparece nas duas páginas e em **Ajustes → Modelos locais**:
 
 - **Em espera:** ainda não há uma preparação ativa para a seleção salva.
-- **Preparando:** baixando pesos ou carregando os motores; o download mostra
+- **Preparando:** baixando pesos ou, ao iniciar uma sessão, carregando os motores;
+  o download mostra
   tamanho recebido e percentual quando o servidor informa o total.
-- **Prontos:** os motores selecionados estão disponíveis.
+- **Pesos em cache (`cached`):** os arquivos estão verificados no disco; os
+  motores de inferência não precisam ocupar RAM.
+- **Prontos (`ready`):** os motores necessários à sessão foram carregados.
 - **Precisam de atenção:** a preparação falhou; os detalhes ajudam a corrigir
   rede, armazenamento, modelo ou instalação. Salvar novamente tenta a preparação.
 
 Iniciar uma sessão aguarda os modelos ficarem prontos. **Cancelar início da
 sessão** interrompe essa espera, sem exigir desligar o roteamento original.
-A preparação dos modelos que continuam selecionados pode prosseguir. Os ajustes
-salvos determinam quais serviços gerenciados são necessários; os processos
-pertencem ao Babel e são encerrados por ele ao deixar de serem usados.
+O carregamento solicitado é interrompido; arquivos já baixados ficam no cache. A sessão
+carrega somente os motores exigidos pela tradução e/ou transcrição habilitadas.
+Um provider local salvo numa função desligada não faz essa sessão carregar IA.
+O roteamento e a gravação de áudio original não precisam desses modelos.
+
+Após a última sessão liberar os motores, o Babel os mantém por uma espera curta
+para permitir outro início sem recarregamento. O padrão é 60 segundos; passado
+esse prazo, encerra os processos que gerencia e libera a RAM deles, mantendo os
+pesos em disco. Uma nova sessão dentro do prazo cancela a liberação. Os serviços
+externos continuam sob o controle de quem os iniciou: o Babel não os encerra.
 
 Não é necessário iniciar uma sessão para preparar os modelos, mas preparar um
 modelo não grava, transcreve ou traduz automaticamente. A captura para essas
@@ -39,11 +51,16 @@ funções segue as opções da sessão e o uso do dispositivo virtual correspond
 Com tradução, transcrição e gravação desligadas, o áudio original segue a rota
 física configurada.
 
+Os comandos de voz têm outro ciclo: Whisper precisa ficar disponível enquanto
+o agente escuta um microfone Babel elegível, mesmo sem sessão. Needle só carrega
+para interpretar um comando. Veja [comandos de voz](voice-commands.md) para os
+limites de CPU e a liberação por inatividade desses componentes.
+
 ## Modelos disponíveis
 
 | Etapa | Catálogo integrado | Padrão e considerações |
 |---|---|---|
-| Reconhecimento original | Whisper `tiny`, `base`, `small`, multilíngues | `base`; modelos maiores consomem mais memória e processamento |
+| Reconhecimento original | Whisper `tiny-q5_1`, `base-q5_1`, `small-q5_1`, multilíngues; variantes originais `tiny`, `base`, `small` continuam disponíveis | `base-q5_1`; Tiny prioriza custo, Small oferece mais capacidade com maior consumo |
 | Tradução de texto | Qwen `qwen3-0.6b` | Motor llama.cpp incluído; modelo compacto, sem garantia universal de qualidade |
 | Síntese | Piper, vozes listadas abaixo | `auto` acompanha o idioma de destino |
 
@@ -51,6 +68,9 @@ Tamanhos aproximados de download, em MB decimais (1 MB = 1.000.000 bytes):
 
 | Arquivo de modelo | Download |
 |---|---:|
+| Whisper Tiny Q5_1 | 32,2 MB |
+| Whisper Base Q5_1 — padrão | 59,7 MB |
+| Whisper Small Q5_1 | 190,1 MB |
 | Whisper Tiny | 78 MB |
 | Whisper Base | 148 MB |
 | Whisper Small | 488 MB |
@@ -59,10 +79,24 @@ Tamanhos aproximados de download, em MB decimais (1 MB = 1.000.000 bytes):
 
 A interface mostra o progresso em MiB (1 MiB = 1.048.576 bytes), por isso o número
 exibido difere dessa tabela. O tamanho do download não representa o uso de RAM
-durante a inferência. Uma tradução local com Whisper Base, Qwen e duas vozes
-precisa de aproximadamente 914 MB em pesos; os motores do instalador e arquivos
+durante a inferência. Uma tradução local com Whisper Base Q5_1, Qwen e duas vozes
+precisa de aproximadamente 826 MB em pesos; os motores do instalador e arquivos
 temporários ocupam espaço adicional. Pesos já presentes e verificados são
 reutilizados, sem novo download a cada sessão.
+
+Q5_1 reduz a precisão numérica dos pesos para ocupar menos espaço. O modelo
+multilíngue Base continua sendo a base do padrão; não é substituído por Tiny.
+A [documentação do whisper.cpp](https://github.com/ggml-org/whisper.cpp#quantization)
+descreve o menor uso de memória e disco e ressalta que o ganho de velocidade
+depende do hardware. As versões e SHA-256 vêm do catálogo fixado do Babel.
+Uma configuração que já selecionava `tiny`, `base` ou `small` mantém essa escolha;
+para adotar a versão compacta, selecione-a e salve.
+
+O tradutor permanece Qwen3 0.6B Q8, e as vozes Piper permanecem na qualidade
+medium. Reduzir ainda mais seus pesos sem avaliar o idioma e o áudio poderia
+prejudicar o resultado. A seleção usa [Qwen multilíngue com raciocínio desativado](https://huggingface.co/Qwen/Qwen3-0.6B#switching-between-thinking-and-non-thinking-mode)
+para a tradução de segmentos e uma voz Piper por idioma necessário. Isso não
+garante fidelidade para todo idioma, sotaque ou vocabulário.
 
 | Idioma de destino | Voz Piper integrada |
 |---|---|
@@ -93,9 +127,14 @@ Em **Ajustes → Modelos locais**, defina:
   Para escolher outro disco ou pasta, informe um caminho absoluto. Exemplos:
   `/home/usuario/Babel-models` no Linux, `/Users/usuario/Babel-models` no macOS ou
   `D:\Babel-models` no Windows. `~` e variáveis de ambiente não são expandidos.
-- **Threads de CPU para inferência:** de 1 a 64, padrão 4, para Whisper e Qwen.
+- **Threads de CPU para inferência:** de 1 a 64, padrão até 2 conforme as CPUs
+  disponíveis, para Whisper e Qwen.
   Esse ajuste não controla as threads internas do Piper. Um valor maior não
   garante menor latência e pode disputar CPU com os dispositivos de áudio.
+- **Liberar modelos após inatividade:** `idle_unload_secs`, de 1 a 3600 segundos,
+  padrão 60. Conta após a última sessão liberar os motores; não interrompe uma
+  inferência ainda pertencente à sessão. Diminuir economiza RAM mais cedo, mas
+  pode exigir outro carregamento ao reiniciar a sessão.
 
 Quando o campo fica vazio, o diretório padrão é:
 
@@ -119,11 +158,12 @@ selecionados; modelos e vozes diferentes têm tamanhos diferentes.
 ```toml
 [local_runtime]
 directory = "" # Cache do aplicativo, ou caminho absoluto no sistema anfitrião.
-threads = 4
+threads = 2
+idle_unload_secs = 60
 
 [transcription.providers.whisper]
 endpoint = "auto"
-model = "base"
+model = "base-q5_1"
 api_key_env = ""
 segment_ms = 2000
 silence_ms = 300
@@ -132,7 +172,7 @@ request_timeout_secs = 30
 
 [providers.local]
 whisper_endpoint = "auto"
-whisper_model = "base"
+whisper_model = "base-q5_1"
 ollama_endpoint = "auto"
 translation_model = "qwen3-0.6b"
 piper_endpoint = "auto"
@@ -160,7 +200,8 @@ reconhecedor integrado não exige uma chave de API do usuário.
 **Servidor externo (avançado)** permite manter instalações próprias ou servidores
 em outra máquina. Informe a URL completa, incluindo a porta real, quando houver.
 Nesse modo, o Babel não instala, inicia, atualiza ou baixa modelos para esse
-servidor. O Whisper usa o modelo carregado nele; a escolha Tiny/Base/Small da UI
+servidor, nem o encerra por inatividade. O Whisper usa o modelo carregado nele;
+a escolha de variante Whisper da UI
 só controla o motor integrado.
 
 No STT Whisper externo, `api_key_env` é uma referência opcional a uma credencial
@@ -203,10 +244,21 @@ palavra. Seus tempos correspondem aos segmentos capturados. Veja o
 
 ## Verificação dos pacotes no CI
 
+### Medição pontual de memória em 29/09/2026
+
+Neste Linux, com dois threads e o áudio público JFK incluído no whisper.cpp,
+Base original e Base Q5_1 produziram a mesma transcrição. O RSS após a inferência
+foi de 245.268 KiB para 156.728 KiB, e a duração de 2,19 s para 2,14 s. O arquivo
+de pesos caiu de 147.951.465 para 59.707.625 bytes. Esse teste confirma uma
+redução de memória nesse cenário; não é uma avaliação multilíngue, uma promessa
+de latência ou uma medição em Windows/macOS.
+
+### Contratos de instalação e inferência
+
 Além de validar os hashes e executar `--help`, o CI usa
 `scripts/test_bundled_inference.py` para carregar os três motores reais na
 arquitetura do runner. O teste baixa somente pesos pinados do catálogo, envia
-um segundo de silêncio sintético ao Whisper e uma frase fixa ao Qwen, e pede
+um segundo de silêncio sintético ao Whisper Base Q5_1 e uma frase fixa ao Qwen, e pede
 duas falas ao mesmo processo Piper. Verifica descoberta de porta dinâmica,
 respostas JSON, caminhos Unicode de saída e amostras WAV válidas. Nenhum
 microfone, dispositivo de áudio ou chave de nuvem é usado.

@@ -158,7 +158,7 @@
 
   function renderLocalRuntime() {
     const runtime = state.status?.local_runtime;
-    const phase = ['idle', 'preparing', 'ready', 'error'].includes(runtime?.phase) ? runtime.phase : 'idle';
+    const phase = ['idle', 'cached', 'preparing', 'ready', 'error'].includes(runtime?.phase) ? runtime.phase : 'idle';
     const selected = {
       translation: routeNames.some(route => routeProvider(route) === 'local') && ['whisper_endpoint', 'ollama_endpoint', 'piper_endpoint'].some(field => managedEndpoint(`profile-local-${field}`)),
       transcription: routeNames.some(route => sttProvider(route) === 'whisper') && managedEndpoint('stt-profile-whisper-endpoint'),
@@ -257,7 +257,7 @@
 
   function applyConfig(config) {
     if (!config.providers) throw new Error(t("ui.these_settings_use_an_old_format_restart_the_updated_babel_to_load_provider"));
-    config.local_runtime ??= { directory: '', threads: 4 };
+    config.local_runtime = { directory: '', threads: 2, idle_unload_secs: 60, ...config.local_runtime };
     config.history ??= { enabled: true, duration_secs: 600 };
     state.config = config;
     writeValue(byId('files-base_path'), config.files?.base_path ?? '');

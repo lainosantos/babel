@@ -258,7 +258,7 @@ def main(args):
     manifest = validate(runtime, system, arch)
     catalog = json.loads(CATALOG.read_text())
     cache = args.model_cache.expanduser().resolve()
-    tiny = checked_model(catalog["whisper"]["tiny"], cache)
+    whisper = checked_model(catalog["whisper"]["base-q5_1"], cache)
     qwen = checked_model(catalog["translation"]["qwen3-0.6b"], cache)
     voice = catalog["voices"]["en_US-lessac-medium"]
     piper_model = checked_model(voice["model"], cache)
@@ -266,7 +266,7 @@ def main(args):
     checked_model(voice["license"], cache)
     executable = lambda name: runtime / manifest["services"][name]["executable"]
 
-    with Child([executable("whisper"), "--host", "127.0.0.1", "--port", "0", "-t", "2", "-m", tiny], args.timeout) as child:
+    with Child([executable("whisper"), "--host", "127.0.0.1", "--port", "0", "-t", "2", "-m", whisper], args.timeout) as child:
         endpoint = ready_http(child, "babel-whisper", "/inference")
         body, content_type = whisper_multipart()
         result = request_json(endpoint, body, content_type, args.timeout)

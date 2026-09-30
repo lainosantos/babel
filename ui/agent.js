@@ -14,6 +14,9 @@
   const serviceFields = [
     ['services_directory', 'agent.services_directory', 'text', { maxlength: 4096, autocomplete: 'off', spellcheck: 'false' }],
     ['whisper_endpoint', 'agent.whisper_endpoint', 'text', { required: true, maxlength: 2048, placeholder: 'auto', autocomplete: 'off' }],
+    ['whisper_model', 'local.whisper_model', [['base-q5_1', 'local.model_base_q5_1'], ['tiny-q5_1', 'local.model_tiny_q5_1'], ['small-q5_1', 'local.model_small_q5_1'], ['base', 'local.model_base'], ['tiny', 'local.model_tiny'], ['small', 'local.model_small']]],
+    ['local_threads', 'agent.local_threads', 'number', { min: 1, max: 32, required: true }],
+    ['idle_unload_secs', 'local.idle_unload', 'number', { min: 1, max: 3600, required: true }],
     ['whisper_language', 'agent.whisper_language', 'text', { maxlength: 12 }],
     ['whisper_api_key_env', 'agent.whisper_key', 'text', { maxlength: 128 }],
     ['needle_endpoint', 'agent.needle_endpoint', 'text', { required: true, maxlength: 2048, placeholder: 'auto', autocomplete: 'off' }],
@@ -131,6 +134,10 @@
         const key = field[0];
         if (key === 'services_directory' || key === 'whisper_api_key_env' || ['whisper_endpoint', 'needle_endpoint'].includes(key)) {
           const hint = localized('small', key === 'services_directory' ? 'agent.services_directory_hint' : key === 'whisper_api_key_env' ? 'agent.whisper_key_hint' : 'agent.endpoint_hint');
+          hint.id = `agent-${key}-hint`; input.setAttribute('aria-describedby', hint.id); input.parentElement.append(hint);
+        }
+        if (['whisper_model', 'local_threads', 'idle_unload_secs'].includes(key)) {
+          const hint = localized('small', `agent.${key}_hint`);
           hint.id = `agent-${key}-hint`; input.setAttribute('aria-describedby', hint.id); input.parentElement.append(hint);
         }
         if (['whisper_endpoint', 'needle_endpoint'].includes(key)) {

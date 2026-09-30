@@ -271,6 +271,7 @@ impl Shared {
 async fn supervise(shared: Arc<Shared>, mut audio: mpsc::Receiver<PcmFrame>) {
     let mut updates = shared.updates.subscribe();
     let mut services = super::local_services::ManagedServices::new(shared.services_root.clone());
+    let mut idle = IdleServices::default();
     loop {
         shared.busy.store(false, Ordering::Release);
         while audio.try_recv().is_ok() {}
@@ -281,6 +282,7 @@ async fn supervise(shared: Arc<Shared>, mut audio: mpsc::Receiver<PcmFrame>) {
             .unwrap_or_else(|e| e.into_inner())
             .clone();
         let active = shared.active.load(Ordering::Relaxed);
+        let idle_deadline = idle.deadline(config.enabled && active, config.idle_unload_secs);
         if !config.enabled {
             services.stop().await;
             let mut status = shared.status.lock().unwrap_or_else(|e| e.into_inner());
@@ -308,6 +310,14 @@ async fn supervise(shared: Arc<Shared>, mut audio: mpsc::Receiver<PcmFrame>) {
             biased;
             _ = shared.shutdown.cancelled() => { epoch.cancel(); break; }
             _ = updates.changed() => { epoch.cancel(); }
+            _ = wait_for_idle(idle_deadline), if config.enabled && !active => {
+                services.stop().await;
+                idle.unloaded = true;
+                let mut status = shared.status.lock().unwrap_or_else(|e| e.into_inner());
+                status.whisper_endpoint = None;
+                status.needle_endpoint = None;
+                status.sequence = status.sequence.wrapping_add(1);
+            }
             result = run_epoch(&shared, &config, &mut audio, &epoch, revision, &mut services), if config.enabled && active => {
                 epoch.cancel();
                 if let Err(error) = result {
@@ -322,6 +332,31 @@ async fn supervise(shared: Arc<Shared>, mut audio: mpsc::Receiver<PcmFrame>) {
     }
     services.stop().await;
     shared.busy.store(false, Ordering::Release);
+}
+
+#[derive(Default)]
+struct IdleServices {
+    since: Option<tokio::time::Instant>,
+    unloaded: bool,
+}
+
+impl IdleServices {
+    fn deadline(&mut self, listening: bool, seconds: u32) -> Option<tokio::time::Instant> {
+        if listening {
+            self.since = None;
+            self.unloaded = false;
+            return None;
+        }
+        let since = *self.since.get_or_insert_with(tokio::time::Instant::now);
+        (!self.unloaded).then_some(since + Duration::from_secs(seconds.into()))
+    }
+}
+
+async fn wait_for_idle(deadline: Option<tokio::time::Instant>) {
+    match deadline {
+        Some(deadline) => tokio::time::sleep_until(deadline).await,
+        None => std::future::pending().await,
+    }
 }
 
 async fn run_epoch(
@@ -765,5 +800,33 @@ impl Segmenter {
             }
         }
         None
+    }
+}
+
+#[cfg(test)]
+mod idle_tests {
+    use super::*;
+
+    #[tokio::test(start_paused = true)]
+    async fn microphone_return_cancels_unload_and_inactive_updates_do_not_extend_the_grace() {
+        let mut idle = IdleServices::default();
+        assert!(idle.deadline(true, 60).is_none());
+        let first = idle.deadline(false, 60).unwrap();
+        tokio::time::advance(Duration::from_secs(45)).await;
+        assert_eq!(idle.deadline(false, 60), Some(first));
+        assert!(idle.deadline(true, 60).is_none());
+        let next = idle.deadline(false, 60).unwrap();
+        assert!(next > first);
+        // Reducing the limit applies to the original idle start, not now.
+        assert_eq!(
+            idle.deadline(false, 10),
+            Some(next - Duration::from_secs(50))
+        );
+        wait_for_idle(idle.deadline(false, 10)).await;
+        assert_eq!(tokio::time::Instant::now(), next - Duration::from_secs(50));
+        idle.unloaded = true;
+        assert!(idle.deadline(false, 10).is_none());
+        assert!(idle.deadline(true, 10).is_none());
+        assert!(idle.deadline(false, 10).is_some());
     }
 }

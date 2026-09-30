@@ -23,9 +23,10 @@ ROOT = Path(__file__).resolve().parent.parent
 REPOSITORY = "https://github.com/ggml-org/whisper.cpp.git"
 VERSION = "v1.9.4"
 COMMIT = "927cfce34f31707e17f2bff35c349632fb9e2c3a"
-MODEL_URL = "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.bin"
-MODEL_SIZE = 147951465
-MODEL_SHA256 = "60ed5bc3dd14eea856493d334349b405782ddcaf0028d4b5df4088345fba2efe"
+MODEL = json.loads((ROOT / "src/local_runtime/models.json").read_text(encoding="utf-8"))["whisper"]["base-q5_1"]
+MODEL_URL = MODEL["url"]
+MODEL_SIZE = MODEL["size"]
+MODEL_SHA256 = MODEL["sha256"]
 PATCH = ROOT / "scripts" / "patches" / "whisper-dynamic-port.patch"
 
 
@@ -87,7 +88,7 @@ def ensure_model(path):
         request = urllib.request.Request(MODEL_URL, headers={"User-Agent": "Babel-Whisper-Setup/1"})
         # The public model needs no token. Do not forward API keys or credentials.
         with urllib.request.urlopen(request, timeout=60) as response:
-            with tempfile.NamedTemporaryFile(prefix=".ggml-base-", suffix=".download",
+            with tempfile.NamedTemporaryFile(prefix=f".{MODEL['name']}-", suffix=".download",
                                              dir=path.parent, delete=False) as target:
                 temporary = Path(target.name)
                 received = 0
@@ -143,7 +144,7 @@ def main(argv=None):
             parser.error(f"{command} is required on PATH")
     source = args.source_dir.resolve()
     ensure_source(source)
-    model = source / "models" / "ggml-base.bin"
+    model = source / "models" / MODEL["name"]
     ensure_model(model)
     executable = build_server(source, args.backend, args.jobs)
     print(json.dumps({"service": "babel-whisper", "version": VERSION,

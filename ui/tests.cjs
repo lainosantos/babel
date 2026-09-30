@@ -10,7 +10,7 @@ function defaults() {
   const cloud = (values = {}) => ({ api_key_env: 'GEMINI_API_KEY', endpoint: 'wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent', model: 'gemini-3.5-live-translate-preview', voice: 'Kore', tts_model: 'gemini-3.8-flash-tts', transcription_model: '', connect_timeout_secs: 15, max_reconnect_attempts: 5, ...values });
   const route = (values = {}) => ({ enabled: true, provider: 'gemini', capture_device: 'physical-mic', playback_device: 'babel_mic_bus', source_language: 'pt-BR', target_language: 'en-US', prompt: '', gain: 1, voice: { engine: 'native', voice_id: '', style: '', chunk_ms: 400 }, ...values });
   return {
-    version: 1, interface: { language: 'system' }, local_runtime: { directory: '', threads: 4 },
+    version: 1, interface: { language: 'system' }, local_runtime: { directory: '', threads: 2, idle_unload_secs: 60 },
     providers: { gemini: cloud(), openai: cloud({ api_key_env: 'OPENAI_API_KEY', endpoint: '', model: 'gpt-realtime-translate', voice: 'marin', tts_model: '' }), elevenlabs: cloud({ api_key_env: 'ELEVENLABS_API_KEY', endpoint: 'https://api.elevenlabs.io/v1', model: 'eleven_flash_v2_5', voice: '', tts_model: 'eleven_flash_v2_5' }), local: { whisper_endpoint: 'auto', whisper_model: 'base', ollama_endpoint: 'auto', translation_api: 'ollama', translation_model: 'qwen3-0.6b', piper_endpoint: 'auto', piper_voice: 'auto', segment_ms: 2000, silence_ms: 300, vad_threshold: 0.01, request_timeout_secs: 30 } },
     audio: { quality: 'balanced', capture_queue_ms: 200, playback_queue_ms: 2000, max_capture_age_ms: 200, device_latency_ms: 30 },
     microphone: route(), speaker: route({ capture_device: 'babel_speaker.monitor', playback_device: 'physical-speaker', source_language: 'en-US', target_language: 'pt-BR' }),
@@ -1387,6 +1387,10 @@ test('local model preparation reports bounded download progress, failures and re
   await p.poll();
   assert.equal(boxes[0].querySelector('[data-local-runtime-error]').hidden, true);
   assert.equal(boxes[0].dataset.phase, 'ready');
+  p.runtime({ phase: 'cached', download: null, message: null, services: [] });
+  await p.poll();
+  assert.equal(boxes[0].dataset.phase, 'cached');
+  assert.match(boxes[0].querySelector('[data-local-runtime-summary]').textContent, /uma sessão precisa deles/);
 });
 
 test('local runtime folder is either OS-specific absolute or automatic and settings survive saving', async t => {
@@ -1399,10 +1403,14 @@ test('local runtime folder is either OS-specific absolute or automatic and setti
     p.set('local-runtime-directory', good);
     assert.equal(p.byId('local-runtime-directory').checkValidity(), true, `${os}: absolute path`);
     p.set('local-runtime-threads', 3);
+    p.set('local-runtime-idle-unload', 0);
+    assert.equal(p.byId('local-runtime-idle-unload').checkValidity(), false);
+    p.set('local-runtime-idle-unload', 90);
     p.byId('save').click();
     await settle(() => p.calls.some(c => c.path === '/api/config' && c.options.method === 'PUT'));
     assert.equal(p.config().local_runtime.directory, good);
     assert.equal(p.config().local_runtime.threads, 3);
+    assert.equal(p.config().local_runtime.idle_unload_secs, 90);
     p.set('local-runtime-directory', '');
     assert.equal(p.byId('local-runtime-directory').checkValidity(), true, `${os}: automatic cache`);
   }
@@ -1587,4 +1595,18 @@ test('history transcription progress follows actual session status and clears on
   p.byId('stop').click();
   await settle(() => p.byId('stop').hidden);
   assert.equal(p.byId('history-session-status').hidden, true);
+});
+
+
+test('compact multilingual choices save independently for local translation and original transcription', async t => {
+  const p = await page(t);
+  p.set('microphone-provider', 'local');
+  p.set('stt-microphone-provider', 'whisper');
+  p.set('profile-local-whisper_model', 'base-q5_1');
+  p.set('stt-profile-whisper-model', 'tiny-q5_1');
+  p.byId('save').click();
+  await settle(() => p.calls.some(c => c.path === '/api/config' && c.options.method === 'PUT'));
+  assert.equal(p.config().providers.local.whisper_model, 'base-q5_1');
+  assert.equal(p.config().transcription.providers.whisper.model, 'tiny-q5_1');
+  assert.equal(p.calls.some(c => ['/api/start', '/api/stop'].includes(c.path)), false);
 });

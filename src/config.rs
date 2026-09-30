@@ -33,12 +33,15 @@ pub struct AppConfig {
 pub struct LocalRuntimeConfig {
     pub directory: String,
     pub threads: u32,
+    pub idle_unload_secs: u32,
 }
 impl Default for LocalRuntimeConfig {
     fn default() -> Self {
         Self {
             directory: String::new(),
-            threads: 4,
+            threads: std::thread::available_parallelism().map_or(1, |count| count.get().min(2))
+                as u32,
+            idle_unload_secs: 60,
         }
     }
 }
@@ -50,6 +53,10 @@ impl LocalRuntimeConfig {
         ensure!(
             (1..=64).contains(&self.threads),
             "Local inference threads must be 1..64"
+        );
+        ensure!(
+            (1..=3600).contains(&self.idle_unload_secs),
+            "Local model idle unload must be 1..3600 seconds"
         );
         Ok(())
     }
@@ -197,6 +204,15 @@ impl Default for ProviderProfiles {
     }
 }
 
+pub const DEFAULT_WHISPER_MODEL: &str = "base-q5_1";
+
+pub fn is_managed_whisper_model(model: &str) -> bool {
+    matches!(
+        model,
+        "tiny-q5_1" | "base-q5_1" | "small-q5_1" | "tiny" | "base" | "small"
+    )
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct LocalProviderConfig {
@@ -216,7 +232,7 @@ impl Default for LocalProviderConfig {
     fn default() -> Self {
         Self {
             whisper_endpoint: "auto".into(),
-            whisper_model: "base".into(),
+            whisper_model: DEFAULT_WHISPER_MODEL.into(),
             ollama_endpoint: "auto".into(),
             translation_api: "ollama".into(),
             translation_model: "qwen3-0.6b".into(),
@@ -875,9 +891,14 @@ mod tests {
         config.transcription.microphone_recognition.provider = "whisper".into();
         config.validate_for_start().unwrap();
         assert_eq!(config.providers.local.whisper_endpoint, "auto");
+        assert_eq!(config.providers.local.whisper_model, DEFAULT_WHISPER_MODEL);
         assert_eq!(config.providers.local.ollama_endpoint, "auto");
         assert_eq!(config.providers.local.piper_endpoint, "auto");
         assert_eq!(config.transcription.providers.whisper.endpoint, "auto");
+        assert_eq!(
+            config.transcription.providers.whisper.model,
+            DEFAULT_WHISPER_MODEL
+        );
         config.providers.local.whisper_model = "unknown".into();
         assert!(config.validate().is_err());
         config.providers.local.whisper_model = "small".into();
@@ -893,6 +914,53 @@ mod tests {
             .to_string_lossy()
             .into_owned();
         config.validate().unwrap();
+    }
+
+    #[test]
+    fn local_resource_defaults_are_bounded_and_idle_timeout_round_trips() {
+        let mut config = LocalRuntimeConfig::default();
+        assert!((1..=2).contains(&config.threads));
+        assert_eq!(config.idle_unload_secs, 60);
+        for invalid in [0, 3601, u32::MAX] {
+            config.idle_unload_secs = invalid;
+            assert!(config.validate().is_err());
+        }
+        config.idle_unload_secs = 120;
+        config.validate().unwrap();
+        let restored: LocalRuntimeConfig =
+            toml::from_str(&toml::to_string(&config).unwrap()).unwrap();
+        assert_eq!(restored.idle_unload_secs, 120);
+        let legacy: LocalRuntimeConfig = toml::from_str("threads = 4").unwrap();
+        assert_eq!(legacy.threads, 4);
+        assert_eq!(legacy.idle_unload_secs, 60);
+    }
+
+    #[test]
+    fn saved_whisper_choices_round_trip_without_silent_model_replacement() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("config.toml");
+        for model in [
+            "tiny",
+            "base",
+            "small",
+            "tiny-q5_1",
+            "base-q5_1",
+            "small-q5_1",
+        ] {
+            let mut config = configured_routes();
+            config.microphone.provider = "local".into();
+            config.speaker.enabled = false;
+            config.transcription.enabled = true;
+            config.transcription.speaker = false;
+            config.transcription.microphone_recognition.provider = "whisper".into();
+            config.providers.local.whisper_model = model.into();
+            config.transcription.providers.whisper.model = model.into();
+            config.validate_for_start().unwrap();
+            config.save(&path).unwrap();
+            let restored = AppConfig::load(&path).unwrap();
+            assert_eq!(restored.providers.local.whisper_model, model);
+            assert_eq!(restored.transcription.providers.whisper.model, model);
+        }
     }
 
     #[test]

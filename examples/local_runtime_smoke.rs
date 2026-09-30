@@ -11,13 +11,30 @@ async fn main() -> Result<()> {
     let mut cfg = AppConfig::default();
     cfg.microphone.provider = "local".into();
     cfg.microphone.target_language = "en-US".into();
-    cfg.providers.local.whisper_model = "tiny".into();
     cfg.speaker.enabled = false;
+    cfg.local_runtime.idle_unload_secs = 1;
     let manager = RuntimeManager::new();
     let operation = async {
+        manager.reconcile(&cfg);
+        loop {
+            let status = manager.status();
+            ensure!(
+                status.services.is_empty(),
+                "Selection loaded an idle engine"
+            );
+            if status.phase == "cached" {
+                break;
+            }
+            ensure!(
+                status.phase != "error",
+                "Asset preparation: {:?}",
+                status.message
+            );
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
         let resolved = manager.resolve(&cfg, CancellationToken::new());
         tokio::pin!(resolved);
-        let ready = loop {
+        let (ready, runtime_lease) = loop {
             tokio::select! {
                 result = &mut resolved => break result?,
                 _ = tokio::time::sleep(Duration::from_secs(5)) => {
@@ -100,6 +117,19 @@ async fn main() -> Result<()> {
         println!(
             "Verified bundled Whisper, Qwen/llama.cpp and Piper; all endpoints use owned dynamic ports."
         );
+        drop(runtime_lease);
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while manager.status().phase != "cached" {
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+        })
+        .await
+        .context("Idle models did not unload")?;
+        ensure!(
+            manager.status().services.is_empty(),
+            "Idle engines still published"
+        );
+        println!("Verified cache-only selection and automatic idle unload after use.");
         Ok::<_, anyhow::Error>(())
     };
     let result = tokio::time::timeout(Duration::from_secs(1800), operation)

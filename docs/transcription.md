@@ -16,8 +16,9 @@ traduzir. O microfone e a saída recebida podem usar reconhecedores diferentes.
    modelo, referência da chave de API, endpoint e opções disponíveis.
 5. Para um serviço em nuvem, adicione a chave no próprio perfil STT ou forneça a
    variável de ambiente correspondente ao iniciar o Babel. Para whisper.cpp,
-   mantenha **Integrado ao Babel** e escolha Tiny, Base ou Small; salvar prepara
-   o modelo automaticamente. Um servidor externo é opcional.
+   mantenha **Integrado ao Babel**. Whisper Base Q5_1 é o padrão compacto;
+   Tiny Q5_1 e Small Q5_1 também estão disponíveis. Salvar prepara os arquivos
+   automaticamente. Um servidor externo é opcional.
 6. Configure a pasta base **absoluta**, a pasta de destino, o padrão do nome e,
    opcionalmente, os tempos dos segmentos. Salve e inicie a sessão com um nome.
 
@@ -79,7 +80,7 @@ automaticamente entre as conexões histórica e ao vivo.
 | Gemini Live Transcribe | WebSocket; `gemini-3.5-transcribe-live` | Sem diarização confirmada no streaming atual | Recebimento; metadados reais quando presentes | Chave Google com acesso ao modelo |
 | OpenAI Realtime Transcription | WebSocket; `gpt-live-transcribe` por padrão | Sem diarização neste adaptador | Recebimento | Chave OpenAI com acesso ao modelo |
 | Deepgram Listen | WebSocket v1; `nova-3` por padrão, também Nova-2 | Opcional; IDs enviados pela API | Intervalos dos segmentos, derivados das palavras retornadas | Chave Deepgram e modelo/idioma compatíveis |
-| whisper.cpp | Motor integrado; Tiny/Base/Small multilíngues. Servidor HTTP externo opcional | Sem diarização neste adaptador | Limites dos segmentos enviados ao reconhecedor | Instalador com runtimes; internet apenas para preparar pesos ausentes |
+| whisper.cpp | Motor integrado; Tiny/Base/Small multilíngues, com variantes compactas Q5_1. Servidor HTTP externo opcional | Sem diarização neste adaptador | Limites dos segmentos enviados ao reconhecedor | Instalador com runtimes; internet apenas para preparar pesos ausentes |
 
 Suporte implementado não garante disponibilidade do modelo para toda conta,
 região ou idioma. Testes automatizados usam servidores simulados locais e não
@@ -157,14 +158,21 @@ e [keepalive](https://developers.deepgram.com/docs/audio-keep-alive).
 ### whisper.cpp local
 
 Selecione `whisper.cpp` no reconhecimento da origem e mantenha **Integrado ao
-Babel** no perfil. Ao salvar, o Babel prepara o motor incluído no instalador e
-baixa o modelo multilíngue escolhido, quando ainda não estiver no cache. Não é
+Babel** no perfil. Ao salvar, o Babel baixa e verifica os pesos multilíngues
+escolhidos, quando ainda não estiverem no cache. O motor só ocupa RAM quando
+uma sessão com transcrição habilitada precisa dele. Não é
 necessário instalar Python, CMake, Ollama ou iniciar um servidor separado. O
 painel mostra preparação, progresso de download, disponibilidade e falhas.
 
-Escolha `tiny`, `base` (padrão) ou `small`. Os modelos maiores precisam de mais
-memória e processamento; o tamanho adequado depende do hardware e dos idiomas.
-A pasta de modelos e as threads de CPU ficam em **Ajustes → Modelos locais**.
+Escolha `tiny-q5_1` (32,2 MB), `base-q5_1` (padrão, 59,7 MB) ou `small-q5_1`
+(190,1 MB). São tamanhos dos pesos, não da RAM total. As opções originais
+`tiny`, `base` e `small` continuam válidas, inclusive em configurações existentes.
+Tiny prioriza baixo consumo e pode perder precisão; Small usa mais recursos.
+O resultado depende do hardware, do idioma, do sotaque e do ruído.
+A pasta de modelos, threads de CPU e prazo de liberação de memória ficam em
+**Ajustes → Modelos locais**. O padrão usa até dois threads; após a última
+sessão liberar o motor, ele é encerrado depois de 60 segundos por padrão.
+Os pesos permanecem em disco. O prazo `idle_unload_secs` aceita 1–3600 segundos.
 Depois da preparação, esse reconhecimento funciona sem internet. O motor usa
 uma porta local dinâmica: nenhuma porta padrão é presumida ou salva no perfil.
 
@@ -175,7 +183,7 @@ language = "pt-BR"
 
 [transcription.providers.whisper]
 endpoint = "auto"
-model = "base"
+model = "base-q5_1"
 api_key_env = ""
 segment_ms = 2000
 silence_ms = 300
@@ -184,7 +192,8 @@ request_timeout_secs = 30
 
 [local_runtime]
 directory = "" # Cache da conta, ou caminho absoluto escolhido pelo usuário.
-threads = 4
+threads = 2
+idle_unload_secs = 60
 ```
 
 Esse perfil reconhece somente o áudio original. Não chama o modelo tradutor,
@@ -200,7 +209,8 @@ de palavras nem identificação de falantes.
 
 **Servidor externo (avançado)** continua disponível para uma instalação própria.
 Informe a URL completa de inferência com a porta real. Nesse modo, o modelo é
-carregado pelo seu servidor, e a escolha Tiny/Base/Small do Babel não o altera.
+carregado pelo seu servidor, e a escolha de modelo Whisper do Babel não o altera.
+O prazo de liberação de memória do Babel não encerra esse servidor externo.
 Autenticação Bearer é opcional somente no modo externo: informe uma referência
 de chave quando o servidor/proxy exigir. HTTP sem TLS é aceito apenas em
 loopback; endereços remotos exigem HTTPS. Redirecionamentos e URLs com

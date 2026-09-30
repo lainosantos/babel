@@ -6,7 +6,7 @@ const path = require('node:path');
 const { JSDOM } = require('jsdom');
 
 const fixtureIntegration = (id = 'test-server', extra = {}) => ({ id, name: 'Calendar', enabled: true, transport: 'http', command: '', args: [], env: {}, cwd: '', url: 'http://127.0.0.1:8002/mcp', auth: 'bearer', token_env: 'CALENDAR_API_KEY', headers: {}, secret_headers: {}, secret_env: {}, oauth: { client_id: '', client_secret_env: '', scopes: [] }, timeout_secs: 30, allowed_tools: [], ...extra });
-const defaults = () => ({ enabled: true, wake_name: 'Babel', services_directory: '', whisper_endpoint: 'auto', whisper_language: 'auto', whisper_api_key_env: '', needle_endpoint: 'auto', needle_api_key_env: '', desktop_notifications: true, max_calls: 4, min_confidence: 0.85, silence_ms: 600, max_utterance_ms: 10000, command_window_secs: 8, timeout_secs: 20, vad_threshold: 0.012, integrations: [fixtureIntegration()] });
+const defaults = () => ({ enabled: true, wake_name: 'Babel', services_directory: '', whisper_endpoint: 'auto', whisper_model: 'base-q5_1', local_threads: 2, idle_unload_secs: 60, whisper_language: 'auto', whisper_api_key_env: '', needle_endpoint: 'auto', needle_api_key_env: '', desktop_notifications: true, max_calls: 4, min_confidence: 0.85, silence_ms: 600, max_utterance_ms: 10000, command_window_secs: 8, timeout_secs: 20, vad_threshold: 0.012, integrations: [fixtureIntegration()] });
 async function settle(predicate, label = 'condition') {
   for (let i = 0; i < 150; i++) { if (predicate()) return; await new Promise(resolve => setTimeout(resolve, 1)); }
   assert.fail(`Timed out: ${label}`);
@@ -340,4 +340,24 @@ test('agent locales include every static field and phase in both catalogs', () =
   const code = fs.readFileSync(path.join(__dirname, 'agent.js'), 'utf8');
   for (const match of code.matchAll(/['"]((?:agent|mcp)\.[a-z_]+)['"]/g)) { assert.equal(typeof en[match[1]], 'string', match[1]); assert.equal(typeof pt[match[1]], 'string', match[1]); }
   for (const phase of ['disabled', 'inactive', 'listening', 'activated', 'transcribing', 'deciding', 'executing', 'succeeded', 'failed']) assert.equal(typeof en[`agent.phase_${phase}`], 'string');
+});
+
+
+test('command model and resource limits save independently and explain the idle lifecycle in both languages', async t => {
+  for (const language of ['en', 'pt']) {
+    const p = await page(t, { language });
+    assert.equal(p.byId('agent-whisper_model').value, 'base-q5_1');
+    assert.equal(p.byId('agent-idle_unload_secs').value, '60');
+    p.set('agent-idle_unload_secs', 0);
+    assert.equal(p.byId('agent-idle_unload_secs').checkValidity(), false);
+    p.set('agent-idle_unload_secs', 120);
+    p.set('agent-local_threads', 3);
+    p.set('agent-whisper_model', 'tiny-q5_1');
+    await p.save();
+    assert.equal(p.config().whisper_model, 'tiny-q5_1');
+    assert.equal(p.config().local_threads, 3);
+    assert.equal(p.config().idle_unload_secs, 120);
+    assert.match(p.byId('agent-idle_unload_secs-hint').textContent, /Needle/);
+    assert.equal(p.calls.some(call => ['/api/config', '/api/start', '/api/stop'].includes(call.path)), false);
+  }
 });

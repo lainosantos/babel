@@ -33,6 +33,15 @@ Needle só é chamado depois do nome de ativação e de um comando. Esse filtro 
 energia não é um classificador dedicado de palavra de ativação; o Babel ainda
 não implementa esse tipo de detector.
 
+Whisper permanece carregado enquanto essa escuta está ativa, inclusive durante
+silêncios; o filtro evita inferência em silêncio, mas não descarrega o modelo
+entre frases. Quando o microfone deixa de ser elegível, a escuta pausa e o Babel
+libera seus helpers após `agent.idle_unload_secs` (60 segundos por padrão).
+Needle tem um prazo adicional baseado no último comando: pode liberar seus
+pesos mesmo enquanto Whisper continua escutando. Desabilitar o agente encerra
+os helpers gerenciados imediatamente. Servidores externos seguem sua própria
+política de recursos.
+
 A escuta de comandos não cria WAV ou TXT. A gravação e a transcrição de arquivos
 dependem de uma sessão com esses recursos habilitados separadamente. A retenção
 opcional de áudio recente fica limitada à memória; só entra nos arquivos de
@@ -84,7 +93,7 @@ Estrutura esperada dentro dessa pasta:
 scripts/needle_bridge.py
 .tools/needle/bin/python                         # Linux/macOS
 .tools/needle/Scripts/python.exe                 # Windows
-.tools/whisper.cpp/models/ggml-base.bin
+.tools/whisper.cpp/models/ggml-base-q5_1.bin
 .tools/whisper.cpp/build/bin/whisper-server       # Linux/macOS
 .tools/whisper.cpp/build/bin/whisper-server.exe   # Windows, configuração única
 .tools/whisper.cpp/build/bin/Release/whisper-server.exe  # Windows, Visual Studio
@@ -92,12 +101,22 @@ scripts/needle_bridge.py
 
 Os helpers são iniciados quando o agente habilitado precisa atender ao microfone
 virtual ativo, por ser o padrão do sistema ou estar em uso por um aplicativo.
-Quando nenhuma dessas condições permanece, o Babel pausa a escuta e
-descarta falas pendentes; mantém os processos já iniciados para reutilização.
+Quando nenhuma dessas condições permanece, o Babel pausa a escuta, descarta
+falas pendentes e mantém os processos pelo prazo configurável de inatividade
+(60 segundos por padrão). O retorno do microfone nesse intervalo os reutiliza;
+ao expirar o prazo, são encerrados e sua memória é liberada.
 Desabilitar o agente ou sair normalmente do aplicativo encerra os helpers que
 ele iniciou. Fechar apenas a janela de configurações não encerra o app. Com o
 tray configurado para iniciar no login, a mesma política vale na próxima
 execução; não é necessário criar um serviço separado para os helpers gerenciados.
+
+`agent.whisper_model` escolhe o arquivo `ggml-<modelo>.bin` nessa pasta. O padrão
+novo é `base-q5_1`. Para compatibilidade, se esse arquivo não existir e houver
+somente `ggml-base.bin`, o padrão reutiliza o Base original já instalado.
+Essa alternativa não se aplica a uma escolha explícita de Tiny ou Small.
+Os identificadores aceitos são `tiny-q5_1`, `base-q5_1`, `small-q5_1`, `tiny`,
+`base` e `small`; o arquivo correspondente deve estar instalado. O script abaixo
+prepara Base Q5_1. Configurações e arquivos existentes não são sobrescritos.
 
 O app não instala pacotes, baixa Whisper nem compila ferramentas ao abrir as
 configurações. Prepare os binários, o ambiente Python e os modelos explicitamente
@@ -115,8 +134,9 @@ configuração separada e não acompanha automaticamente o endpoint do agente.
 
 O [instalador do Babel](../scripts/setup_whisper.py) usa o servidor HTTP oficial
 [whisper.cpp v1.9.4](https://github.com/ggml-org/whisper.cpp/releases/tag/v1.9.4),
-fixa o commit `927cfce34f31707e17f2bff35c349632fb9e2c3a` e baixa o modelo `base`
-multilíngue, de aproximadamente 148 MB. Verifica o SHA-256 do modelo antes de
+fixa o commit `927cfce34f31707e17f2bff35c349632fb9e2c3a` e baixa o modelo
+multilíngue `base-q5_1`, de aproximadamente 59,7 MB. A URL, o tamanho e o SHA-256
+vêm do mesmo catálogo fixado usado pela transcrição integrada. Verifica o SHA-256 antes de
 usá-lo e aplica o [patch de descoberta da porta](../scripts/patches/whisper-dynamic-port.patch).
 Executá-lo novamente reaproveita a instalação compatível. Um checkout alterado
 ou modelo divergente é preservado e gera erro em vez de ser sobrescrito.
@@ -182,7 +202,9 @@ ainda não foram validados neste ambiente.
 Todos os builds usam otimizações para a CPU da máquina (`GGML_NATIVE=ON`). Não
 transfira esse binário para outra CPU sem conferir compatibilidade. `--jobs`
 limita o paralelismo da compilação, não o tempo de resposta da inferência. O
-helper gerenciado é iniciado com quatro threads de inferência.
+helper gerenciado usa `agent.local_threads`, padrão 2, limitado às CPUs
+disponíveis. Esse campo aceita 1–32 e controla somente o Whisper dos comandos;
+não altera o runtime interno do Needle nem os threads da tradução/transcrição.
 
 ### Execução manual e verificação sem áudio
 
@@ -190,7 +212,7 @@ Normalmente basta instalar e deixar o endpoint em `auto`. Para diagnóstico de
 uma instalação externa, inicie manualmente o **binário com o patch do Babel**:
 
 ```bash
-.tools/whisper.cpp/build/bin/whisper-server -m .tools/whisper.cpp/models/ggml-base.bin -t 4 -l auto --host 127.0.0.1 --port 0
+.tools/whisper.cpp/build/bin/whisper-server -m .tools/whisper.cpp/models/ggml-base-q5_1.bin -t 2 -l auto --host 127.0.0.1 --port 0
 ```
 
 No Windows, use o executável `.exe` indicado pelo instalador. Leia a linha
@@ -310,13 +332,14 @@ prepará-lo em outra conta não instala os pesos para a conta que executa o Babe
 Com os arquivos preparados, deixe `needle_endpoint = "auto"`: o Babel inicia
 `needle_bridge.py --port 0`. O adaptador se vincula somente a `127.0.0.1` e
 anuncia o endpoint real em `BABEL_SERVICE_READY`, sem porta fixa. `/health`
-confirma a identidade do bridge; o carregamento do modelo ocorre na primeira
-solicitação de planejamento, por isso essa etapa ainda pode demorar.
+confirma a identidade do bridge. Ele mantém um servidor HTTP leve; o modelo só
+carrega em um processo de inferência separado na primeira solicitação de
+planejamento, por isso essa etapa ainda pode demorar.
 
 Para administrar o helper separadamente, por exemplo com pesos próprios:
 
 ```bash
-.tools/needle/bin/python scripts/needle_bridge.py --port 0 --weights /caminho/needle3.cact
+.tools/needle/bin/python scripts/needle_bridge.py --port 0 --weights /caminho/needle3.cact --idle-unload-secs 60 --timeout-secs 20
 ```
 
 Copie o `endpoint` anunciado para o campo do Needle somente nesse modo externo.
@@ -327,7 +350,20 @@ Esse arranjo não foi testado aqui e não é iniciado pelo gerenciador nativo do
 Babel. Use o endpoint loopback real acessível no Windows; endereços privados da
 VM são recusados pela política de inferência local.
 
-O modelo permanece carregado. O adaptador reutiliza o catálogo quando ele é igual e reinicia o histórico de cada comando. A telemetria opcional do runtime é desabilitada por `NEEDLE_TELEMETRY=0` e `DO_NOT_TRACK=1`. O motor nativo do Needle fica fora do processo Rust; isso isola sua memória do roteamento de áudio, sem afirmar que dependências nativas sejam escritas em Rust.
+O modelo pode ser reutilizado entre comandos próximos. Após 60 segundos sem
+comando por padrão, o bridge encerra e recolhe o processo de inferência, devolvendo
+ao sistema a memória dos pesos. Apenas chamar `close()` do SDK não garantia
+isso, pois o runtime preservava estado nativo global. O servidor HTTP e `/health`
+continuam disponíveis sem os pesos carregados; a próxima solicitação cria outro
+processo. No modo gerenciado, o prazo segue `agent.idle_unload_secs` (1–3600).
+Um comando em processamento não é interrompido por essa liberação por inatividade.
+O limite `timeout_secs` inclui carregamento e inferência; timeout ou desconexão
+do pedido encerra o processo de inferência.
+
+O adaptador reutiliza o catálogo enquanto ele é igual e reinicia o histórico de
+cada comando. A telemetria opcional é desabilitada por `NEEDLE_TELEMETRY=0` e
+`DO_NOT_TRACK=1`. O motor nativo fica fora do processo Rust, isolando sua memória
+do roteamento de áudio, sem afirmar que dependências nativas sejam escritas em Rust.
 
 Para autenticar o adaptador, configure `needle_api_key_env` com uma referência de credencial, por exemplo `BABEL_NEEDLE_TOKEN`. No modo gerenciado, o Babel passa essa credencial ao próprio helper. No modo externo, disponibilize o mesmo segredo aos dois processos e inicie o bridge com `--api-key-env BABEL_NEEDLE_TOKEN`. O adaptador rejeita requisições originadas diretamente por páginas do navegador; apenas o backend local faz as chamadas.
 
@@ -341,11 +377,14 @@ enabled = true
 desktop_notifications = true
 wake_name = "Babel"
 whisper_endpoint = "auto"
+whisper_model = "base-q5_1"
 whisper_language = "auto"
 whisper_api_key_env = ""
 needle_endpoint = "auto"
 needle_api_key_env = ""
 services_directory = ""
+local_threads = 2
+idle_unload_secs = 60
 min_confidence = 0.85
 max_calls = 4
 silence_ms = 600
@@ -356,6 +395,9 @@ vad_threshold = 0.012
 ```
 
 - `whisper_endpoint` e `needle_endpoint`: `auto` para helpers gerenciados e portas escolhidas pelo SO; URL explícita para serviço externo local. Portas descobertas aparecem no status, sem substituir `auto` na configuração.
+- `whisper_model`: modelo do Whisper gerenciado; padrão `base-q5_1`, com alternativa legada descrita acima. Não troca o modelo de um servidor externo.
+- `local_threads`: 1–32, padrão 2, limitado às CPUs disponíveis; somente o Whisper gerenciado dos comandos.
+- `idle_unload_secs`: 1–3600 segundos, padrão 60. Libera os helpers quando o microfone deixa de ser elegível e, independentemente disso, os pesos Needle depois do último comando. O filtro de silêncio não torna um microfone elegível inativo para essa política.
 - `services_directory`: vazio usa a pasta absoluta do TOML carregado; um valor personalizado deve ser absoluto e conter a estrutura de instalação acima. Não depende da pasta de onde o app foi iniciado.
 - `min_confidence`: limiar de execução, de 0 a 1. Needle sem confiança numérica, com `suppressed_calls`, com `validation.ungrounded`, com negação sinalizada ou sem chamadas resulta em recusa. O intervalo 0–1 ajusta a política do Babel; o runtime possui sua própria recusa interna, documentada para confiança abaixo de 0,1 e falhas de fundamentação. `complete()` não expõe um parâmetro para desligar essa recusa, e chamadas em `suppressed_calls` não são promovidas a execução. Um limiar é uma escolha do aplicativo, não garantia de acerto.
 - `max_calls`: de uma a oito chamadas por comando. O padrão é quatro.
@@ -413,3 +455,12 @@ o microfone: um trecho de quatro segundos levou 4,81 s na primeira inferência e
 aproximadamente 245 MiB. Isso demonstra execução real e também um atraso
 perceptível em CPU; não mede precisão para todo idioma nem comprova desempenho
 em macOS, Windows ou GPU.
+
+Em 29/09/2026, uma comparação com dois threads neste Linux transcreveu o sample
+JFK inteiro da mesma forma com Base original e Base Q5_1. O RSS após inferência
+foi de 245.268 para 156.728 KiB, com tempos de 2,19 s e 2,14 s, respectivamente.
+O modelo quantizado ocupa 59.707.625 bytes, contra 147.951.465 do original.
+São medições pontuais de uma amostra em inglês, sem captura de microfone;
+não demonstram a mesma precisão em português nem desempenho em outras máquinas.
+A escolha segue o suporte de [quantização do whisper.cpp](https://github.com/ggml-org/whisper.cpp#quantization),
+com versões e hashes fixados no catálogo do Babel.

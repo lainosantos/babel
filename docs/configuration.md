@@ -192,29 +192,41 @@ pede detecção automática quando o adaptador/modelo permite; códigos como `pt
 selecionam um idioma específico. O idioma de tradução não substitui esse valor.
 
 Whisper integrado usa `transcription.providers.whisper.endpoint = "auto"` e
-`model = "base"` por padrão. Selecionar o provider e salvar prepara automaticamente
-o motor incluído e baixa o modelo ausente. Não requer Ollama, Piper nem serviços
+`model = "base-q5_1"` por padrão. Selecionar o provider e salvar baixa e verifica
+os pesos ausentes; o motor só é carregado quando uma sessão usa esse STT.
+Não requer Ollama, Piper nem serviços
 iniciados manualmente. O endpoint externo é uma opção avançada com URL real,
 sem presumir porta; uma chave Bearer opcional pertence somente ao servidor externo.
 A passagem original e a gravação sem transcrição nem tradução não enviam áudio
 para reconhecedores nem exigem chave.
 
-`[local_runtime]` configura `directory` e `threads`. A pasta vazia usa o cache do
+`[local_runtime]` configura `directory`, `threads` e `idle_unload_secs`. A pasta vazia usa o cache do
 aplicativo para a conta do sistema; um valor explícito precisa ser absoluto no
 Linux, macOS ou Windows. Não há resolução relativa ao diretório de inicialização.
-`threads` aceita de 1 a 64, com padrão 4, para reconhecimento e tradução de
+`threads` aceita de 1 a 64, com padrão até 2 conforme as CPUs disponíveis, para reconhecimento e tradução de
 texto; não controla as threads internas da síntese Piper. A pasta dos modelos é independente da
 base dos arquivos TXT/WAV. Trocar a pasta não move os modelos existentes.
 
+`idle_unload_secs` aceita 1–3600 segundos, padrão 60. Depois que a última sessão
+libera os motores, esse prazo permite reutilizá-los antes de encerrar os
+processos gerenciados e liberar a RAM. Os pesos continuam em disco (`cached`).
+A sessão carrega somente o que suas funções habilitadas exigem; ter um perfil
+local salvo numa função desligada não carrega seu modelo. Essa política não
+encerra servidores externos e é independente da escuta de comandos de voz.
+
 Na tradução local, `whisper_endpoint`, `ollama_endpoint` e `piper_endpoint`
 aceitam `"auto"` individualmente. Os modelos gerenciados são Whisper
-(`whisper_model`: `tiny`, `base` ou `small`), Qwen (`translation_model`:
+(`whisper_model`: `tiny-q5_1`, `base-q5_1` ou `small-q5_1`; `tiny`, `base` e `small`
+continuam válidos), Qwen (`translation_model`:
 `qwen3-0.6b`) e Piper (`piper_voice = "auto"` segue o idioma de destino).
 O nome legado `ollama_endpoint` permanece compatível, mas no modo integrado o
 motor é llama.cpp incluído no instalador. `translation_api = "ollama"` ou
 `"openai"` define o protocolo somente de um endpoint externo. Veja
 [Modelos locais integrados](local-inference.md) para o catálogo, downloads,
 requisitos e funcionamento offline.
+
+O padrão quantizado se aplica a configurações novas ou sem escolha de modelo.
+Modelos e limites de CPU já salvos são preservados.
 
 `providers.*.transcription_model` permanece um campo de compatibilidade do
 tradutor, usado onde seu protocolo precisa de reconhecimento interno. Ele não

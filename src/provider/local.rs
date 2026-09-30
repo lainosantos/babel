@@ -52,7 +52,7 @@ impl LocalProvider {
         validate_configured_endpoint(&config.whisper_endpoint)?;
         if config.whisper_endpoint == "auto" {
             ensure!(
-                matches!(config.whisper_model.as_str(), "tiny" | "base" | "small"),
+                crate::config::is_managed_whisper_model(&config.whisper_model),
                 "Unknown managed Whisper model"
             );
         }
