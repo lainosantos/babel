@@ -31,6 +31,28 @@ def git(*arguments: str, cwd: Path) -> str:
     ).stdout.strip()
 
 
+def new_branch_commits(payload: dict, head: str, cwd: Path) -> list[str]:
+    # GitHub's new-ref comparison may contain the entire legacy ancestry, and
+    # its commits array is capped at 2,048 entries. Walk the fetched graph instead.
+    # The workflow uses checkout fetch-depth: 0, including all origin branches.
+    ref = payload["ref"]
+    if not isinstance(ref, str) or not ref.startswith("refs/heads/"):
+        raise ValueError("Expected a full branch ref for a new-branch push")
+    git("check-ref-format", ref, cwd=cwd)
+    if git("rev-parse", "--is-shallow-repository", cwd=cwd) != "false":
+        raise ValueError("New-branch validation requires complete Git history")
+    pushed_remote = "refs/remotes/origin/" + ref.removeprefix("refs/heads/")
+    established = []
+    for line in git("for-each-ref", "--format=%(objectname) %(refname) %(symref)",
+                    "refs/remotes/origin/", cwd=cwd).splitlines():
+        fields = line.split()
+        # Excluding the just-created ref or its symbolic origin/HEAD alias
+        # would suppress every incoming commit, including invalid new ones.
+        if len(fields) == 2 and fields[1] != pushed_remote:
+            established.append(commit_sha(fields[0]))
+    return git("rev-list", "--no-merges", head, "--not", *established, cwd=cwd).splitlines()
+
+
 def incoming_commits(event: str, payload: dict, cwd: Path) -> list[str]:
     if event == "pull_request":
         pull = payload["pull_request"]
@@ -43,9 +65,7 @@ def incoming_commits(event: str, payload: dict, cwd: Path) -> list[str]:
         before = payload.get("before", "0" * 40)
         if before != "0" * 40:
             return git("rev-list", "--no-merges", f"{commit_sha(before)}..{head}", cwd=cwd).splitlines()
-        # A new branch must not revalidate years of pre-policy history. The
-        # event lists incoming commits; a new ref with no new objects checks its tip.
-        return list(dict.fromkeys(commit_sha(item["id"]) for item in payload.get("commits", []))) or [head]
+        return new_branch_commits(payload, head, cwd)
     return [git("rev-parse", "HEAD", cwd=cwd)]
 
 
