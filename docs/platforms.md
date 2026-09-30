@@ -35,6 +35,15 @@ mesmo cabo nas duas direções: isso pode alimentar novamente a tradução com s
 própria saída. Fones reduzem o retorno acústico entre o alto-falante e o mic real.
 O Babel não muda os dispositivos padrão globais do sistema.
 
+Os comandos de voz possuem um painel de estados que funciona mesmo com as
+configurações fechadas. Ele usa uma janela nativa discreta, sem tomar foco, em
+Windows, macOS e Linux com X11/XWayland. Wayland sem XWayland e falhas de abertura
+usam as notificações do sistema. **Mostrar notificações no desktop**, em Comandos,
+controla esse retorno; nenhuma notificação ativa captura ou executa ferramentas.
+O helper gráfico acompanha os pacotes e inicia sob demanda. Consulte
+[retorno visual dos comandos](voice-commands.md#retorno-visual-dos-comandos) para
+estados, movimento reduzido, privacidade e limites por desktop.
+
 ## Linux: PipeWire com pipewire-pulse ou PulseAudio
 
 Dependências de execução: `pactl`, `parec` e `pacat`, normalmente fornecidos por

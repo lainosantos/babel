@@ -16,6 +16,68 @@ um aplicativo ao Babel e nunca ativa comandos. Isso vale nos três sistemas.
 
 Diga **“Babel, acenda a luz da cozinha”**, ou diga **“Babel”**, espere a indicação de ativação e então dê o comando. O nome é configurável. A comparação ignora maiúsculas/minúsculas, exige palavras completas e aceita um cumprimento inicial como “Oi, Babel” ou “Hey, Babel”. Uma menção no meio de uma conversa (“eu uso o Babel”) não ativa ferramentas. Depois de uma ativação sem comando, o prazo padrão para a próxima fala é oito segundos. “Babel, cancelar” cancela essa ativação; durante uma chamada em processamento, use o botão de cancelar no painel.
 
+## Retorno visual dos comandos
+
+Em **Comandos**, habilite **Mostrar notificações no desktop** para receber o
+retorno visual mesmo com as configurações fechadas. O Babel mostra um painel
+compacto com a logo e uma indicação de estado, sem tomar o foco do aplicativo
+que você está usando e sem emitir som. O painel segue o idioma da interface,
+português ou inglês. No Windows e macOS, acompanha o tema claro ou escuro
+informado pelo sistema; no X11/XWayland, usa a versão clara.
+
+| Estado | O que significa | Duração |
+| --- | --- | --- |
+| Ativação | O nome foi reconhecido; diga o comando, caso ainda não o tenha dito. | A ativação fica visível por pelo menos 300 ms, inclusive em comandos rápidos. |
+| Processamento | O Babel reconhece a fala seguinte, prepara/carrega o modelo, escolhe a ferramenta ou aguarda sua resposta. | Permanece enquanto o comando está ativo. |
+| Sucesso | As chamadas do comando foram concluídas. | Desaparece após cinco segundos. |
+| Falha | O comando foi recusado, cancelado, expirou ou uma etapa falhou. | Desaparece após nove segundos. Consulte os detalhes em Comandos. |
+
+O painel nativo contém **somente mensagens genéricas de estado**. Não recebe a
+fala reconhecida, argumentos, nomes de ferramentas nem resultados. Esses detalhes
+continuam na página Comandos. O indicador da página usa os mesmos estados e
+preserva o resultado de comandos rápidos, mesmo quando eles terminam entre duas
+atualizações da tela. Abrir as configurações novamente não reproduz resultados
+antigos. Problemas de instalação ou disponibilidade anteriores à ativação ficam
+como diagnóstico na página, sem simular uma falha de comando.
+
+Desligar **Mostrar notificações no desktop** oculta o aviso atual; ligá-lo
+novamente vale para os próximos eventos. Desabilitar o agente ou perder a rota
+do microfone também encerra um aviso em andamento. Nenhuma dessas ações repete
+chamadas MCP. Fechar um aviso não cancela a ferramenta: para isso, use o controle
+de cancelamento em Comandos, observando que uma ação já enviada pode ter sido
+concluída.
+
+### Sistemas, movimento e consumo
+
+O painel usa janelas nativas em **Windows e macOS** e em **Linux com X11 ou
+XWayland**. Em uma sessão Wayland sem XWayland, ou se o painel não puder iniciar,
+o Babel usa as notificações do sistema. Nesse modo alternativo, aparência,
+posição, duração e visibilidade seguem também as políticas do desktop, inclusive
+Não Perturbe e permissões de notificações. Não é necessário instalar um navegador
+ou habilitar notificações do navegador.
+
+O efeito na logo é breve: no máximo 20 quadros por segundo durante 1,4 segundo
+por mudança visual. Depois disso, o estado permanece estático até o próximo
+evento; um comando demorado não mantém uma animação contínua. O Babel respeita
+as preferências de reduzir movimento do Windows/macOS e de desabilitar animações
+do GNOME. Quando não consegue consultar a preferência do desktop, usa a versão
+estática. `BABEL_REDUCED_MOTION=1` também força essa versão. O indicador dentro da
+página respeita a preferência de movimento reduzido do navegador.
+
+O executável `babel-feedback` (`babel-feedback.exe` no Windows) acompanha os
+instaladores e inicia somente quando há um aviso para mostrar. A renderização
+é feita por software, sem WebView nem contexto de GPU criado pelo helper; o
+compositor do sistema ainda pode usar sua própria aceleração. O helper encerra
+após 30 segundos sem painel visível e volta sob demanda. Enquanto mostra um
+comando em processamento, permanece disponível até o resultado ou o encerramento
+desse estado. Não abre dispositivos de áudio nem carrega modelos de IA.
+
+Para uma compilação local, use `cargo build --release --bins` e mantenha o helper
+ao lado dos demais executáveis do Babel. A ausência dele permite o retorno por
+notificações do sistema, mas não o painel personalizado. A fila de feedback tem
+tamanho limitado e é independente da captura, da inferência e das ferramentas;
+um desktop lento não bloqueia o áudio nem acumula uma sequência de avisos antigos.
+
 ## Escuta e processamento
 
 Enquanto a rota do microfone está ativa, o Babel captura continuamente o PCM do
@@ -406,7 +468,7 @@ vad_threshold = 0.012
 - `command_window_secs`: prazo após dizer somente o nome, de dois a trinta segundos.
 - `timeout_secs`: limite para cada requisição/etapa de rede, de um a 120 segundos.
 - `vad_threshold`: energia mínima normalizada, de 0,0001 a 0,5. Aumentar reduz ruído e pode perder fala baixa.
-- `desktop_notifications`: aviso também fora do painel, sujeito ao suporte e às permissões do desktop.
+- `desktop_notifications`: habilita o painel nativo de estados fora das configurações, com notificações do sistema como alternativa. Desligar oculta o aviso atual; reativar não reproduz comandos antigos. Não altera a escuta, o roteamento nem os detalhes na página Comandos.
 
 A interface guarda as referências de credenciais e as integrações na configuração do agente. Os valores de chaves devem ser fornecidos pelo painel ou ambiente. Os textos da interface seguem o idioma do aplicativo; `whisper_language` controla somente o reconhecimento da voz.
 
@@ -434,11 +496,21 @@ As ferramentas e seus resultados são dados. Resultados de uma ferramenta não v
 
 ```bash
 cargo test --lib commands::
+cargo test --lib feedback
+cargo test --lib engine::notifications
 python3 -m unittest discover -s scripts -p test_needle_bridge.py -v
 python3 -m unittest discover -s scripts -p test_setup_whisper.py -v
 ```
 
 A suíte usa áudio sintético e servidores locais simulados para verificar palavra inteira/endereço, fala em duas etapas, recusa, argumentos inválidos, cancelamento, troca de microfone, limites de fila e contrato do helper. Esses testes não executam ações em contas reais nem medem a acurácia de um modelo carregado.
+
+Os testes de feedback verificam comandos que terminam rapidamente, retenção do
+resultado para a página, descarte de eventos antigos, desativação/troca de
+microfone, protocolo limitado do helper, tempos de exibição, movimento reduzido
+e renderização em escalas/temas diferentes. São testes determinísticos sem
+captura do microfone; não substituem a verificação visual de janelas, foco e
+políticas de notificações em cada desktop. Compilar e executar testes no CI de
+macOS/Windows não comprova, por si só, essa validação visual em hardware.
 
 ### Inferência real verificada neste ambiente
 

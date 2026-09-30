@@ -19,6 +19,10 @@ path = "src/main.rs"
 name = "babel-tray"
 path = "src/bin/babel-tray.rs"
 
+[[bin]]
+name = "babel-feedback"
+path = "src/bin/babel-feedback.rs"
+
 [dependencies]
 anyhow = "1"
 async-trait = "0.1"
@@ -49,6 +53,10 @@ toml = "0.8"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 zeroize = "1.8"
+winit = { version = "0.30", default-features = false, features = ["rwh_06", "x11"] }
+softbuffer = { version = "0.4", default-features = false, features = ["x11", "x11-dlopen"] }
+tiny-skia = { version = "0.11", default-features = false, features = ["std"] }
+fontdue = "0.9"
 
 [target.'cfg(any(target_os = "macos", target_os = "windows"))'.dependencies]
 cpal = "0.18.2"
@@ -62,9 +70,11 @@ tray-icon = { version = "0.25", default-features = false, features = ["ksni"] }
 [target.'cfg(target_os = "windows")'.dependencies]
 winreg = "0.56"
 wasapi = "0.24"
+windows = { version = "0.62", features = ["UI_ViewManagement"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 coreaudio_hal = { package = "coreaudio", version = "=0.3.3", default-features = false }
+objc2-app-kit = { version = "0.3", default-features = false, features = ["NSWorkspace", "NSAccessibility"] }
 
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }

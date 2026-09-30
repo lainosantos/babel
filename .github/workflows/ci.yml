@@ -41,6 +41,22 @@ jobs:
           suffix=''
           if [ "$RUNNER_OS" = Windows ]; then suffix='.exe'; fi
           python scripts/test_cli_smoke.py --babel "target/debug/babel${suffix}" --output-dir artifacts/cli-smoke
+      - name: Native command feedback render smoke
+        shell: bash
+        run: |
+          suffix=''
+          if [ "$RUNNER_OS" = Windows ]; then suffix='.exe'; fi
+          python scripts/test_feedback_smoke.py --feedback "target/debug/babel-feedback${suffix}" --output-dir artifacts/command-feedback
+      - name: Native feedback on isolated Linux display
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          if ! command -v Xvfb >/dev/null; then
+            sudo apt-get update
+            sudo apt-get install -y --no-install-recommends xvfb
+          fi
+          python scripts/test_native_feedback.py --xvfb "$(command -v Xvfb)" 2>&1 | tee artifacts/native-feedback-window.log
       - name: Preserve test evidence
         if: always()
         uses: actions/upload-artifact@v4

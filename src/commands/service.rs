@@ -11,13 +11,14 @@ use std::{
 use anyhow::Result;
 use serde_json::Value;
 use tokio::{
-    sync::{mpsc, watch},
+    sync::{broadcast, mpsc, watch},
     task::JoinHandle,
 };
 use tokio_util::sync::CancellationToken;
 
 use super::{
-    AgentConfig, CommandErrorScope, CommandPhase, CommandStatus, CommandTools, inference::Inference,
+    AgentConfig, CommandErrorScope, CommandFeedback, CommandPhase, CommandStatus, CommandTools,
+    feedback::FeedbackPublisher, inference::Inference,
 };
 use crate::audio::{PcmFrame, resample::Resampler};
 
@@ -28,6 +29,7 @@ const SEGMENT_MAX_AGE: Duration = Duration::from_secs(2);
 struct Shared {
     config: RwLock<AgentConfig>,
     status: Mutex<CommandStatus>,
+    feedback: FeedbackPublisher,
     tools: Arc<dyn CommandTools>,
     active: AtomicBool,
     enabled: AtomicBool,
@@ -66,6 +68,7 @@ impl CommandService {
         Ok(Arc::new(Self {
             shared: Arc::new(Shared {
                 status: Mutex::new(CommandStatus::initial(&config)),
+                feedback: FeedbackPublisher::new(),
                 enabled: AtomicBool::new(config.enabled),
                 config: RwLock::new(config),
                 tools,
@@ -156,6 +159,7 @@ impl CommandService {
             status.error = None;
             status.error_scope = None;
             status.sequence = status.sequence.wrapping_add(1);
+            self.shared.feedback.status_changed(&status);
         }
     }
 
@@ -175,28 +179,48 @@ impl CommandService {
             status.sequence = old_sequence.wrapping_add(1);
             status.activation_id = activation;
             status.microphone_active = self.shared.active.load(Ordering::Relaxed);
+            self.shared.feedback.status_changed(&status);
         }
         self.shared.changed();
         Ok(())
     }
 
     pub fn cancel(&self) {
+        let mut status = self.shared.status.lock().unwrap_or_else(|e| e.into_inner());
+        if !matches!(
+            status.phase,
+            CommandPhase::Activated
+                | CommandPhase::Transcribing
+                | CommandPhase::Deciding
+                | CommandPhase::Executing
+        ) {
+            return;
+        }
+        status.phase = CommandPhase::Failed;
+        status.error =
+            Some("command cancelled; a dispatched tool may already have completed".into());
+        status.error_scope = Some(CommandErrorScope::Command);
+        status.sequence = status.sequence.wrapping_add(1);
+        self.shared.feedback.status_changed(&status);
         self.shared.changed();
-        self.shared.phase(
-            CommandPhase::Failed,
-            Some("command cancelled; a dispatched tool may already have completed".into()),
-        );
     }
 
     pub fn status(&self) -> CommandStatus {
-        let mut status = self
-            .shared
-            .status
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .clone();
+        let current = self.shared.status.lock().unwrap_or_else(|e| e.into_inner());
+        let mut status = current.clone();
         status.dropped_frames = self.shared.dropped.load(Ordering::Relaxed);
+        // Preserve a consistent status/feedback pair if a command transitions
+        // while the dashboard is reading the snapshot.
+        status.feedback = self.feedback_snapshot();
         status
+    }
+
+    pub fn subscribe_feedback(&self) -> broadcast::Receiver<CommandFeedback> {
+        self.shared.feedback.subscribe()
+    }
+
+    pub fn feedback_snapshot(&self) -> Option<CommandFeedback> {
+        self.shared.feedback.snapshot()
     }
 
     pub async fn shutdown(&self) {
@@ -220,6 +244,7 @@ impl CommandService {
         status.whisper_endpoint = None;
         status.needle_endpoint = None;
         status.sequence = status.sequence.wrapping_add(1);
+        self.shared.feedback.status_changed(&status);
     }
 }
 
@@ -244,6 +269,7 @@ impl Shared {
         status.error = error;
         status.error_scope = (phase == CommandPhase::Failed).then_some(CommandErrorScope::Command);
         status.sequence = status.sequence.wrapping_add(1);
+        self.feedback.status_changed(&status);
     }
     fn service_error(&self, error: String) {
         let mut status = self.status.lock().unwrap_or_else(|e| e.into_inner());
@@ -254,6 +280,7 @@ impl Shared {
         status.tool = None;
         status.result = None;
         status.sequence = status.sequence.wrapping_add(1);
+        self.feedback.status_changed(&status);
     }
     fn activate(&self, command: Option<String>) {
         let mut status = self.status.lock().unwrap_or_else(|e| e.into_inner());
@@ -265,6 +292,7 @@ impl Shared {
         status.result = None;
         status.tool = None;
         status.sequence = status.sequence.wrapping_add(1);
+        self.feedback.status_changed(&status);
     }
 }
 

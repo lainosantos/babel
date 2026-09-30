@@ -2,11 +2,13 @@
 //! Audio arrives through a bounded tap of the original microphone: this module
 //! never opens a device and never consumes translated/output audio.
 mod config;
+mod feedback;
 mod inference;
 mod local_services;
 mod service;
 
 pub use config::AgentConfig;
+pub use feedback::{CommandFeedback, CommandFeedbackPhase};
 pub use service::CommandService;
 
 use anyhow::Result;
@@ -77,6 +79,10 @@ pub struct CommandStatus {
     pub whisper_endpoint: Option<String>,
     #[serde(default)]
     pub needle_endpoint: Option<String>,
+    /// Sanitized visual state retained across fast command transitions. Its
+    /// monotonic age lets newly opened dashboards ignore an old result.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub feedback: Option<CommandFeedback>,
 }
 
 impl CommandStatus {
@@ -99,6 +105,7 @@ impl CommandStatus {
             dropped_frames: 0,
             whisper_endpoint: None,
             needle_endpoint: None,
+            feedback: None,
         }
     }
 }

@@ -23,9 +23,13 @@
   "platform": "Sistema: {os}",
   "tooltip": "Babel · {os} · áudio, tradução e arquivos da sessão",
   "session.default": "Sessão {timestamp} UTC",
-  "agent.activated": "Comando de voz ativado",
-  "agent.processing": "Processando comando",
-  "agent.succeeded": "Comando concluído",
-  "agent.failed": "Comando indisponível ou falhou",
-  "agent.details": "Abra o Babel para ver os detalhes."
+  "agent.activated": "Ouvindo",
+  "agent.processing": "Processando seu comando",
+  "agent.succeeded": "Concluído",
+  "agent.failed": "Não foi possível concluir",
+  "agent.details": "Abra o Babel para ver os detalhes.",
+  "agent.activated_hint": "Pode dizer o seu comando.",
+  "agent.processing_hint": "Preparando e executando o comando.",
+  "agent.succeeded_hint": "Seu comando foi concluído.",
+  "agent.failed_hint": "Veja os detalhes no Babel."
 }

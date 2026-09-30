@@ -5,8 +5,8 @@
   const byId = id => document.getElementById(id);
   const i18n = window.BabelI18n;
   const t = (key, values) => i18n.t(key, values);
-  const state = { config: null, revision: null, draft: null, dirty: false, busy: false, conflict: false, status: null, dismissed: null, polling: false, pollCount: 0, authenticated: true, auth: new Map(), tools: new Map(), renderedStatus: null, connectionError: null };
-  const activePhases = new Set(['activated', 'transcribing', 'deciding', 'executing']);
+  const state = { config: null, revision: null, draft: null, dirty: false, busy: false, conflict: false, status: null, dismissed: null, polling: false, pollCount: 0, authenticated: true, auth: new Map(), tools: new Map(), renderedStatus: null, connectionError: null, feedback: null, feedbackSequence: null, feedbackInitialized: false, feedbackTimer: null, feedbackHover: false };
+  const activePhases = new Set(['activated', 'transcribing', 'deciding', 'executing', 'processing']);
   const visiblePhases = new Set([...activePhases, 'succeeded', 'failed']);
   const basicFields = [
     ['wake_name', 'agent.wake_name', 'text', { maxlength: 60, required: true }], ['desktop_notifications', 'agent.desktop_notifications', 'checkbox'],
@@ -331,9 +331,88 @@
     notice.hidden = !unavailable;
     byId('agent-service-status-detail').textContent = unavailable ? error || t('agent.service_setup_hint') : '';
   }
+  const completionDuration = phase => phase === 'succeeded' ? 5000 : phase === 'failed' ? 9000 : 0;
+  function clearFeedbackTimer() {
+    if (state.feedbackTimer != null) window.clearTimeout(state.feedbackTimer);
+    state.feedbackTimer = null;
+  }
+  function hideFeedback() {
+    clearFeedbackTimer(); state.feedback = null;
+    byId('agent-activity').hidden = true; byId('agent-live').textContent = '';
+  }
+  function dismissFeedback() {
+    state.dismissed = state.feedback?.activation_id;
+    hideFeedback();
+  }
+  function holdFeedback() {
+    return state.feedbackHover || byId('agent-activity').contains(document.activeElement) || byId('agent-feedback-details').open;
+  }
+  function scheduleFeedbackDismiss(delay) {
+    clearFeedbackTimer();
+    const snapshot = state.feedback;
+    if (!snapshot || !completionDuration(snapshot.phase) || holdFeedback()) return;
+    state.feedbackTimer = window.setTimeout(() => {
+      state.feedbackTimer = null;
+      if (state.feedback?.activation_id === snapshot.activation_id && state.feedback?.phase === snapshot.phase && !holdFeedback()) dismissFeedback();
+    }, delay ?? completionDuration(snapshot.phase));
+  }
+  function renderFeedback(status, age = 0) {
+    const panel = byId('agent-activity');
+    if (!(status.activation_id > 0) || !visiblePhases.has(status.phase) || state.dismissed === status.activation_id) return;
+    const previous = state.feedback;
+    const changed = previous?.activation_id !== status.activation_id || previous?.phase !== status.phase;
+    if (previous?.activation_id !== status.activation_id) byId('agent-feedback-details').open = false;
+    state.feedback = { ...status };
+    panel.dataset.stage = status.phase; panel.hidden = false;
+    panel.setAttribute('aria-busy', String(activePhases.has(status.phase)));
+    const name = status.wake_name || state.config?.wake_name || 'Babel';
+    const label = t(`agent.phase_${status.phase}`);
+    const hintKey = `agent.${status.phase}_hint`;
+    const hint = t(hintKey) === hintKey ? '' : t(hintKey);
+    byId('agent-activity-name').textContent = name;
+    byId('agent-activity-title').textContent = label;
+    byId('agent-activity-detail').textContent = hint;
+    byId('agent-activity-command').textContent = status.command || '';
+    byId('agent-activity-command').hidden = !status.command;
+    byId('agent-activity-tool').textContent = status.tool ? t('agent.tool', { tool: status.tool }) : '';
+    byId('agent-activity-tool').hidden = !status.tool;
+    byId('agent-activity-error').textContent = status.error || '';
+    byId('agent-activity-error').hidden = !status.error;
+    byId('agent-result').textContent = status.result || '';
+    byId('agent-result-container').hidden = !status.result;
+    byId('agent-feedback-details').hidden = !(status.command || status.tool || status.error || status.result);
+    byId('agent-cancel').hidden = !activePhases.has(status.phase);
+    // Announce the state, not private speech, tool arguments or responses.
+    const announcement = `${name}. ${label}. ${hint}`;
+    if (byId('agent-live').textContent !== announcement) byId('agent-live').textContent = announcement;
+    if (changed) scheduleFeedbackDismiss(Math.max(0, completionDuration(status.phase) - age));
+  }
+  function updateFeedback(status, serviceFailure) {
+    const first = !state.feedbackInitialized;
+    state.feedbackInitialized = true;
+    if (serviceFailure || ['disabled', 'inactive'].includes(status.phase)) { hideFeedback(); return; }
+    const feedback = status.feedback;
+    if (feedback) {
+      const changed = feedback.sequence !== state.feedbackSequence;
+      state.feedbackSequence = feedback.sequence;
+      const terminal = completionDuration(feedback.phase);
+      if (feedback.phase === 'dismissed') { hideFeedback(); return; }
+      // Opening Settings must not replay a command that already completed.
+      if ((first && terminal) || (changed && terminal && feedback.age_ms >= terminal)) { hideFeedback(); return; }
+      if (changed || state.feedback?.activation_id === feedback.activation_id || activePhases.has(feedback.phase)) {
+        const content = status.activation_id === feedback.activation_id ? status : {};
+        renderFeedback({ ...content, activation_id: feedback.activation_id, phase: feedback.phase, wake_name: status.wake_name }, feedback.age_ms || 0);
+      }
+      return;
+    }
+    // Compatibility with older servers: keep a completed command visible when
+    // the recognizer returns to waiting, without extending its dismissal time.
+    if (visiblePhases.has(status.phase)) renderFeedback(status);
+    else if (!completionDuration(state.feedback?.phase)) hideFeedback();
+  }
   function renderStatus(status) {
     state.status = status;
-    const signature = JSON.stringify([i18n.language, status.phase, status.activation_id, status.wake_name, status.command, status.tool, status.result, status.error, status.error_scope, status.whisper_endpoint, status.needle_endpoint]);
+    const signature = JSON.stringify([i18n.language, status.phase, status.activation_id, status.wake_name, status.command, status.tool, status.result, status.error, status.error_scope, status.whisper_endpoint, status.needle_endpoint, status.feedback?.sequence, status.feedback?.phase]);
     if (signature === state.renderedStatus) return;
     state.renderedStatus = signature;
     renderEffectiveEndpoints(status);
@@ -345,16 +424,8 @@
     const label = serviceFailure ? t('agent.service_unavailable') : t(phaseKey) === phaseKey ? phase : t(phaseKey);
     const summary = byId('agent-summary'); delete summary.dataset.i18n; summary.dataset.stage = serviceFailure ? 'unavailable' : phase; summary.textContent = label;
     renderServiceIssue(serviceFailure, status.error);
-    const panel = byId('agent-activity'); panel.dataset.stage = phase;
-    panel.hidden = serviceFailure || !(status.activation_id > 0) || !visiblePhases.has(phase) || state.dismissed === status.activation_id;
-    byId('agent-activity-name').textContent = status.wake_name || state.config?.wake_name || 'Babel';
-    byId('agent-activity-title').textContent = label;
-    byId('agent-activity-command').textContent = status.command || '';
-    byId('agent-activity-tool').textContent = status.tool ? t('agent.tool', { tool: status.tool }) : '';
-    byId('agent-activity-detail').textContent = status.error || (phase === 'listening' ? t('agent.listening_hint') : phase === 'activated' ? t('agent.activated_hint') : phase === 'transcribing' ? t('agent.transcribing_hint') : phase === 'deciding' ? t('agent.deciding_hint') : phase === 'executing' ? t('agent.executing_hint') : phase === 'succeeded' ? t('agent.succeeded_hint') : '');
-    byId('agent-result').textContent = status.result || '';
-    byId('agent-result-container').hidden = !status.result;
-    byId('agent-cancel').hidden = !activePhases.has(phase);
+    updateFeedback(status, serviceFailure);
+    if (state.feedback) renderFeedback(state.feedback);
   }
   async function syncAuth() {
     const statuses = await request('/agent/integrations/status');
@@ -384,7 +455,7 @@
           else apply(snapshot.data, snapshot.revision);
         }
       }
-    } catch (error) { state.connectionError = error.message; state.renderedStatus = null; delete byId('agent-summary').dataset.i18n; byId('agent-summary').textContent = t('agent.unavailable'); byId('agent-summary').dataset.stage = 'unavailable'; if (!byId('agent-activity').hidden) { byId('agent-activity-title').textContent = t('agent.unavailable'); byId('agent-activity-detail').textContent = error.message; } message('error', error.message); }
+    } catch (error) { state.connectionError = error.message; state.renderedStatus = null; delete byId('agent-summary').dataset.i18n; byId('agent-summary').textContent = t('agent.unavailable'); byId('agent-summary').dataset.stage = 'unavailable'; hideFeedback(); message('error', error.message); }
     finally { state.polling = false; }
   }
   byId('agent-enabled').addEventListener('change', event => {
@@ -409,7 +480,13 @@
       const rows = document.querySelectorAll('[data-integration-id]'); const row = rows[rows.length - 1]; row.open = true; row.querySelector('[data-agent-field="name"]').focus();
     } catch (error) { message('error', error.message); }
   });
-  byId('agent-dismiss').addEventListener('click', () => { state.dismissed = state.status?.activation_id; byId('agent-activity').hidden = true; });
+  byId('agent-dismiss').addEventListener('click', dismissFeedback);
+  byId('agent-activity').addEventListener('mouseenter', () => { state.feedbackHover = true; clearFeedbackTimer(); });
+  byId('agent-activity').addEventListener('mouseleave', () => { state.feedbackHover = false; scheduleFeedbackDismiss(); });
+  byId('agent-activity').addEventListener('focusin', clearFeedbackTimer);
+  byId('agent-activity').addEventListener('focusout', () => queueMicrotask(() => scheduleFeedbackDismiss()));
+  byId('agent-feedback-details').addEventListener('toggle', () => scheduleFeedbackDismiss());
+  byId('agent-activity').addEventListener('keydown', event => { if (event.key === 'Escape') { event.preventDefault(); dismissFeedback(); } });
   byId('agent-cancel').addEventListener('click', () => action(async () => { await request('/agent/cancel', { method: 'POST', body: {} }); await poll(); }));
   window.addEventListener('babel:languagechange', () => {
     controls(); if (state.status) renderStatus(state.status);

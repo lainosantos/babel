@@ -59,7 +59,7 @@ def pe_machine(path):
 
 
 def stage(binary, driver, destination, architecture, release, runtime_dir=None):
-    for name in ('babel.exe', 'babel-tray.exe'):
+    for name in ('babel.exe', 'babel-tray.exe', 'babel-feedback.exe'):
         if pe_machine(binary / name) != MACHINES[architecture]:
             raise ValueError(f"Wrong {architecture} app architecture: {name}")
     for name in DRIVER_FILES:
@@ -76,7 +76,7 @@ def stage(binary, driver, destination, architecture, release, runtime_dir=None):
     if '$ARCH$' in inf:
         raise ValueError('INF was not processed by the WDK stamp task')
     destination.mkdir(parents=True, exist_ok=False)
-    for name in ('babel.exe', 'babel-tray.exe'):
+    for name in ('babel.exe', 'babel-tray.exe', 'babel-feedback.exe'):
         shutil.copy2(binary / name, destination / name)
     driver_out = destination / 'drivers' / 'windows'
     driver_out.mkdir(parents=True)

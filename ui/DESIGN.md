@@ -70,3 +70,25 @@ Playback/routing/session state always has a text label as well.
 
 The Manrope font and its OFL license are distributed in `ui/fonts` from the
 [Google Fonts source](https://github.com/google/fonts/tree/main/ofl/manrope).
+
+## Command feedback
+
+Use the actual Babel B mark in a compact notification above the session dock.
+The mark carries one restrained listening wave or processing orbit; the rest of
+the workspace stays still. Success uses a small teal check, failure a muted coral
+exclamation. Both retain a readable text state. Reduced-motion preferences disable
+all logo motion. No notification opens a dialog, moves keyboard focus or plays a
+sound.
+
+Keep the spoken command, tool name, result and technical error inside a disclosure
+that starts closed for every activation. The polite live region announces only
+the phase and generic hint. The Commands page retains its independent current
+listener state while a completed command remains briefly visible. Desktop feedback
+and the dashboard share the same bounded backend visual events, including commands
+that finish between dashboard polls. Opening settings does not replay past results.
+
+Dashboard completion dismisses after five seconds; failure after nine. Hover,
+keyboard focus and an expanded disclosure pause that timeout. A new activation
+replaces the previous notification and cancels its timeout. Dismiss and Escape
+hide the whole activation, including later updates. Local service setup errors
+remain contextual on Commands rather than appearing as failed spoken commands.

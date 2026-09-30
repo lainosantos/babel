@@ -24,7 +24,7 @@ class PackageTests(unittest.TestCase):
         binary, driver = root / 'bin', root / 'driver'
         binary.mkdir()
         driver.mkdir()
-        for name in ('babel.exe', 'babel-tray.exe'):
+        for name in ('babel.exe', 'babel-tray.exe', 'babel-feedback.exe'):
             pe(binary / name, build.MACHINES[arch])
         for name in build.DRIVER_FILES:
             (driver / name).write_text('fixture')
@@ -43,6 +43,7 @@ class PackageTests(unittest.TestCase):
                 manifest = build.stage(binary, driver, root / 'payload', arch, '0.1.0')
                 self.assertIn('drivers/windows/BabelAudio.cat', manifest['files'])
                 self.assertIn('babel-tray.exe', manifest['files'])
+                self.assertIn('babel-feedback.exe', manifest['files'])
                 self.assertFalse((root / 'payload/drivers/windows/private.key').exists())
                 other = 'ARM64' if arch == 'x64' else 'x64'
                 pe(driver / 'BabelAudio.sys', build.MACHINES[other])

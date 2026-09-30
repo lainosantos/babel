@@ -23,9 +23,13 @@
   "platform": "System: {os}",
   "tooltip": "Babel · {os} · audio, translation and session files",
   "session.default": "Session {timestamp} UTC",
-  "agent.activated": "Voice command activated",
-  "agent.processing": "Processing command",
-  "agent.succeeded": "Command completed",
-  "agent.failed": "Command unavailable or failed",
-  "agent.details": "Open Babel for details."
+  "agent.activated": "Listening",
+  "agent.processing": "Working on your command",
+  "agent.succeeded": "Done",
+  "agent.failed": "Could not complete the command",
+  "agent.details": "Open Babel for details.",
+  "agent.activated_hint": "Say your command.",
+  "agent.processing_hint": "Preparing and running your command.",
+  "agent.succeeded_hint": "Your command has finished.",
+  "agent.failed_hint": "Open Babel to see the details."
 }

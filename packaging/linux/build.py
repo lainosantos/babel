@@ -24,7 +24,7 @@ sys.path.insert(0, str(PROJECT / "scripts"))
 import local_runtime_packaging as runtime_package
 
 PACKAGE = "babel-audio"
-BINARIES = ("babel", "babel-tray")
+BINARIES = ("babel", "babel-tray", "babel-feedback")
 VERSION = re.compile(r"[0-9]+\.[0-9]+\.[0-9]+(?:-[A-Za-z0-9][A-Za-z0-9.-]*)?(?:\+[A-Za-z0-9][A-Za-z0-9.-]*)?")
 LIBC_SONAMES = {
     "libc.so.6", "libm.so.6", "libpthread.so.0", "libdl.so.2",

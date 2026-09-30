@@ -72,6 +72,7 @@ class PackagingTests(unittest.TestCase):
         drivers = self.root / "driver"
         self.file("bin/babel", executable=True)
         self.file("bin/babel-tray", executable=True)
+        self.file("bin/babel-feedback", executable=True)
         package = self.file("driver/BabelAudio.pkg", content=b"original package")
         helper = self.file("driver/uninstall.sh", content=b"#!/bin/sh\n", executable=True)
         self.file("driver/babel.toml", content=b"secret")
@@ -81,6 +82,8 @@ class PackagingTests(unittest.TestCase):
         self.assertEqual((resources / "drivers/macos/uninstall.sh").read_bytes(), helper.read_bytes())
         self.assertTrue((resources / "drivers/macos/uninstall.sh").stat().st_mode & 0o100)
         self.assertTrue((resources / "Documentation/voice-commands.md").is_file())
+        self.assertTrue((bundle / "Contents/MacOS/babel-feedback").is_file())
+        self.assertTrue((resources / "Licenses/Manrope-OFL.txt").is_file())
         self.assertTrue((resources / "Support/scripts/patches/whisper-dynamic-port.patch").is_file())
         self.assertTrue((resources / "pt.lproj/InfoPlist.strings").is_file())
         self.assertFalse(list(bundle.rglob("babel.toml")))

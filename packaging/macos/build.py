@@ -126,7 +126,7 @@ def stage_bundle(destination, binaries, driver_directory, version, runtime_dir=N
     contents = destination / "Contents"
     resources = contents / "Resources"
     resources.mkdir(parents=True)
-    for name in ["babel", "babel-tray"]:
+    for name in ["babel", "babel-tray", "babel-feedback"]:
         copy_file(binaries / name, contents / "MacOS" / name, executable=True)
     with (contents / "Info.plist").open("wb") as handle:
         plistlib.dump(app_info(version), handle)
@@ -146,6 +146,7 @@ def stage_bundle(destination, binaries, driver_directory, version, runtime_dir=N
     for source in sorted((ROOT / "docs").glob("*.md")):
         copy_file(source, resources / "Documentation" / source.name)
     copy_file(HERE / "INSTALLATION.txt", resources / "INSTALLATION.txt")
+    copy_file(ROOT / "ui/fonts/OFL.txt", resources / "Licenses/Manrope-OFL.txt")
     # These are inert source/support files. Users copy them to a writable service
     # directory before explicitly installing helpers; the signed bundle is immutable.
     for relative in ["setup_whisper.py", "needle_bridge.py", "patches/whisper-dynamic-port.patch"]:
@@ -248,7 +249,7 @@ def check_output_destination(destination, bundle=False):
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--runtime-dir", type=Path, required=True)
-    parser.add_argument("--bin-dir", type=Path, required=True, help="prebuilt executable babel and babel-tray")
+    parser.add_argument("--bin-dir", type=Path, required=True, help="prebuilt executable babel, babel-tray and babel-feedback")
     parser.add_argument("--driver-dir", type=Path, default=ROOT / "native/macos/dist")
     parser.add_argument("--output", type=Path, default=HERE / "dist")
     parser.add_argument("--version", type=validate_version, default=root_version())
@@ -270,7 +271,7 @@ def main(argv=None):
             parser.error(f"Missing macOS packaging tool: {command}")
     binaries, driver_directory = args.bin_dir.resolve(), args.driver_dir.resolve()
     arches = ARCHES[args.arch]
-    for name in ["babel", "babel-tray"]:
+    for name in ["babel", "babel-tray", "babel-feedback"]:
         validate_macho(binaries / name, arches, "EXECUTE")
     regular_file(driver_directory / "BabelAudio.pkg")
     regular_file(driver_directory / "uninstall.sh", executable=True)
@@ -320,6 +321,7 @@ def main(argv=None):
                 if macho:
                     run([*sign, binary])
             runtime_package.rehash(runtime)
+        run([*sign, app / "Contents/MacOS/babel-feedback"])
         run([*sign, "--entitlements", entitlements, app / "Contents/MacOS/babel"])
         run([*sign, "--entitlements", entitlements, app])
         run(["codesign", "--verify", "--deep", "--strict", "--verbose=2", app])
@@ -354,7 +356,7 @@ def main(argv=None):
         installed_app = validate_payload(packages[APP_PACKAGE_ID], APP_PATH, APP_PACKAGE_ID)
         installed_driver = validate_payload(packages[DRIVER_PACKAGE_ID], DRIVER_PATH, DRIVER_PACKAGE_ID)
         verify_matching_files(app, installed_app, ["Contents/Info.plist", "Contents/MacOS/babel",
-            "Contents/MacOS/babel-tray", "Contents/Resources/drivers/macos/BabelAudio.pkg",
+            "Contents/MacOS/babel-tray", "Contents/MacOS/babel-feedback", "Contents/Resources/drivers/macos/BabelAudio.pkg",
             "Contents/Resources/drivers/macos/uninstall.sh"])
         for runtime in (installed_app / "Contents/Resources/local-runtime").iterdir():
             arch = runtime.name.removeprefix("macos-")

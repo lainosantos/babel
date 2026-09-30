@@ -367,6 +367,74 @@ async fn same_utterance_routes_only_explicit_wake_and_reports_original_result() 
 }
 
 #[tokio::test]
+async fn feedback_delivers_fast_real_command_lifecycle_without_polling_or_replay() {
+    let f = Fixture::new(&["Babel acenda a cozinha"]).await;
+    let mut feedback = f.service.subscribe_feedback();
+    f.speech().await;
+    f.wait(CommandPhase::Succeeded).await;
+    let mut phases = Vec::new();
+    while let Ok(event) = feedback.try_recv() {
+        assert_eq!(event.activation_id, 1);
+        phases.push(event.phase);
+    }
+    assert_eq!(
+        phases,
+        [
+            CommandFeedbackPhase::Activated,
+            CommandFeedbackPhase::Processing,
+            CommandFeedbackPhase::Succeeded
+        ]
+    );
+    assert_eq!(f.tools.calls.load(Ordering::SeqCst), 1);
+    let before = f.service.status();
+    f.service.cancel();
+    assert_eq!(f.service.status().sequence, before.sequence);
+    assert!(feedback.try_recv().is_err());
+    assert!(f.service.subscribe_feedback().try_recv().is_err());
+    tokio::time::sleep(Duration::from_millis(10)).await;
+    let saved = f.service.status().feedback.unwrap();
+    assert_eq!(saved.phase, CommandFeedbackPhase::Succeeded);
+    assert!(saved.age_ms >= 10);
+    f.close().await;
+}
+
+#[tokio::test]
+async fn feedback_is_dismissed_on_microphone_loss_and_notification_preference_change() {
+    let f = Fixture::new(&["Babel", "Babel acenda a cozinha"]).await;
+    let mut feedback = f.service.subscribe_feedback();
+    f.speech().await;
+    f.wait(CommandPhase::Activated).await;
+    assert_eq!(
+        feedback.try_recv().unwrap().phase,
+        CommandFeedbackPhase::Activated
+    );
+    f.service.set_microphone_active(false);
+    assert_eq!(
+        feedback.try_recv().unwrap().phase,
+        CommandFeedbackPhase::Dismissed
+    );
+    assert_eq!(
+        f.service.status().feedback.unwrap().phase,
+        CommandFeedbackPhase::Dismissed
+    );
+    assert_eq!(f.tools.calls.load(Ordering::SeqCst), 0);
+    f.service.set_microphone_active(true);
+    tokio::time::sleep(Duration::from_millis(15)).await;
+    f.speech().await;
+    f.wait(CommandPhase::Succeeded).await;
+    while feedback.try_recv().is_ok() {}
+    let mut config = f.config.clone();
+    config.desktop_notifications = false;
+    f.service.update_config(config).unwrap();
+    assert_eq!(
+        feedback.try_recv().unwrap().phase,
+        CommandFeedbackPhase::Dismissed
+    );
+    assert_eq!(f.tools.calls.load(Ordering::SeqCst), 1);
+    f.close().await;
+}
+
+#[tokio::test]
 async fn wake_alone_accepts_following_utterance_and_cancel_does_not_call_tools() {
     let f = Fixture::new(&["Babel", "acenda a cozinha", "Babel cancelar"]).await;
     f.speech().await;

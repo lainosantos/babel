@@ -17,10 +17,12 @@ async function page(t, options = {}) {
   const { window } = dom; const doc = window.document; const byId = id => doc.getElementById(id);
   let config = defaults(); options.configure?.(config); let revision = 7; let interval; let oauthAuthenticated = false;
   let status = { phase: 'listening', wake_name: 'Babel', microphone_active: true, sequence: 1, activation_id: 0, command: null, tool: null, result: null, error: null, dropped_frames: 0, whisper_endpoint: null, needle_endpoint: null, ...options.status };
-  const calls = []; const secrets = new Set();
+  const calls = []; const secrets = new Set(); const timers = new Map(); let timerId = 0;
   window.structuredClone = structuredClone; window.AbortSignal = AbortSignal;
   window.BabelDashboard = { authorization: () => `Bearer ${'a'.repeat(64)}` };
   window.setInterval = callback => { interval = callback; return 0; };
+  window.setTimeout = (callback, delay) => { const id = ++timerId; timers.set(id, { callback, delay }); return id; };
+  window.clearTimeout = id => timers.delete(id);
   window.fetch = async (url, request = {}) => {
     const parsed = new URL(url, window.location.origin);
     if (parsed.pathname.startsWith('/locales/')) return new Response(fs.readFileSync(path.join(__dirname, parsed.pathname), 'utf8'), { headers: { 'Content-Type': 'application/json' } });
@@ -48,7 +50,7 @@ async function page(t, options = {}) {
   await settle(() => byId('agent-wake_name') && !byId('agent-fields').disabled && byId('agent-summary').dataset.stage);
   const set = (id, value) => { const input = byId(id); assert.ok(input, id); if (input.type === 'checkbox') input.checked = value; else input.value = value; input.dispatchEvent(new window.Event('input', { bubbles: true })); input.dispatchEvent(new window.Event('change', { bubbles: true })); };
   const save = async () => { byId('agent-form').dispatchEvent(new window.Event('submit', { bubbles: true, cancelable: true })); await settle(() => byId('agent-save').disabled && byId('agent-notice').textContent.includes(window.BabelI18n.language === 'pt' ? 'Ajustes do agente salvos.' : 'Agent settings saved.')); };
-  return { window, doc, byId, calls, set, save, poll: () => interval(), config: () => config, updateStatus: value => { status = { ...status, ...value }; }, externalChange: update => { update(config); revision++; }, authenticate: () => { oauthAuthenticated = true; } };
+  return { window, doc, byId, calls, set, save, timers, expire: () => { const pending = [...timers.values()]; timers.clear(); for (const timer of pending) timer.callback(); }, poll: () => interval(), config: () => config, updateStatus: value => { status = { ...status, ...value }; }, externalChange: update => { update(config); revision++; }, authenticate: () => { oauthAuthenticated = true; } };
 }
 
 test('voice settings save independently while the audio/session fieldset is disabled', async t => {
@@ -222,7 +224,7 @@ test('activation, processing, completion, failure and cancel show real status wi
   assert.equal(p.byId('agent-result').textContent, '<script>bad()</script>'); assert.equal(p.byId('agent-result').querySelector('script'), null); assert.equal(p.byId('agent-cancel').hidden, true);
   p.byId('agent-dismiss').click(); await p.poll(); assert.equal(p.byId('agent-activity').hidden, true);
   p.updateStatus({ phase: 'failed', activation_id: 2, error: 'Local Whisper is unavailable' }); await p.poll();
-  assert.equal(p.byId('agent-activity').hidden, false); assert.equal(p.byId('agent-activity-detail').textContent, 'Local Whisper is unavailable');
+  assert.equal(p.byId('agent-activity').hidden, false); assert.equal(p.byId('agent-activity-error').textContent, 'Local Whisper is unavailable'); assert.equal(p.byId('agent-feedback-details').open, false);
   p.updateStatus({ phase: 'deciding', activation_id: 3, error: null }); await p.poll(); p.byId('agent-cancel').click();
   await settle(() => p.calls.some(c => c.path.endsWith('/cancel')));
 });
@@ -289,7 +291,7 @@ test('explicit service scope stays contextual after previous activations and pre
   p.updateStatus({ activation_id: 8, error: 'New real command failed' }); await p.poll();
   assert.equal(p.byId('agent-activity').hidden, false);
   assert.equal(p.byId('agent-activity-title').textContent, 'Command failed');
-  assert.equal(p.byId('agent-activity-detail').textContent, 'New real command failed');
+  assert.equal(p.byId('agent-activity-error').textContent, 'New real command failed');
   p.updateStatus({ error_scope: 'service' }); await p.poll();
   assert.equal(p.byId('agent-activity').hidden, true);
   assert.equal(p.byId('agent-service-status').hidden, false);
@@ -339,7 +341,7 @@ test('agent locales include every static field and phase in both catalogs', () =
   const en = JSON.parse(fs.readFileSync(path.join(__dirname, 'locales/en.json'), 'utf8')); const pt = JSON.parse(fs.readFileSync(path.join(__dirname, 'locales/pt.json'), 'utf8'));
   const code = fs.readFileSync(path.join(__dirname, 'agent.js'), 'utf8');
   for (const match of code.matchAll(/['"]((?:agent|mcp)\.[a-z_]+)['"]/g)) { assert.equal(typeof en[match[1]], 'string', match[1]); assert.equal(typeof pt[match[1]], 'string', match[1]); }
-  for (const phase of ['disabled', 'inactive', 'listening', 'activated', 'transcribing', 'deciding', 'executing', 'succeeded', 'failed']) assert.equal(typeof en[`agent.phase_${phase}`], 'string');
+  for (const phase of ['disabled', 'inactive', 'listening', 'activated', 'transcribing', 'deciding', 'executing', 'processing', 'succeeded', 'failed']) assert.equal(typeof en[`agent.phase_${phase}`], 'string');
 });
 
 
@@ -360,4 +362,110 @@ test('command model and resource limits save independently and explain the idle 
     assert.match(p.byId('agent-idle_unload_secs-hint').textContent, /Needle/);
     assert.equal(p.calls.some(call => ['/api/config', '/api/start', '/api/stop'].includes(call.path)), false);
   }
+});
+
+
+test('command feedback uses the Babel mark, stays private and never takes keyboard focus', async t => {
+  const p = await page(t, { language: 'en' });
+  p.byId('agent-wake_name').focus();
+  p.updateStatus({ phase: 'activated', activation_id: 1 }); await p.poll();
+  assert.equal(p.byId('agent-activity').querySelector('img').getAttribute('src'), '/brand.svg');
+  assert.equal(p.doc.activeElement, p.byId('agent-wake_name'));
+  assert.equal(p.byId('agent-activity').getAttribute('aria-busy'), 'true');
+  p.updateStatus({ phase: 'succeeded', command: 'Private appointment', tool: 'calendar.list', result: 'Private result' }); await p.poll();
+  assert.equal(p.byId('agent-feedback-details').hidden, false);
+  assert.equal(p.byId('agent-feedback-details').open, false);
+  assert.equal(p.byId('agent-activity').getAttribute('aria-busy'), 'false');
+  assert.match(p.byId('agent-live').textContent, /Command completed/);
+  assert.doesNotMatch(p.byId('agent-live').textContent, /Private|calendar/);
+  assert.equal(p.byId('agent-live').getAttribute('aria-live'), 'polite');
+  assert.equal(p.byId('agent-live').getAttribute('aria-atomic'), 'true');
+});
+
+test('completed feedback remains visible after listening resumes and expires without repeated polling extending it', async t => {
+  const p = await page(t, { language: 'en' });
+  p.updateStatus({ phase: 'succeeded', activation_id: 1 }); await p.poll();
+  assert.equal([...p.timers.values()][0].delay, 5000);
+  const timer = [...p.timers.keys()][0];
+  p.updateStatus({ phase: 'listening' }); await p.poll(); await p.poll();
+  assert.equal(p.byId('agent-summary').textContent, 'Listening for wake name');
+  assert.equal(p.byId('agent-activity-title').textContent, 'Command completed');
+  assert.equal([...p.timers.keys()][0], timer);
+  p.expire(); await p.poll();
+  assert.equal(p.byId('agent-activity').hidden, true);
+  p.updateStatus({ phase: 'activated', activation_id: 2 }); await p.poll();
+  assert.equal(p.byId('agent-activity').hidden, false);
+  assert.equal(p.timers.size, 0);
+});
+
+test('new activation cancels an older completion timer and dismissal lasts until another activation', async t => {
+  const p = await page(t);
+  p.updateStatus({ phase: 'failed', activation_id: 1, error: 'Rejected' }); await p.poll();
+  assert.equal([...p.timers.values()][0].delay, 9000);
+  const oldTimer = [...p.timers.values()][0].callback;
+  p.updateStatus({ phase: 'activated', activation_id: 2, error: null }); await p.poll();
+  assert.equal(p.timers.size, 0); oldTimer();
+  assert.equal(p.byId('agent-activity').hidden, false);
+  p.byId('agent-dismiss').click();
+  p.updateStatus({ phase: 'succeeded' }); await p.poll();
+  assert.equal(p.byId('agent-activity').hidden, true);
+  p.updateStatus({ phase: 'activated', activation_id: 3 }); await p.poll();
+  assert.equal(p.byId('agent-activity').hidden, false);
+  p.byId('agent-dismiss').dispatchEvent(new p.window.KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+  assert.equal(p.byId('agent-activity').hidden, true);
+});
+
+test('hover, keyboard focus and reading details pause automatic dismissal', async t => {
+  const p = await page(t);
+  p.updateStatus({ phase: 'succeeded', activation_id: 1, result: 'A response' }); await p.poll();
+  p.byId('agent-activity').dispatchEvent(new p.window.MouseEvent('mouseenter'));
+  assert.equal(p.timers.size, 0);
+  p.byId('agent-activity').dispatchEvent(new p.window.MouseEvent('mouseleave'));
+  assert.equal(p.timers.size, 1);
+  p.byId('agent-feedback-details').open = true;
+  p.byId('agent-feedback-details').dispatchEvent(new p.window.Event('toggle'));
+  assert.equal(p.timers.size, 0);
+  p.byId('agent-feedback-details').open = false;
+  p.byId('agent-feedback-details').dispatchEvent(new p.window.Event('toggle'));
+  assert.equal(p.timers.size, 1);
+  p.byId('agent-dismiss').focus(); assert.equal(p.timers.size, 0);
+  p.byId('agent-wake_name').focus(); await Promise.resolve();
+  assert.equal(p.timers.size, 1);
+  p.expire(); assert.equal(p.byId('agent-activity').hidden, true);
+});
+
+test('preserved backend feedback shows fast completion once while opening settings never replays old commands', async t => {
+  const p = await page(t, { language: 'en', status: { activation_id: 8, feedback: { activation_id: 8, sequence: 20, phase: 'succeeded', age_ms: 1000 } } });
+  assert.equal(p.byId('agent-activity').hidden, true);
+  p.updateStatus({ feedback: { activation_id: 8, sequence: 20, phase: 'succeeded', age_ms: 1200 } }); await p.poll();
+  assert.equal(p.byId('agent-activity').hidden, true);
+  // The entire next command finished between two status requests.
+  p.updateStatus({ activation_id: 9, feedback: { activation_id: 9, sequence: 23, phase: 'succeeded', age_ms: 250 } }); await p.poll();
+  assert.equal(p.byId('agent-activity-title').textContent, 'Command completed');
+  assert.equal(p.byId('agent-summary').textContent, 'Listening for wake name');
+  assert.equal([...p.timers.values()][0].delay, 4750);
+  p.expire();
+  p.updateStatus({ command: 'Late status detail', feedback: { activation_id: 9, sequence: 23, phase: 'succeeded', age_ms: 1000 } }); await p.poll();
+  assert.equal(p.byId('agent-activity').hidden, true);
+  p.updateStatus({ activation_id: 10, feedback: { activation_id: 10, sequence: 24, phase: 'processing', age_ms: 0 } }); await p.poll();
+  assert.equal(p.byId('agent-activity-title').textContent, 'Working on your command');
+  p.updateStatus({ feedback: { activation_id: 10, sequence: 25, phase: 'dismissed', age_ms: 0 } }); await p.poll();
+  assert.equal(p.byId('agent-activity').hidden, true);
+});
+
+test('expired backend feedback is ignored while an in-progress command can appear on first connection', async t => {
+  const p = await page(t, { status: { phase: 'deciding', activation_id: 1, feedback: { activation_id: 1, sequence: 2, phase: 'processing', age_ms: 400 } } });
+  assert.equal(p.byId('agent-activity').hidden, false);
+  p.updateStatus({ phase: 'listening', activation_id: 2, feedback: { activation_id: 2, sequence: 5, phase: 'failed', age_ms: 10000 } }); await p.poll();
+  assert.equal(p.byId('agent-activity').hidden, true);
+  const css = fs.readFileSync(path.join(__dirname, 'style.css'), 'utf8');
+  assert.match(css, /prefers-reduced-motion: reduce[\s\S]*?agent-activity[\s\S]*?animation: none/);
+});
+
+
+test('a first command completing between polls appears after an initially empty feedback state', async t => {
+  const p = await page(t, { language: 'en', status: { feedback: null } });
+  p.updateStatus({ activation_id: 1, feedback: { activation_id: 1, sequence: 3, phase: 'succeeded', age_ms: 50 } }); await p.poll();
+  assert.equal(p.byId('agent-activity').hidden, false);
+  assert.equal(p.byId('agent-activity-title').textContent, 'Command completed');
 });

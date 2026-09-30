@@ -1,34 +1,32 @@
-//! Desktop feedback remains available when the browser dashboard is closed.
-//! One bounded queue and one OS-notification thread, isolated from audio.
+//! Desktop feedback remains available when the dashboard is closed. Command
+//! transitions are delivered as bounded events, never sampled by a timer.
 use super::*;
-use crate::commands::{CommandErrorScope, CommandPhase, CommandStatus};
+use crate::commands::{CommandFeedback, CommandFeedbackPhase};
 
-#[derive(Default)]
-struct NotificationGate {
-    last: Option<(u64, &'static str)>,
-}
-impl NotificationGate {
-    fn next(&mut self, status: &CommandStatus) -> Option<&'static str> {
-        // Service readiness is a settings diagnostic, not a spoken command.
-        // The activation ID can refer to an older command, so inspect scope too.
-        if status.activation_id == 0 || status.error_scope == Some(CommandErrorScope::Service) {
+fn current_feedback(
+    mut event: CommandFeedback,
+    latest: Option<CommandFeedback>,
+) -> Option<CommandFeedback> {
+    if let Some(latest) = latest {
+        if latest.sequence > event.sequence
+            && (latest.phase == CommandFeedbackPhase::Dismissed
+                || latest.activation_id != event.activation_id)
+        {
             return None;
         }
-        let key = match status.phase {
-            CommandPhase::Activated => "agent.activated",
-            CommandPhase::Transcribing if status.activation_id > 0 => "agent.processing",
-            CommandPhase::Deciding | CommandPhase::Executing => "agent.processing",
-            CommandPhase::Succeeded => "agent.succeeded",
-            CommandPhase::Failed => "agent.failed",
-            _ => return None,
+        let expired = match latest.phase {
+            CommandFeedbackPhase::Succeeded => latest.age_ms >= 5_000,
+            CommandFeedbackPhase::Failed => latest.age_ms >= 9_000,
+            _ => false,
         };
-        let next = (status.activation_id, key);
-        if self.last == Some(next) {
+        if latest.activation_id == event.activation_id && expired {
             return None;
         }
-        self.last = Some(next);
-        Some(key)
+        if latest.sequence == event.sequence {
+            event.age_ms = latest.age_ms;
+        }
     }
+    Some(event)
 }
 
 impl Controller {
@@ -36,65 +34,55 @@ impl Controller {
         if self.notifications_started.swap(true, Ordering::AcqRel) {
             return;
         }
-        let (sender, receiver) = std::sync::mpsc::sync_channel::<(String, String)>(1);
-        // OS notification APIs can block. Never put them on a Tokio/audio
-        // worker, and never accumulate unbounded threads or notification jobs.
-        if std::thread::Builder::new()
-            .name("babel-notifications".into())
-            .spawn(move || {
-                #[cfg(target_os = "linux")]
-                let mut replacement = None;
-                while let Ok((summary, body)) = receiver.recv() {
-                    let mut notification = notify_rust::Notification::new();
-                    notification
-                        .appname("Babel")
-                        .summary(&summary)
-                        .body(&body)
-                        .timeout(3500);
-                    #[cfg(target_os = "linux")]
-                    if let Some(id) = replacement {
-                        notification.id(id);
-                    }
-                    #[cfg(target_os = "linux")]
-                    {
-                        replacement = notification.show().ok().map(|handle| handle.id());
-                    }
-                    #[cfg(not(target_os = "linux"))]
-                    let _ = notification.show();
-                }
-            })
-            .is_err()
-        {
-            return;
-        }
+        // Subscribe before spawning so even an immediate activation + success
+        // remains visible. Subscription intentionally does not replay history.
+        let mut events = self.commands.subscribe_feedback();
         let state = Arc::downgrade(&self.state);
         let commands = Arc::downgrade(&self.commands);
         let cancel = self.monitor_cancel.clone();
         tokio::spawn(async move {
-            let mut gate = NotificationGate::default();
-            let mut tick = tokio::time::interval(Duration::from_millis(100));
-            tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            let dispatcher = crate::feedback::FeedbackDispatcher::new();
             loop {
-                tokio::select! { biased; _ = cancel.cancelled() => break, _ = tick.tick() => {} }
+                let received = tokio::select! {
+                    biased;
+                    _ = cancel.cancelled() => break,
+                    event = events.recv() => event,
+                };
                 let (Some(state), Some(commands)) = (state.upgrade(), commands.upgrade()) else {
                     break;
                 };
+                let event = match received {
+                    Ok(event) => Some(event),
+                    // Feedback is bounded independently of audio and tools.
+                    // Catch up directly to the latest state, without replaying
+                    // a backlog of stale activations or losing the final result.
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                        events = commands.subscribe_feedback();
+                        commands.feedback_snapshot()
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                };
+                let Some(event) = event else { continue };
                 let (enabled, language) = {
-                    let state = tokio::select! { biased; _ = cancel.cancelled() => break, state = state.lock() => state };
+                    let state = tokio::select! {
+                        biased;
+                        _ = cancel.cancelled() => break,
+                        state = state.lock() => state,
+                    };
                     (
                         state.config.agent.desktop_notifications,
                         crate::i18n::resolve_language(&state.config.interface.language),
                     )
                 };
-                let status = commands.status();
-                let key = gate.next(&status);
-                if enabled && let Some(key) = key {
-                    let _ = sender.try_send((
-                        format!("Babel · {}", crate::i18n::text(&language, key)),
-                        crate::i18n::text(&language, "agent.details"),
-                    ));
+                if enabled {
+                    if let Some(event) = current_feedback(event, commands.feedback_snapshot()) {
+                        dispatcher.send(event, &language);
+                    }
+                } else {
+                    dispatcher.dismiss();
                 }
             }
+            dispatcher.dismiss();
         });
     }
 }
@@ -102,44 +90,43 @@ impl Controller {
 #[cfg(test)]
 mod tests {
     use super::*;
+
     #[test]
-    fn notifications_coalesce_processing_and_failures_without_exposing_speech() {
-        let mut gate = NotificationGate::default();
-        let mut status = CommandStatus {
-            phase: CommandPhase::Listening,
-            wake_name: "Babel".into(),
-            microphone_active: true,
+    fn delayed_feedback_consumer_keeps_fresh_lifecycle_but_not_expired_or_dismissed_commands() {
+        let activated = CommandFeedback {
+            activation_id: 1,
             sequence: 1,
-            activation_id: 0,
-            command: None,
-            tool: None,
-            result: None,
-            error: None,
-            error_scope: None,
-            dropped_frames: 0,
-            whisper_endpoint: None,
-            needle_endpoint: None,
+            phase: CommandFeedbackPhase::Activated,
+            age_ms: 0,
         };
-        assert!(gate.next(&status).is_none());
-        status.phase = CommandPhase::Failed;
-        assert!(gate.next(&status).is_none());
-        status.activation_id = 1;
-        status.phase = CommandPhase::Activated;
-        assert_eq!(gate.next(&status), Some("agent.activated"));
-        status.phase = CommandPhase::Deciding;
-        assert_eq!(gate.next(&status), Some("agent.processing"));
-        status.phase = CommandPhase::Executing;
-        assert!(gate.next(&status).is_none());
-        status.phase = CommandPhase::Succeeded;
-        assert_eq!(gate.next(&status), Some("agent.succeeded"));
-        status.phase = CommandPhase::Failed;
-        status.error_scope = Some(CommandErrorScope::Service);
-        assert!(
-            gate.next(&status).is_none(),
-            "historical activation must not turn a readiness error into a command notification"
+        let mut latest = CommandFeedback {
+            phase: CommandFeedbackPhase::Succeeded,
+            sequence: 3,
+            age_ms: 200,
+            ..activated
+        };
+        assert_eq!(current_feedback(activated, Some(latest)), Some(activated));
+        assert_eq!(
+            current_feedback(
+                CommandFeedback {
+                    age_ms: 0,
+                    ..latest
+                },
+                Some(latest)
+            ),
+            Some(latest)
         );
-        status.error_scope = Some(CommandErrorScope::Command);
-        assert_eq!(gate.next(&status), Some("agent.failed"));
-        assert!(gate.next(&status).is_none());
+        latest.age_ms = 5_000;
+        assert!(current_feedback(activated, Some(latest)).is_none());
+        assert!(current_feedback(latest, Some(latest)).is_none());
+        latest.phase = CommandFeedbackPhase::Failed;
+        assert!(current_feedback(latest, Some(latest)).is_some());
+        latest.age_ms = 9_000;
+        assert!(current_feedback(latest, Some(latest)).is_none());
+        latest.phase = CommandFeedbackPhase::Dismissed;
+        assert!(current_feedback(activated, Some(latest)).is_none());
+        latest.phase = CommandFeedbackPhase::Activated;
+        latest.activation_id = 2;
+        assert!(current_feedback(activated, Some(latest)).is_none());
     }
 }

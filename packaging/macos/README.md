@@ -1,6 +1,6 @@
 # macOS application and driver installer
 
-`build.py` packages prebuilt executable `babel` and `babel-tray` binaries with
+`build.py` packages prebuilt executable `babel`, `babel-tray` and `babel-feedback` binaries with
 the BabelAudio driver package from `native/macos/build.py`. It creates
 `Babel.app`, a combined `Babel-<version>-macos-<architecture>.pkg`,
 `SHA256SUMS.txt` and `manifest.json`. Both components are mandatory in the
@@ -23,7 +23,7 @@ rustup target add aarch64-apple-darwin x86_64-apple-darwin
 MACOSX_DEPLOYMENT_TARGET=14.2 cargo build --locked --release --bins --target aarch64-apple-darwin
 MACOSX_DEPLOYMENT_TARGET=14.2 cargo build --locked --release --bins --target x86_64-apple-darwin
 mkdir -p packaging/macos/universal-bin
-for binary in babel babel-tray; do
+for binary in babel babel-tray babel-feedback; do
   lipo -create "target/aarch64-apple-darwin/release/$binary" \
     "target/x86_64-apple-darwin/release/$binary" \
     -output "packaging/macos/universal-bin/$binary"
@@ -89,7 +89,7 @@ requests a dynamic dashboard port. It does not write beside its executable.
 
 The bundle includes:
 
-- `Contents/MacOS/{babel,babel-tray}`;
+- `Contents/MacOS/{babel,babel-tray,babel-feedback}`;
 - `Contents/Resources/drivers/macos/BabelAudio.pkg` and `uninstall.sh`, matching
   the native-device discovery paths used by the application;
 - driver licenses/instructions and the repository's `docs/*.md` guides;

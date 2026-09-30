@@ -53,7 +53,7 @@ launcher usa um stub que só registra argumentos, sem iniciar Babel ou áudio.
 sudo apt install ./babel-audio_0.1.0_amd64.deb
 ```
 
-O pacote instala `babel`, `babel-tray` e `babel-launch` em `/usr/bin`, uma entrada
+O pacote instala `babel`, `babel-tray`, `babel-feedback` e `babel-launch` em `/usr/bin`, uma entrada
 **Babel** no menu de aplicativos e o ícone. Documentos e o manifesto do conteúdo
 ficam em `/usr/share/doc/babel-audio`; os motores Whisper, llama.cpp e Piper ficam em
 `/usr/share/babel/local-runtime/linux-x86_64`, junto das bibliotecas, dados e licenças.
