@@ -55,22 +55,33 @@ test('voice settings save independently while the audio/session fieldset is disa
   const p = await page(t);
   assert.equal(p.byId('settings').disabled, true);
   assert.equal(p.byId('agent-fields').disabled, false);
+  assert.equal(p.byId('agent-enabled').disabled, false);
+  assert.equal(p.byId('agent-enabled').checked, true);
   p.byId('speaker-target_language').value = 'ja-JP';
   assert.equal(p.byId('agent-min_confidence').min, '0');
   assert.equal(p.byId('agent-min_confidence').max, '1');
   assert.equal(p.byId('agent-min_confidence').value, '0.85');
   p.set('agent-wake_name', 'Atlas'); p.set('agent-desktop_notifications', false); p.set('agent-max_calls', 2); p.set('agent-min_confidence', 0.70);
-  await p.save();
+  p.set('agent-enabled', false);
+  assert.equal(p.config().enabled, true, 'the toggle only updates the draft before saving');
+  const saving = p.save();
+  assert.equal(p.byId('agent-enabled').disabled, true, 'the header toggle is also locked during a save');
+  await saving;
+  assert.equal(p.config().enabled, false);
+  assert.equal(p.byId('agent-enabled').disabled, false);
+  assert.equal(p.byId('agent-enabled').checked, false);
   assert.equal(p.config().wake_name, 'Atlas'); assert.equal(p.config().desktop_notifications, false); assert.equal(p.config().max_calls, 2); assert.equal(p.config().min_confidence, 0.70);
   assert.equal(p.calls.find(c => c.path === '/api/agent' && c.request.method === 'PUT').request.headers['If-Match'], '"7"');
   assert.equal(p.byId('speaker-target_language').value, 'ja-JP');
   assert.equal(p.calls.some(c => ['/api/config', '/api/start', '/api/stop'].includes(c.path)), false);
   assert.equal(p.calls.some(c => c.path.endsWith('/integrations/test')), false);
   for (const confidence of [0, 1]) {
+    p.set('agent-enabled', Boolean(confidence));
     p.set('agent-min_confidence', confidence);
     assert.equal(p.byId('agent-min_confidence').checkValidity(), true);
     await p.save();
     assert.equal(p.config().min_confidence, confidence);
+    assert.equal(p.config().enabled, Boolean(confidence));
     assert.equal(p.byId('speaker-target_language').value, 'ja-JP');
   }
 });

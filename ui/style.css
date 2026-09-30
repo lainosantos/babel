@@ -328,6 +328,7 @@ footer { display: flex; justify-content: space-between; gap: 20px; padding: 28px
 /* Voice commands have their own live state, independently of the session form. */
 .agent-settings > .field-hint { max-width: 94ch; margin: -7px 0 25px; }
 .agent-settings .section-heading { align-items: flex-start; }
+.agent-heading-controls { display: flex; align-items: center; gap: 16px; margin-left: auto; }
 .agent-primary-fields { display: grid; grid-template-columns: minmax(0, 1fr) minmax(180px, 1fr); align-items: center; gap: 24px; }
 .agent-primary-fields .checkbox-label { padding-top: 0; }
 .agent-stage { flex-shrink: 0; max-width: 34ch; padding: 5px 9px; border-radius: 5px; background: #f2f5f9; color: #61738d; font-size: 11px; line-height: 1.65; text-align: right; }

@@ -9,7 +9,7 @@
   const activePhases = new Set(['activated', 'transcribing', 'deciding', 'executing']);
   const visiblePhases = new Set([...activePhases, 'succeeded', 'failed']);
   const basicFields = [
-    ['enabled', 'agent.enabled', 'checkbox'], ['wake_name', 'agent.wake_name', 'text', { maxlength: 60, required: true }], ['desktop_notifications', 'agent.desktop_notifications', 'checkbox'],
+    ['wake_name', 'agent.wake_name', 'text', { maxlength: 60, required: true }], ['desktop_notifications', 'agent.desktop_notifications', 'checkbox'],
   ];
   const serviceFields = [
     ['services_directory', 'agent.services_directory', 'text', { maxlength: 4096, autocomplete: 'off', spellcheck: 'false' }],
@@ -66,6 +66,7 @@
   function markDirty() { state.dirty = true; message('notice', ''); controls(); }
   function controls() {
     byId('agent-fields').disabled = !state.config || state.busy || !state.authenticated;
+    byId('agent-enabled').disabled = byId('agent-fields').disabled;
     byId('agent-save').disabled = !state.config || !state.dirty || state.busy || state.conflict || !state.authenticated;
     byId('agent-save-state').textContent = t(state.dirty ? 'agent.unsaved_state' : 'agent.saved_state');
     byId('agent-save-state').classList.toggle('dirty', state.dirty);
@@ -122,6 +123,7 @@
     return value;
   }
   function renderFields() {
+    byId('agent-enabled').checked = Boolean(state.draft.enabled);
     for (const [containerId, fields] of [['agent-primary-fields', basicFields], ['agent-service-fields', serviceFields], ['agent-timing-fields', timingFields]]) {
       const container = byId(containerId); container.replaceChildren();
       for (const field of fields) {
@@ -378,6 +380,9 @@
     } catch (error) { state.connectionError = error.message; state.renderedStatus = null; delete byId('agent-summary').dataset.i18n; byId('agent-summary').textContent = t('agent.unavailable'); byId('agent-summary').dataset.stage = 'unavailable'; if (!byId('agent-activity').hidden) { byId('agent-activity-title').textContent = t('agent.unavailable'); byId('agent-activity-detail').textContent = error.message; } message('error', error.message); }
     finally { state.polling = false; }
   }
+  byId('agent-enabled').addEventListener('change', event => {
+    state.draft.enabled = event.target.checked; markDirty();
+  });
   byId('agent-form').addEventListener('submit', event => {
     event.preventDefault();
     if (state.conflict || !state.dirty || !event.target.reportValidity()) return;
