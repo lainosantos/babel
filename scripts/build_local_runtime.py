@@ -144,12 +144,29 @@ def verify_patch(directory, patch):
     run("git", "-C", directory, "apply", "--reverse", "--check", patch)
 
 
+def windows_cmake_generator():
+    # Hosted Windows images can upgrade VS independently of the runner label.
+    # Match the installed compiler to a generator actually supported by CMake.
+    vswhere = Path(os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)")) / "Microsoft Visual Studio/Installer/vswhere.exe"
+    component = "Microsoft.VisualStudio.Component.VC.Tools." + ("ARM64" if host()[1] == "aarch64" else "x86.x64")
+    version = run(vswhere, "-latest", "-products", "*", "-requires", component,
+                  "-property", "installationVersion", capture_output=True, text=True).stdout.strip()
+    major = version.split(".")[0]
+    if not major.isdigit():
+        raise RuntimeError(f"Visual Studio with {component} was not found")
+    capabilities = json.loads(run("cmake", "-E", "capabilities", capture_output=True, text=True).stdout)
+    matches = [item["name"] for item in capabilities.get("generators", [])
+               if item["name"].startswith(f"Visual Studio {major} ")]
+    if len(matches) != 1:
+        raise RuntimeError(f"Installed CMake has no matching generator for Visual Studio {version}; update CMake")
+    return matches[0]
+
+
 def cmake(source, build, extra, jobs, targets):
     common = ["-DCMAKE_BUILD_TYPE=Release", "-DCMAKE_POLICY_DEFAULT_CMP0091=NEW", "-DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded", "-DCMAKE_BUILD_WITH_INSTALL_RPATH=ON"]
     if sys.platform == "win32":
-        # The ARM runner defaults to NMake, which rejects -A and does not set
-        # up MSVC itself. Both hosted Windows images supply VS 2022.
-        common += ["-G", "Visual Studio 17 2022", "-A", "ARM64" if host()[1] == "aarch64" else "x64"]
+        # NMake rejects -A and does not initialize the MSVC environment itself.
+        common += ["-G", windows_cmake_generator(), "-A", "ARM64" if host()[1] == "aarch64" else "x64"]
         # Existing native engines use narrow argv/filesystem paths. Windows
         # 10 1903+ UTF-8 activation preserves non-ASCII user/model directories.
         common += [f'-DCMAKE_EXE_LINKER_FLAGS=/MANIFEST:EMBED /MANIFESTINPUT:"{ROOT / "scripts/windows_utf8.manifest"}"']
@@ -318,7 +335,7 @@ def build(args):
             copy_regular(path, payload / "sources/scripts" / path.name)
         for patch in PATCHES.values():
             copy_regular(ROOT / "scripts/patches" / patch, payload / "sources/scripts/patches" / patch)
-        (payload / "sources/README.txt").write_text("Corresponding source for the separate GPL-3.0 Piper/eSpeak subprocess is included here. Extract the two source archives and apply scripts/patches/piper-managed.patch. scripts/build_local_runtime.py and scripts/local_runtime.lock.json record the exact build flags and all dependency hashes. Build requires CMake 3.26+, a C++17 compiler, Git and Python 3.11+; none is required by the installed application. Whisper/llama.cpp/ONNX Runtime are MIT licensed. The Babel application communicates through separate-process IPC. Voice model licenses are supplied with model downloads.\n")
+        (payload / "sources/README.txt").write_text("Corresponding source for the separate GPL-3.0 Piper/eSpeak subprocess is included here. Extract the two source archives and apply scripts/patches/piper-managed.patch. scripts/build_local_runtime.py and scripts/local_runtime.lock.json record the exact build flags and all dependency hashes. Build requires CMake 3.26+ (4.2+ when using Visual Studio 2026), a C++17 compiler, Git and Python 3.11+; none is required by the installed application. Whisper/llama.cpp/ONNX Runtime are MIT licensed. The Babel application communicates through separate-process IPC. Voice model licenses are supplied with model downloads.\n")
         if system == "windows":
             windows_runtime(payload, arch)
         elif system == "macos":

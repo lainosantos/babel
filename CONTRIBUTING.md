@@ -77,8 +77,10 @@ code limited to OS integration that the portable Rust core cannot provide.
 
 Ordinary pushes and pull requests run tests, lint/format checks and Conventional
 Commit validation. They do not build installer payloads. Release builds are
-triggered by version tags in the form `v<SemVer>`, matching the package version
-in `Cargo.toml`. A successful tagged run creates a GitHub Release and attaches
+triggered by stable version tags in the form `vX.Y.Z`, matching the package
+version in `Cargo.toml`. Each numeric component must be at most 65535;
+prerelease suffixes and build metadata are currently unsupported by the native
+installers. A successful tagged run creates a GitHub Release and attaches
 installers and integrity artifacts. Manual package workflows remain available
 for development inspection. See [installer details](docs/ci-installers.md).
 

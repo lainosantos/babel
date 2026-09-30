@@ -31,7 +31,8 @@ jobs:
         with:
           python-version: '3.12'
       - name: Install build-only CMake
-        run: python -m pip install cmake==3.31.10
+        # VS 2026 on the ARM image needs the generator added in CMake 4.2.
+        run: python -m pip install cmake==${{ matrix.os == 'windows-11-arm' && '4.2.3' || '3.31.10' }}
       - name: Build pinned native inference engines without installed AI services
         run: python scripts/build_local_runtime.py --output artifacts/local-runtime --jobs 3
       - uses: actions/cache@v4

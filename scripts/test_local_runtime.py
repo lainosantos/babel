@@ -36,11 +36,29 @@ def fixture(root, system="linux", arch="x86_64"):
 class RuntimeTests(unittest.TestCase):
     def test_windows_cmake_explicitly_selects_a_generator_supporting_architecture(self):
         for architecture, platform in [("aarch64", "ARM64"), ("x86_64", "x64")]:
-            with self.subTest(architecture=architecture), mock.patch.object(build.sys, "platform", "win32"), mock.patch.object(build, "host", return_value=("windows", architecture)), mock.patch.object(build, "run") as run:
+            with self.subTest(architecture=architecture), mock.patch.object(build.sys, "platform", "win32"), mock.patch.object(build, "host", return_value=("windows", architecture)), mock.patch.object(build, "windows_cmake_generator", return_value="Visual Studio 17 2022"), mock.patch.object(build, "run") as run:
                 build.cmake(Path("source"), Path("build"), [], 2, ["whisper-server"])
                 args = run.call_args_list[0].args
                 self.assertEqual(args[args.index("-G") + 1], "Visual Studio 17 2022")
                 self.assertEqual(args[args.index("-A") + 1], platform)
+
+    def test_windows_generator_matches_installed_visual_studio_and_cmake(self):
+        generators = json.dumps({"generators": [{"name": name} for name in ["NMake Makefiles", "Visual Studio 17 2022", "Visual Studio 18 2026"]]})
+        for architecture, component, version, expected in [
+            ("aarch64", "ARM64", "18.10.12210.168", "Visual Studio 18 2026"),
+            ("x86_64", "x86.x64", "17.14.36811.4", "Visual Studio 17 2022"),
+        ]:
+            with self.subTest(architecture=architecture), mock.patch.object(build, "host", return_value=("windows", architecture)), mock.patch.object(build, "run", side_effect=[mock.Mock(stdout=version), mock.Mock(stdout=generators)]) as run:
+                self.assertEqual(build.windows_cmake_generator(), expected)
+                self.assertIn("Microsoft.VisualStudio.Component.VC.Tools." + component, run.call_args_list[0].args)
+
+    def test_windows_generator_explains_missing_compiler_or_outdated_cmake(self):
+        with mock.patch.object(build, "host", return_value=("windows", "aarch64")), mock.patch.object(build, "run", return_value=mock.Mock(stdout="")):
+            with self.assertRaisesRegex(RuntimeError, "Visual Studio.*was not found"):
+                build.windows_cmake_generator()
+        with mock.patch.object(build, "host", return_value=("windows", "aarch64")), mock.patch.object(build, "run", side_effect=[mock.Mock(stdout="18.10.12210.168"), mock.Mock(stdout='{"generators": [{"name": "Visual Studio 17 2022"}]}')]):
+            with self.assertRaisesRegex(RuntimeError, "update CMake"):
+                build.windows_cmake_generator()
 
     def test_executable_smoke_reports_bounded_native_failure_output(self):
         command = [sys.executable, "-c", "import sys; sys.stderr.write('x'*20000+'native failure sentinel'); sys.exit(7)"]

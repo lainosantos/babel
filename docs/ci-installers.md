@@ -5,12 +5,21 @@ interface tests, CLI smoke checks and Conventional Commit checks. They do not
 build installer payloads. New commits must follow Conventional Commits; existing
 history is not rewritten to adopt that policy.
 
-Pushing a release tag in the form `v<SemVer>` triggers the release workflow.
+Pushing a stable release tag in the form `vX.Y.Z` triggers the release workflow.
+Its version must match `Cargo.toml`, with each numeric component at most 65535.
+Prerelease suffixes and build metadata are currently rejected before building
+because the native installer version fields do not support them.
 After its required checks pass, it builds installers and native drivers,
 creates the corresponding GitHub Release and attaches the packages and
 integrity files. The reusable native-driver/installer workflow also supports
 manual package builds. Manual builds are useful for inspection and do not
 replace the tagged-release path. See [contribution and release policy](../CONTRIBUTING.md).
+
+Publication waits for every required platform artifact and records all files
+in `release-manifest.json` and `SHA256SUMS.txt`. A partial draft can be resumed
+only when its existing assets belong to the prepared set; unexpected files
+stop publication without deleting them. Published releases are never replaced
+by a workflow rerun.
 
 All jobs use GitHub-hosted runners. No `self-hosted` runner, manual runner WDK
 installation or AI-provider API key is required. The repository must include
@@ -58,6 +67,11 @@ Piper from archives pinned by commit, size and SHA-256 in
 | macOS Intel | `macos-15-intel` |
 | Windows x64 | `windows-2022` |
 | Windows ARM64 | `windows-11-arm` |
+
+Windows builds discover the installed Visual Studio version with `vswhere` and
+select a matching CMake generator. The ARM64 runner uses CMake 4.2.3 for Visual
+Studio 2026; the other runners retain CMake 3.31.10. These are build tools only,
+not dependencies of the installed application.
 
 Each payload includes native libraries, eSpeak data, licenses, corresponding
 Piper/eSpeak sources and an integrity manifest. Windows runtimes privately
