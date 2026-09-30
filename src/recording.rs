@@ -112,8 +112,23 @@ impl SessionAudioRecorder {
 
     /// Supervisor closes all senders after capture stops. EOF drains queued
     /// frames and finalizes the WAV; cancelling this worker early loses its tail.
-    pub async fn run(mut self, mut records: mpsc::Receiver<AudioRecord>) -> Result<()> {
-        let result = self.receive(&mut records).await;
+    pub async fn run(self, records: mpsc::Receiver<AudioRecord>) -> Result<()> {
+        self.run_with_history(records, std::iter::empty()).await
+    }
+    /// Historical originals precede live frames on the same monotonic clock.
+    /// The iterator materializes only one frame at a time, keeping PCM bounded.
+    pub async fn run_with_history(
+        mut self,
+        mut records: mpsc::Receiver<AudioRecord>,
+        history: impl IntoIterator<Item = AudioRecord>,
+    ) -> Result<()> {
+        let result = async {
+            for frame in history {
+                self.append(frame).await?;
+            }
+            self.receive(&mut records).await
+        }
+        .await;
         // Try to leave already accepted samples playable even when a later
         // record is invalid. A disk failure remains an observable session error.
         let finalized = self.finalize().await;
@@ -280,6 +295,44 @@ mod tests {
         assert_eq!(wav.spec().channels, 1);
         assert_eq!(wav.spec().bits_per_sample, 16);
         wav.samples::<i16>().map(Result::unwrap).collect()
+    }
+    #[tokio::test]
+    async fn historical_prefix_and_live_audio_share_one_mixed_timeline_without_duplicates() {
+        let directory = tempfile::tempdir().unwrap();
+        let origin = Instant::now() - Duration::from_secs(3);
+        let recorder =
+            SessionAudioRecorder::create(directory.path(), "late-start", origin, true, true)
+                .await
+                .unwrap();
+        let path = recorder.path().to_owned();
+        let past = [
+            record(RecordingLane::Microphone, origin, 0, vec![1000; 16000]),
+            record(RecordingLane::Speaker, origin, 0, vec![3000; 16000]),
+        ];
+        let (tx, rx) = mpsc::channel(4);
+        tx.send(record(
+            RecordingLane::Microphone,
+            origin,
+            1000,
+            vec![2000; 16000],
+        ))
+        .await
+        .unwrap();
+        tx.send(record(
+            RecordingLane::Speaker,
+            origin,
+            1000,
+            vec![4000; 16000],
+        ))
+        .await
+        .unwrap();
+        drop(tx);
+        recorder.run_with_history(rx, past).await.unwrap();
+        let samples = pcm(&path);
+        assert_eq!(samples.len(), 32000);
+        assert!(samples[..16000].iter().all(|&sample| sample == 2000));
+        assert!(samples[16000..].iter().all(|&sample| sample == 3000));
+        assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 1);
     }
     #[tokio::test]
     async fn merged_wave_overlaps_lanes_and_absorbs_small_capture_jitter() {

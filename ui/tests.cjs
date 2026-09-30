@@ -24,6 +24,7 @@ function defaults() {
       } },
     files: { base_path: '/home/test/Babel', name_pattern: '{date}-{time}-{session}-{id}' },
     recording: { enabled: false, microphone: true, speaker: true, directory: 'recordings' },
+    history: { enabled: true, duration_secs: 600 },
   };
 }
 async function settle(predicate, message = 'condition was not reached') {
@@ -61,6 +62,8 @@ async function page(t, options = {}) {
   let firstStatus = true;
   let running = false;
   let localRuntime = { phase: 'idle', message: null, download: null, services: [] };
+  let audioHistory = { enabled: true, capacity_secs: 600, available_secs: 180, microphone_secs: 180, speaker_secs: 90, ...options.history };
+  let historySession = { history_included_secs: 0, history_transcription_pending: false, ...options.historySession };
   let routingActive = true;
   let routingError = null;
   let sessionName = null;
@@ -104,7 +107,7 @@ async function page(t, options = {}) {
       if (firstStatus && initialChange) { initialChange(config); revision++; }
       firstStatus = false;
       const route = name => ({ ...metrics, state: running && config[name].enabled ? 'streaming' : routingActive || running ? 'passthrough' : 'stopped', ...routeStatuses[name] });
-      value = { local_runtime: localRuntime, running, routing_active: routingActive, routing_error: routingError, config_revision: revision, session_name: sessionName, session_id: sessionId, microphone: route('microphone'), speaker: route('speaker'), last_error: null };
+      value = { ...historySession, history: audioHistory, local_runtime: localRuntime, running, routing_active: routingActive, routing_error: routingError, config_revision: revision, session_name: sessionName, session_id: sessionId, microphone: route('microphone'), speaker: route('speaker'), last_error: null };
     }
     else if (parsed.pathname === '/api/start') { if (startRequest) { const response = await startRequest(); if (response instanceof Response) return response; } running = true; sessionName = body?.name || 'Sessão automática'; sessionId = 'fixture-session-id'; }
     else if (parsed.pathname === '/api/stop') running = false;
@@ -121,7 +124,7 @@ async function page(t, options = {}) {
   window.eval(fs.readFileSync(path.join(__dirname, 'workspace.js'), 'utf8'));
   await settle(() => !byId('start').disabled && calls.some(call => call.path === '/api/platform'), 'dashboard did not initialize');
   const set = (id, value) => { const input = byId(id); if (input.type === 'checkbox') input.checked = value; else input.value = value; input.dispatchEvent(new window.Event('input', { bubbles: true })); };
-  return { window, doc, byId, calls, set, runtime: status => { localRuntime = status; }, config: () => config, poll: () => interval(), externalChange: callback => { callback(config); revision++; }, filePaths: handler => { filePathsHandler = handler; }, platformFailure: failure => { platformFailure = failure; }, routing: (active, error = null) => { routingActive = active; routingError = error; }, routeStatus: (route, status) => { routeStatuses[route] = status; } };
+  return { window, doc, byId, calls, set, history: status => { audioHistory = status; }, historySession: status => { historySession = status; }, runtime: status => { localRuntime = status; }, config: () => config, poll: () => interval(), externalChange: callback => { callback(config); revision++; }, filePaths: handler => { filePathsHandler = handler; }, platformFailure: failure => { platformFailure = failure; }, routing: (active, error = null) => { routingActive = active; routingError = error; }, routeStatus: (route, status) => { routeStatuses[route] = status; } };
 }
 
 test('the real dashboard separates routing, translation, transcription and recording into six workspace destinations', async t => {
@@ -332,7 +335,7 @@ test('starting locks configuration and stopping unlocks it; device refresh retai
   await settle(() => !p.byId('stop').hidden);
   assert.equal(p.byId('settings').disabled, true);
   assert.equal(p.byId('session-name').disabled, true);
-  assert.equal(p.calls.find(call => call.path === '/api/start').body, undefined);
+  assert.deepEqual(p.calls.find(call => call.path === '/api/start').body, { history_seconds: 0 });
   assert.equal(p.byId('session-name').value, '', 'an automatic session must not fill the next session name');
   p.byId('stop').click();
   await settle(() => p.byId('stop').hidden);
@@ -1455,4 +1458,133 @@ test('model preparation keeps status polling available and session start can be 
   assert.equal(p.byId('cancel-start').hidden, true);
   assert.equal(p.byId('error').hidden, true);
   assert.equal(p.byId('stop').hidden, true);
+});
+
+test('history is opt-in per start with shorter availability and the existing revision check', async t => {
+  const p = await page(t, { language: 'en' });
+  assert.equal(p.byId('history-include').checked, false);
+  assert.equal(p.byId('history-include').disabled, true, 'translation alone cannot consume history');
+  assert.equal(p.byId('history-request-minutes').value, '10');
+  assert.equal(p.byId('history-duration-minutes').value, '10');
+  p.set('recording-enabled', true);
+  p.set('recording-speaker', false);
+  p.set('history-include', true);
+  p.set('session-name', 'Meeting with history');
+  assert.match(p.byId('history-available').textContent, /microphone 3 min 0 s; incoming audio 1 min 30 s/);
+  assert.match(p.byId('history-availability-hint').textContent, /only the available portion/);
+  p.byId('start').click();
+  await settle(() => !p.byId('stop').hidden);
+  const start = p.calls.find(call => call.path === '/api/start');
+  assert.deepEqual(start.body, { name: 'Meeting with history', history_seconds: 600 });
+  assert.equal(start.options.headers['If-Match'], '"1"');
+  assert.deepEqual(p.config().history, { enabled: true, duration_secs: 600 });
+  assert.equal(p.byId('history-include').checked, false);
+  p.byId('stop').click();
+  await settle(() => p.byId('stop').hidden);
+  p.byId('start').click();
+  await settle(() => !p.byId('stop').hidden);
+  assert.equal(p.calls.filter(call => call.path === '/api/start')[1].body.history_seconds, 0);
+});
+
+test('history request is session-only while retention serializes minutes as seconds', async t => {
+  const p = await page(t);
+  p.set('transcription-enabled', true);
+  p.set('history-duration-minutes', 5.5);
+  p.byId('save').click();
+  await settle(() => p.byId('save').disabled && !p.byId('start').disabled);
+  assert.deepEqual(p.config().history, { enabled: true, duration_secs: 330 });
+  p.set('history-include', true);
+  p.set('history-request-minutes', 1.5);
+  assert.equal(p.byId('save').disabled, true);
+  assert.equal(p.byId('history-request-minutes').max, '5.5');
+  p.byId('start').click();
+  await settle(() => !p.byId('stop').hidden);
+  assert.deepEqual(p.calls.find(call => call.path === '/api/start').body, { history_seconds: 90 });
+  assert.deepEqual(p.config().history, { enabled: true, duration_secs: 330 });
+});
+
+test('history validates durations without clamping invalid input or sending a start', async t => {
+  const p = await page(t, { language: 'en' });
+  p.set('recording-enabled', true);
+  p.set('history-include', true);
+  for (const value of ['', '0', '-1', '10.01', '0.001', 'abc']) {
+    p.set('history-request-minutes', value);
+    p.byId('start').click();
+    assert.equal(p.calls.some(call => call.path === '/api/start'), false, `invalid request ${value}`);
+    assert.equal(p.byId('history-start-options').open, true);
+    assert.equal(p.byId('history-request-error').hidden, false);
+  }
+  p.set('history-request-minutes', 10);
+  for (const value of ['', '0', '-1', '61', '0.001']) {
+    p.set('history-duration-minutes', value);
+    p.byId('save').click();
+    assert.equal(p.calls.some(call => call.options.method === 'PUT'), false, `invalid retention ${value}`);
+    assert.equal(p.window.BabelWorkspace.current, 'settings');
+    assert.equal(p.byId('history-retention-error').hidden, false);
+  }
+  p.set('history-duration-minutes', 2);
+  assert.equal(p.byId('history-request-minutes').value, '10');
+  p.byId('start').click();
+  assert.equal(p.calls.some(call => call.path === '/api/start'), false);
+  assert.match(p.byId('history-request-error').textContent, /at most 2 minutes/);
+});
+
+test('history requires available selected recording or STT audio and reports start failures', async t => {
+  const p = await page(t, { language: 'en', history: { microphone_secs: 0, speaker_secs: 42 }, startRequest: async () => new Response(JSON.stringify({ error: 'History is no longer available. Start without history.' }), { status: 400, headers: { 'Content-Type': 'application/json' } }) });
+  p.set('recording-enabled', true);
+  p.set('recording-speaker', false);
+  assert.equal(p.byId('history-include').disabled, true);
+  p.set('transcription-enabled', true);
+  p.set('transcription-microphone', false);
+  assert.equal(p.byId('history-include').disabled, false);
+  p.set('history-include', true);
+  p.byId('start').click();
+  await settle(() => !p.byId('error').hidden);
+  assert.match(p.byId('error').textContent, /History is no longer available/);
+  assert.equal(p.byId('start').disabled, false);
+  assert.equal(p.byId('history-include').checked, true);
+  p.history({ enabled: true, capacity_secs: 600, available_secs: 0, microphone_secs: 0, speaker_secs: 0 });
+  await p.poll();
+  p.byId('start').click();
+  assert.equal(p.calls.filter(call => call.path === '/api/start').length, 1);
+  assert.match(p.byId('error').textContent, /unavailable for the selected/);
+  p.set('history-include', false);
+  assert.equal(p.byId('history-request-minutes').disabled, true);
+});
+
+test('history shortcut and translated advanced controls preserve keyboard access on each host OS', async t => {
+  const p = await page(t, { language: 'pt' });
+  p.byId('history-start-options').open = true;
+  assert.equal(p.byId('history-advanced-label').textContent, 'Opções avançadas de início');
+  p.byId('history-settings-link').click();
+  assert.equal(p.window.BabelWorkspace.current, 'settings');
+  assert.equal(p.doc.activeElement, p.byId('history-enabled'));
+  assert.equal(p.byId('history-start-options').open, false);
+  p.byId('history-start-options').open = true;
+  p.byId('history-start-options').dispatchEvent(new p.window.KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+  assert.equal(p.byId('history-start-options').open, false);
+  assert.equal(p.doc.activeElement, p.byId('history-start-options').querySelector('summary'));
+  for (const os of ['linux', 'macos', 'windows']) {
+    const platformPage = os === 'linux' ? p : await page(t, { platform: os });
+    platformPage.set('recording-enabled', true);
+    assert.equal(platformPage.byId('history-include').disabled, false, `${os} supports history`);
+  }
+});
+
+test('history transcription progress follows actual session status and clears on stop', async t => {
+  const p = await page(t, { language: 'en', historySession: { history_included_secs: 90, history_transcription_pending: true } });
+  assert.equal(p.byId('history-session-status').hidden, true);
+  p.set('transcription-enabled', true);
+  p.set('history-include', true);
+  p.set('history-request-minutes', 1.5);
+  p.byId('start').click();
+  await settle(() => !p.byId('stop').hidden);
+  assert.equal(p.byId('history-session-status').hidden, false);
+  assert.equal(p.byId('history-session-status').textContent, 'Transcribing 1 min 30 s of recent history. Live audio continues.');
+  p.historySession({ history_included_secs: 90, history_transcription_pending: false });
+  await p.poll();
+  assert.equal(p.byId('history-session-status').textContent, 'Included 1 min 30 s of recent history.');
+  p.byId('stop').click();
+  await settle(() => p.byId('stop').hidden);
+  assert.equal(p.byId('history-session-status').hidden, true);
 });

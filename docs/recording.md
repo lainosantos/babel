@@ -74,6 +74,50 @@ As extensões são adicionadas pelo aplicativo, nas pastas configuradas para cad
 tipo. O token `{id}` é obrigatório para reduzir colisões entre sessões. Arquivos existentes
 nunca são sobrescritos: uma colisão causa erro explícito.
 
+## Incluir áudio anterior ao início
+
+O botão **Iniciar sessão**, o início pela bandeja e `babel run` na CLI sempre
+começam no áudio atual, sem incluir o histórico. A API também começa sem
+histórico quando `history_seconds` é omitido ou vale zero. Para aproveitar
+áudio recente, abra **Opções avançadas de início** ao lado do botão, marque
+**Incluir histórico recente** e informe quantos minutos deseja incluir. O
+padrão é dez minutos, limitado à capacidade configurada. A opção vem desmarcada
+e volta a ficar desmarcada após cada início bem-sucedido.
+
+O painel mostra quanto áudio existe para o microfone e para a saída recebida.
+Só entram no WAV as origens selecionadas em **Gravação**; as seleções de
+**Transcrição** são independentes. Se o histórico disponível for menor que o
+intervalo solicitado, o Babel inclui somente o que ainda está disponível. Sem
+histórico em nenhuma origem selecionada, a opção fica indisponível. O histórico
+é colocado antes do áudio ao vivo no mesmo WAV, preservando a sobreposição das
+origens. Ele não é reproduzido nos dispositivos nem enviado à tradução.
+
+Em **Ajustes → Histórico de áudio recente**, controle a retenção em memória e
+sua capacidade: dez minutos por padrão, de um segundo a sessenta minutos. O
+atalho **Ajustar retenção do histórico** abre esses controles. Salve para aplicar.
+Reduzir a capacidade descarta a parte mais antiga; desativar apaga o histórico.
+Aumentar a capacidade não recupera áudio já descartado.
+
+A retenção acompanha o roteamento enquanto os dispositivos virtuais estão em
+uso. Não cria arquivos nem envia esse histórico para transcrição antes de você
+incluí-lo explicitamente em uma sessão. O áudio continua na memória ao iniciar
+ou encerrar sessões e durante trocas de dispositivos; lacunas de captura não
+são recuperáveis. Fechar o Babel perde todo o histórico. A mesma opção funciona
+no Linux, macOS e Windows.
+
+```toml
+[history]
+enabled = true
+duration_secs = 600
+```
+
+O PCM ocupa até 38,4 MB para dez minutos com as duas origens (mono PCM16 a
+16 kHz), além dos metadados. Durante a inclusão, o trecho selecionado é
+compartilhado com os gravadores/reconhecedores, sem copiar todo o áudio. Se o
+histórico continuar sendo renovado enquanto a inclusão é processada, esse
+trecho pode manter temporariamente mais uma janela de PCM em memória. Ele é
+liberado assim que os trabalhos que o utilizam terminam.
+
 ## Formato e volume
 
 O WAV usa **PCM16 mono a 16 kHz**, sem compressão. É o áudio original que entra no

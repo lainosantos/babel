@@ -44,6 +44,135 @@ async fn next_event(events: &mut mpsc::Receiver<ProviderEvent>) -> ProviderEvent
         .unwrap()
 }
 
+#[tokio::test]
+async fn history_preserves_queued_pcm_and_waits_for_close_stream_metadata() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("ws://{}/v1/listen", listener.local_addr().unwrap());
+    let (release, released) = tokio::sync::oneshot::channel();
+    let server = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        let mut socket = accept_async(stream).await.unwrap();
+        let mut samples = 0;
+        loop {
+            match socket.next().await.unwrap().unwrap() {
+                Message::Binary(bytes) => samples += bytes.len() / 2,
+                Message::Text(text) => {
+                    assert_eq!(
+                        serde_json::from_str::<Value>(&text).unwrap()["type"],
+                        "CloseStream"
+                    );
+                    break;
+                }
+                other => panic!("unexpected history message {other:?}"),
+            }
+        }
+        assert_eq!(samples, 16321);
+        socket
+            .send(Message::Text(
+                final_result(0.9, "Last original.", false)
+                    .to_string()
+                    .into(),
+            ))
+            .await
+            .unwrap();
+        released.await.unwrap();
+        socket
+            .send(Message::Text(
+                json!({"type":"Metadata","duration":1.0200625,"channels":1})
+                    .to_string()
+                    .into(),
+            ))
+            .await
+            .unwrap();
+    });
+    let provider = DeepgramProvider::new(DeepgramSttConfig::default()).unwrap();
+    let (tx, mut rx) = mpsc::channel(2);
+    tx.send(vec![0; 16000]).await.unwrap();
+    tx.send(vec![4000; 321]).await.unwrap();
+    drop(tx);
+    let (events, mut received) = mpsc::channel(8);
+    let worker = tokio::spawn(async move {
+        provider
+            .connection_mode(&url, "synthetic-key", &mut rx, &events, true)
+            .await
+    });
+    assert_eq!(next_event(&mut received).await, ProviderEvent::Connected);
+    assert!(matches!(
+        next_event(&mut received).await,
+        ProviderEvent::Transcript { input: true, .. }
+    ));
+    assert!(
+        !worker.is_finished(),
+        "a final utterance is not end-of-history acknowledgement"
+    );
+    release.send(()).unwrap();
+    timeout(Duration::from_secs(3), worker)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert_eq!(next_event(&mut received).await, ProviderEvent::TurnComplete);
+    server.await.unwrap();
+}
+
+#[tokio::test]
+async fn history_socket_close_without_summary_is_an_error() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("ws://{}/v1/listen", listener.local_addr().unwrap());
+    let server = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        let mut socket = accept_async(stream).await.unwrap();
+        let value = socket.next().await.unwrap().unwrap().into_text().unwrap();
+        assert_eq!(
+            serde_json::from_str::<Value>(&value).unwrap()["type"],
+            "CloseStream"
+        );
+        socket.close(None).await.unwrap();
+    });
+    let provider = DeepgramProvider::new(DeepgramSttConfig::default()).unwrap();
+    let (tx, mut rx) = mpsc::channel(1);
+    drop(tx);
+    let (events, _received) = mpsc::channel(8);
+    assert!(
+        provider
+            .connection_mode(&url, "synthetic-key", &mut rx, &events, true)
+            .await
+            .is_err()
+    );
+    server.await.unwrap();
+}
+
+#[tokio::test]
+async fn history_missing_completion_times_out_as_error() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("ws://{}/v1/listen", listener.local_addr().unwrap());
+    let (flushed, flushed_rx) = tokio::sync::oneshot::channel();
+    let server = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        let mut socket = accept_async(stream).await.unwrap();
+        socket.next().await.unwrap().unwrap(); // CloseStream for empty input.
+        flushed.send(()).unwrap();
+        std::future::pending::<()>().await;
+        drop(socket);
+    });
+    let provider = DeepgramProvider::new(DeepgramSttConfig::default()).unwrap();
+    let (tx, mut rx) = mpsc::channel(1);
+    drop(tx);
+    let (events, _received) = mpsc::channel(8);
+    let worker = tokio::spawn(async move {
+        provider
+            .connection_mode(&url, "synthetic-key", &mut rx, &events, true)
+            .await
+    });
+    flushed_rx.await.unwrap();
+    tokio::task::yield_now().await;
+    tokio::time::pause();
+    tokio::time::advance(Duration::from_secs(121)).await;
+    let error = worker.await.unwrap().unwrap_err();
+    assert!(error.message.contains("acknowledgement timed out"));
+    server.abort();
+}
+
 #[test]
 fn endpoint_and_language_configuration_are_explicit_and_do_not_leak_settings() {
     for invalid in [

@@ -114,7 +114,17 @@ code { font-size: .92em; }
 .optional-label { color: var(--muted); font-size: 10px; font-weight: 450; }
 .session-dock-status { min-width: 0; }
 .session-dock-name { min-width: 0; }
-.session-dock-actions { justify-self: end; }
+.session-dock-actions { position: relative; justify-self: end; }
+.history-start-options { margin-bottom: 7px; text-align: right; }
+.history-start-options > summary { display: inline list-item; color: var(--muted); font-size: 11px; cursor: pointer; }
+.history-start-options[open] > summary { color: var(--accent); }
+.history-start-panel { position: absolute; right: 0; bottom: calc(100% + 12px); width: min(370px, calc(100vw - 40px)); max-height: calc(100dvh - 195px); overflow: auto; padding: 20px; border: 1px solid var(--line); border-radius: 10px; background: var(--panel); box-shadow: 0 8px 30px #192a421a; text-align: left; }
+.history-start-panel .checkbox-label { align-items: flex-start; }
+.history-start-panel .checkbox-label span { line-height: 1.5; }
+.history-start-panel .button { margin: 12px 0 -8px; padding-left: 0; white-space: normal; text-align: left; }
+.history-request-field { margin-top: 18px; }
+.history-request-field input { max-width: 125px; }
+.history-retention-field { max-width: 240px; margin-top: 20px; }
 .session-hint { color: #526279; font-size: 11px; line-height: 1.7; }
 #session-identity { margin-top: 3px; color: var(--accent); font-size: 11px; line-height: 1.6; overflow-wrap: anywhere; }
 .session-dock .primary, .session-dock .stop { min-width: 139px; }

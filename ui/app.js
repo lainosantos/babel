@@ -88,12 +88,14 @@
 
   function readValue(element) {
     if (element.type === 'checkbox') return element.checked;
+    if (element.dataset.minutes !== undefined) return Math.round(Number(element.value) * 60);
     if (element.type === 'number' || element.type === 'range') return Number(element.value);
     return element.value;
   }
 
   function writeValue(element, value) {
     if (element.type === 'checkbox') element.checked = Boolean(value);
+    else if (element.dataset.minutes !== undefined) element.value = value == null ? '' : String(value / 60);
     else element.value = value == null ? '' : String(value);
   }
 
@@ -256,6 +258,7 @@
   function applyConfig(config) {
     if (!config.providers) throw new Error(t("ui.these_settings_use_an_old_format_restart_the_updated_babel_to_load_provider"));
     config.local_runtime ??= { directory: '', threads: 4 };
+    config.history ??= { enabled: true, duration_secs: 600 };
     state.config = config;
     writeValue(byId('files-base_path'), config.files?.base_path ?? '');
     document.querySelectorAll('[data-field]').forEach((element) => {
@@ -267,6 +270,7 @@
       if (element.dataset.deviceDirection) delete element.dataset.initialized;
     });
     syncLocalModes();
+    if (!byId('history-include').checked) byId('history-request-minutes').value = String(Math.min(600, config.history.duration_secs) / 60);
     renderDevices();
     updateProviderControls();
     updateGainLabels();
@@ -586,10 +590,59 @@
     for (const route of routeNames) byId(`${route}-gain-value`).textContent = i18n.number(Number(byId(`${route}-gain`).value), { style: 'percent', maximumFractionDigits: 0 });
   }
 
+  function historySeconds(field) {
+    const seconds = Number(field.value) * 60;
+    return field.value.trim() && Number.isFinite(seconds) && Math.abs(seconds - Math.round(seconds)) < 0.000001 ? Math.round(seconds) : NaN;
+  }
+
+  function historySelectionAvailable() {
+    return byId('history-enabled').checked && state.status?.history?.enabled && routeNames.some(route =>
+      ((byId('recording-enabled').checked && byId(`recording-${route}`).checked) || transcribesRoute(route))
+      && Number(state.status.history[`${route}_secs`]) > 0);
+  }
+
+  function updateHistoryControls(unavailable, running) {
+    const retention = byId('history-duration-minutes');
+    const capacity = historySeconds(retention);
+    const retentionError = !Number.isInteger(capacity) || capacity < 1 || capacity > 3600 ? t('history.retention_invalid') : '';
+    retention.setCustomValidity(retentionError);
+    byId('history-retention-error').textContent = retentionError;
+    byId('history-retention-error').hidden = !retentionError;
+    const include = byId('history-include');
+    const request = byId('history-request-minutes');
+    include.disabled = unavailable || running || (!include.checked && !historySelectionAvailable());
+    request.disabled = unavailable || running || !include.checked;
+    request.max = Number.isInteger(capacity) && capacity > 0 ? String(capacity / 60) : '60';
+    const seconds = historySeconds(request);
+    const requestError = include.checked && (!Number.isInteger(seconds) || seconds < 1 || seconds > capacity || seconds > 3600)
+      ? t('history.request_invalid', { minutes: i18n.number(Number(request.max), { maximumFractionDigits: 4 }) }) : '';
+    request.setCustomValidity(requestError);
+    byId('history-request-error').textContent = requestError;
+    byId('history-request-error').hidden = !requestError;
+    byId('history-start-options').hidden = running || state.starting;
+    byId('history-advanced-label').textContent = t(include.checked ? 'history.advanced_selected' : 'history.advanced');
+    const duration = seconds => {
+      const safe = Number.isFinite(Number(seconds)) ? Math.max(0, Math.floor(Number(seconds))) : 0;
+      return t('history.duration', { minutes: i18n.number(Math.floor(safe / 60)), seconds: i18n.number(safe % 60) });
+    };
+    byId('history-available').textContent = t('history.available', {
+      microphone: duration(state.status?.history?.microphone_secs), speaker: duration(state.status?.history?.speaker_secs),
+    });
+    const reason = !byId('history-enabled').checked || !state.status?.history?.enabled ? 'history.disabled_hint'
+      : !byId('recording-enabled').checked && !byId('transcription-enabled').checked ? 'history.features_hint'
+      : !historySelectionAvailable() ? 'history.empty_hint' : 'history.partial_hint';
+    byId('history-availability-hint').textContent = t(reason);
+    const included = Number(state.status?.history_included_secs);
+    byId('history-session-status').hidden = !running || !(included > 0);
+    const sessionHistoryLabel = included > 0 ? t(state.status?.history_transcription_pending ? 'history.transcribing' : 'history.included', { duration: duration(included) }) : '';
+    if (byId('history-session-status').textContent !== sessionHistoryLabel) byId('history-session-status').textContent = sessionHistoryLabel;
+  }
+
   function updateControls() {
     const running = Boolean(state.status?.running);
     const processingSelected = routeNames.some(route => byId(`${route}-enabled`).checked) || byId('transcription-enabled').checked || byId('recording-enabled').checked;
     const unavailable = state.busy || state.syncing || !state.authenticated || !state.config || !state.status;
+    updateHistoryControls(unavailable, running);
     byId('interface-language').disabled = state.busy || state.syncing || !state.authenticated;
     byId('settings').disabled = running || unavailable;
     byId('session-name').disabled = running || unavailable;
@@ -734,19 +787,36 @@
     if (state.configConflict || state.configRevision === null) return;
     if (!reportWorkspaceValidity(form)) return;
     if (!reportWorkspaceValidity(byId('session-name'))) return;
+    if (byId('history-include').checked && !historySelectionAvailable()) {
+      byId('history-start-options').open = true;
+      showError(t('history.unavailable_error'));
+      return;
+    }
+    if (!reportWorkspaceValidity(byId('history-request-minutes'))) return;
+    const historySecondsRequested = byId('history-include').checked ? historySeconds(byId('history-request-minutes')) : 0;
     const name = byId('session-name').value.trim();
     action(async () => {
       if (state.dirty) await saveConfig();
       state.starting = true;
       state.startCancelled = false;
       updateControls();
-      try { await api('/start', { method: 'POST', revision: state.configRevision, timeout: 1800000, ...(name ? { body: { name } } : {}) }); }
+      try { await api('/start', { method: 'POST', revision: state.configRevision, timeout: 1800000, body: { ...(name ? { name } : {}), history_seconds: historySecondsRequested } }); }
       catch (error) { if (!state.startCancelled) throw error; }
       finally { state.starting = false; }
       if (state.startCancelled) return;
+      byId('history-include').checked = false;
+      byId('history-start-options').open = false;
       renderStatus(await api('/status'));
       announce(t("ui.session_started_with_the_selected_features_original_audio_continues_on_rout"));
     });
+  });
+  for (const id of ['history-include', 'history-request-minutes']) byId(id).addEventListener('input', updateControls);
+  byId('history-settings-link').addEventListener('click', () => { byId('history-start-options').open = false; });
+  byId('history-start-options').addEventListener('keydown', event => {
+    if (event.key !== 'Escape') return;
+    event.preventDefault();
+    byId('history-start-options').open = false;
+    byId('history-start-options').querySelector('summary').focus();
   });
   byId('cancel-start').addEventListener('click', async () => {
     if (!state.starting || state.cancelStarting) return;

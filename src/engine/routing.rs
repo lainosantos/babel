@@ -145,6 +145,7 @@ pub(super) async fn maintain_routing(state: &mut State) {
         let metrics = metrics.clone();
         let route_cancel = cancel.child_token();
         let route_usage = usage.clone();
+        let history = state.history.clone();
         jobs.spawn(async move {
             activity::while_selected(
                 route_usage,
@@ -153,17 +154,23 @@ pub(super) async fn maintain_routing(state: &mut State) {
                 route_cancel,
                 |active_cancel| {
                     let metrics = metrics.clone();
+                    let history = history.clone();
                     let devices = RouteDevices {
                         capture: capture.clone(),
                         playback: playback.clone(),
                     };
                     async move {
                         metrics.state("passthrough");
-                        passthrough::run_route(
+                        passthrough::run_route_with_history(
                             devices,
                             options,
                             active_cancel,
                             metrics.audio.clone(),
+                            history,
+                            match origin {
+                                TranscriptOrigin::Microphone => RecordingLane::Microphone,
+                                TranscriptOrigin::Speaker => RecordingLane::Speaker,
+                            },
                         )
                         .await
                     }
@@ -220,6 +227,7 @@ pub(super) fn start_monitor(state: std::sync::Weak<Mutex<State>>, cancel: Cancel
             let mut state = tokio::select! {
                 biased; _ = cancel.cancelled() => break, state = shared.lock() => state,
             };
+            state.history.prune(Instant::now());
             reap(&mut state).await;
             maintain_routing(&mut state).await;
         }

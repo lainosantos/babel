@@ -25,6 +25,7 @@ pub enum TranscriptRecord {
     },
     TurnComplete,
     Gap,
+    Section(String),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -226,6 +227,15 @@ impl TranscriptWriter {
                 record => (None, record),
             };
             match record {
+                TranscriptRecord::Section(title) => {
+                    ensure!(title.len() <= 8192, "Seção de transcrição excede o limite");
+                    self.original.newline().await?;
+                    self.original.set_origin(None).await?;
+                    self.original
+                        .file
+                        .write_all(format!("\n[{title}]\n\n").as_bytes())
+                        .await?;
+                }
                 TranscriptRecord::Text {
                     input,
                     text,

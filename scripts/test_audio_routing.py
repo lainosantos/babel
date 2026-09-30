@@ -8,19 +8,22 @@ used. The temporary audio server and every child process are stopped on exit.
     python scripts/test_audio_routing.py
     python scripts/test_audio_routing.py --babel target/debug/babel
 
-The optional Babel executable adds end-to-end device-selection and recording
-session checks. Without it, only the stream-pinning policy is exercised.
+The optional Babel executable adds end-to-end device-selection, in-memory
+history and recording session checks. Without it, only stream pinning is tested.
 """
 from __future__ import annotations
 
 import argparse
+from array import array
 import json
+import math
 import os
 from pathlib import Path
 import re
 import shutil
 import signal
 import subprocess
+import sys
 import tempfile
 import time
 from urllib.request import Request, urlopen
@@ -100,7 +103,7 @@ class AudioSandbox:
         self.pactl("load-module", "module-null-sink", "sink_name=babel_test_first")
         self.pactl("load-module", "module-null-sink", "sink_name=babel_test_other")
 
-    def stream(self, device, *, record=False, pinned=False, name="Babel routing test"):
+    def stream(self, device, *, record=False, pinned=False, name="Babel routing test", pcm=None):
         args = [
             "pacat", "--record" if record else "--playback", "--raw",
             "--format=s16le", "--channels=1", "--rate=48000", "--device=" + device,
@@ -115,7 +118,7 @@ class AudioSandbox:
         if record:
             source = subprocess.DEVNULL
         else:
-            source = open("/dev/zero", "rb")
+            source = open(pcm if pcm is not None else "/dev/zero", "rb")
             self.handles.append(source)
         return self.spawn(args, stdin=source, stdout=subprocess.DEVNULL)
 
@@ -247,14 +250,31 @@ def check_babel(sandbox, executable, snapshot):
     mic_targets = {"babel_test_first.monitor", "babel_mic_bus"}
     speaker_targets = {"babel_speaker.monitor", "babel_test_other"}
     babel.expect_routes(set())
-    assert not babel.api("status")["routing_active"]
+    status = babel.api("status")
+    assert not status["routing_active"] and not status["running"]
+    assert status["history"]["enabled"] and status["history"]["capacity_secs"] == 600
+    assert status["history"]["available_secs"] == 0
+    assert status["history"]["buffered_bytes"] == 0
+    assert not (sandbox.root / "recordings").exists()
+    assert not (sandbox.root / "transcripts").exists()
 
     application = sandbox.stream("babel_speaker", name="External playback test")
     babel.expect_routes(speaker_targets)
+    wait_for(lambda: babel.api("status")["history"]["speaker_secs"] >= 0.3,
+             "speaker originals retained without a session")
+    status = babel.api("status")
+    assert not status["running"] and status["history"]["microphone_secs"] == 0
+    assert status["history"]["available_secs"] >= 0.3
+    assert not (sandbox.root / "recordings").exists()
+    assert not (sandbox.root / "transcripts").exists()
     app_stream = wait_for(lambda: next((s for s in sandbox.listing("sink-inputs") if s["properties"].get("application.name") == "External playback test"), None), "external playback stream")
     sandbox.pactl("set-default-sink", "babel_test_other")
     sandbox.pactl("move-sink-input", str(app_stream["index"]), "babel_test_other")
     babel.expect_routes(set())
+    retained = babel.api("status")["history"]["speaker_secs"]
+    time.sleep(0.3)
+    assert babel.api("status")["history"]["speaker_secs"] == retained, \
+        "History captured new speaker PCM after the application left Babel"
     sandbox.pactl("move-sink-input", str(app_stream["index"]), "babel_speaker")
     babel.expect_routes(speaker_targets)
     microphone_app = sandbox.stream("babel_microphone", record=True, name="External capture test")
@@ -264,13 +284,18 @@ def check_babel(sandbox, executable, snapshot):
     sandbox.stop(microphone_app)
     babel.expect_routes(set())
     print("PASS: independent routes follow external clients; selecting physical output releases Babel.")
+    assert not (sandbox.root / "recordings").exists()
+    assert not (sandbox.root / "transcripts").exists()
+    print("PASS: idle history retains only selected originals in RAM and creates no session files.")
 
     config = babel.api("config")
     config["recording"]["enabled"] = True
     babel.api("config", "PUT", config)
     babel.api("start", "POST", {"name": "Selection regression"})
-    session_id = babel.api("status")["session_id"]
+    status = babel.api("status")
+    session_id = status["session_id"]
     assert session_id
+    assert status["history_included_secs"] == 0, "Ordinary Start unexpectedly included retained audio"
     babel.expect_routes(set())
     application = sandbox.stream("babel_speaker", name="External recording test")
     babel.expect_routes(speaker_targets)
@@ -293,8 +318,101 @@ def check_babel(sandbox, executable, snapshot):
     assert len(recordings) == 1, "Session must retain one merged audio file"
     with wave.open(str(recordings[0])) as recording:
         assert recording.getnchannels() == 1 and recording.getnframes() > 0
-    sandbox.stop(babel.process, graceful=True)
     print("PASS: recording keeps its session/file across deactivation; resumed routes use fresh processes.")
+    check_history_recording(sandbox, babel, speaker_targets, recordings[0])
+    sandbox.stop(babel.process, graceful=True)
+
+
+def check_history_recording(sandbox, babel, speaker_targets, previous_recording):
+    """Use a known historical signal and live silence to verify the saved prefix."""
+    config = babel.api("config")
+    assert not config["transcription"]["enabled"]
+    assert not config["microphone"]["enabled"] and not config["speaker"]["enabled"]
+    assert config["recording"]["microphone"] and config["recording"]["speaker"]
+    assert config["history"]["enabled"] and config["history"]["duration_secs"] == 600
+    config["history"]["enabled"] = False
+    babel.api("config", "PUT", config)
+    status = babel.api("status")
+    assert not status["history"]["enabled"] and status["history"]["buffered_bytes"] == 0
+
+    # A finite generated PCM fixture stays inside this private audio server. It
+    # lasts longer than the test, so pacat remains a normal external consumer.
+    signal_pcm = array("h", (round(12000 * math.sin(2 * math.pi * 997 * n / 48000))
+                             for n in range(48000)))
+    if sys.byteorder != "little":
+        signal_pcm.byteswap()
+    tone_path = sandbox.root / "history-tone.pcm"
+    tone_path.write_bytes(signal_pcm.tobytes() * 30)
+    application = sandbox.stream("babel_speaker", name="External disabled history test", pcm=tone_path)
+    babel.expect_routes(speaker_targets)
+    time.sleep(0.3)
+    assert babel.api("status")["history"]["buffered_bytes"] == 0
+    sandbox.stop(application)
+    babel.expect_routes(set())
+
+    # Re-enabling starts with empty RAM. A shorter configurable capacity keeps
+    # the entire regression bounded without changing the default assertion.
+    config = babel.api("config")
+    config["history"]["enabled"] = True
+    config["history"]["duration_secs"] = 10
+    babel.api("config", "PUT", config)
+    assert babel.api("status")["history"]["available_secs"] == 0
+    application = sandbox.stream("babel_speaker", name="External historical tone", pcm=tone_path)
+    babel.expect_routes(speaker_targets)
+    wait_for(lambda: babel.api("status")["history"]["speaker_secs"] >= 2.3,
+             "known original tone retained for a two-second prefix")
+    status = babel.api("status")
+    assert not status["running"] and status["history"]["microphone_secs"] == 0
+    assert list((sandbox.root / "recordings").glob("*.wav")) == [previous_recording], \
+        "Memory history wrote an audio file before session Start"
+    assert not (sandbox.root / "transcripts").exists()
+
+    started = time.monotonic()
+    babel.api("start", "POST", {"name": "History prefix regression", "history_seconds": 2})
+    status = babel.api("status")
+    assert status["running"] and status["session_id"]
+    included = status["history_included_secs"]
+    assert 1.8 <= included <= 2.01, f"Unexpected historical prefix duration: {included}"
+    assert not status["history_transcription_pending"]
+    session_id = status["session_id"]
+    # End the tone immediately after Start, so the later part of the prefix
+    # cannot accidentally be satisfied by newly captured live tone.
+    sandbox.stop(application)
+    babel.expect_routes(set())
+    application = sandbox.stream("babel_speaker", name="External live silence")
+    babel.expect_routes(speaker_targets)
+    time.sleep(0.8)
+    assert babel.api("status")["session_id"] == session_id
+    babel.api("stop", "POST")
+    elapsed = time.monotonic() - started
+    status = babel.api("status")
+    assert not status["running"] and not status["last_error"], status
+    sandbox.stop(application)
+    babel.expect_routes(set())
+
+    recordings = list((sandbox.root / "recordings").glob("*.wav"))
+    assert len(recordings) == 2, "History and live capture must produce one file per session"
+    path = next(path for path in recordings if path != previous_recording)
+    with wave.open(str(path)) as recording:
+        assert recording.getnchannels() == 1 and recording.getsampwidth() == 2
+        rate = recording.getframerate()
+        frames = recording.getnframes()
+        assert rate == 16000
+        samples = array("h", recording.readframes(frames))
+    if sys.byteorder != "little":
+        samples.byteswap()
+    assert path.stat().st_size == 44 + frames * 2, "Historical WAV was not finalized"
+    duration = frames / rate
+    assert included + 0.7 <= duration <= included + elapsed + 2, \
+        f"WAV does not contain its historical prefix plus live audio: {duration:.3f}s"
+    prefix = samples[rate // 4:rate]
+    late_prefix = samples[rate * 5 // 4:rate * 7 // 4]
+    tail = samples[-rate // 4:]
+    rms = lambda pcm: math.sqrt(sum(sample * sample for sample in pcm) / len(pcm))
+    assert rms(prefix) > 1000, "Saved WAV lost the original historical tone"
+    assert rms(late_prefix) > 1000, "Saved WAV truncated the historical prefix"
+    assert rms(tail) < 100, "Saved WAV did not append the live silence after the historical tone"
+    print("PASS: opt-in history saves a tone prefix plus live audio in one finalized WAV; default Start excludes it.")
 
 
 def main():

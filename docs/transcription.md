@@ -34,6 +34,44 @@ separar credenciais, use nomes diferentes, por exemplo `GEMINI_STT_API_KEY` e
 `GEMINI_TRANSLATION_API_KEY`. Alterar a referência do perfil STT não altera o
 perfil de tradução ou voz.
 
+## Transcrever o histórico recente
+
+Depois de escolher as origens e os reconhecedores, abra **Opções avançadas de
+início** junto de **Iniciar sessão**. Marque **Incluir histórico recente** e
+informe a duração em minutos. Sem essa escolha, a transcrição começa no áudio
+atual. Esse também é o padrão ao iniciar pela bandeja, por `babel run` na CLI
+ou pela API sem `history_seconds` positivo. A retenção habilitada não inclui
+histórico automaticamente. A escolha é exclusiva desse início e volta a ficar desmarcada após uma
+sessão iniciada com sucesso.
+
+O histórico usa os reconhecedores, idiomas e origens atualmente selecionados
+em **Transcrição**, mesmo se forem diferentes dos que estavam configurados
+quando o áudio foi capturado. Somente áudio original é reconhecido. Se a
+transcrição estiver desligada, incluir histórico para uma gravação não ativa
+STT nem envia esse áudio a um provider. Com STT em nuvem habilitado, incluir
+histórico envia o trecho solicitado ao serviço escolhido ao iniciar a sessão.
+
+Os resultados do histórico precedem os resultados ao vivo no TXT. O painel
+indica enquanto a transcrição do histórico está pendente; o roteamento, a
+reprodução e a tradução continuam com áudio ao vivo. Reconhecer vários minutos
+pode levar tempo e consumir a cota do provider. Encerrar antes de concluir pode
+interromper resultados pendentes, como ocorre com a transcrição ao vivo.
+
+A capacidade padrão é dez minutos em memória, ajustável em **Ajustes →
+Histórico de áudio recente**. O painel mostra o áudio disponível por origem;
+se houver menos que o solicitado, inclui somente o trecho disponível. O
+histórico só se forma enquanto há captura pelo roteamento, não é persistido
+antes da inclusão explícita e desaparece ao fechar o Babel. Os mesmos controles
+estão disponíveis no Linux, macOS e Windows. Consulte [a retenção e a inclusão
+na gravação](recording.md#incluir-áudio-anterior-ao-início).
+
+O reconhecimento do histórico usa uma conexão STT separada da transcrição ao
+vivo. Continuam valendo as cotas, custos e limites de sessão do provider. Se
+uma conexão expirar ou a sessão for encerrada antes da conclusão, o Babel
+informa que o histórico ficou incompleto; não apresenta esse resultado como
+uma recuperação integral. Identificadores de falantes não são associados
+automaticamente entre as conexões histórica e ao vivo.
+
 ## Providers implementados
 
 | Provider STT | Transporte e modelo | Falantes | Tempos gravados | Requisitos |

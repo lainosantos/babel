@@ -61,6 +61,35 @@ impl SpeechProvider for GeminiTranscriptionProvider {
         config.target_language.clear();
         GeminiProvider.run(config, audio, events, cancel).await
     }
+
+    async fn run_history(
+        &self,
+        mut config: SessionConfig,
+        mut audio: mpsc::Receiver<Vec<i16>>,
+        events: mpsc::Sender<ProviderEvent>,
+        cancel: CancellationToken,
+    ) -> Result<()> {
+        config.model.clone_from(&self.model);
+        config.input_transcription = true;
+        config.output_transcription = false;
+        config.prompt.clear();
+        config.voice.clear();
+        config.target_language.clear();
+        validate_config(&config)?;
+        ensure!(
+            is_transcription_model(&config),
+            "historical audio requires Gemini Live Transcribe"
+        );
+        let key = crate::credentials::get(&config.api_key_env)?;
+        ensure!(!key.trim().is_empty(), "Gemini API key is empty");
+        let mut resume = None;
+        tokio::select! {
+            biased;
+            _ = cancel.cancelled() => bail!("historical transcription was cancelled"),
+            result = run_connection_mode(&config, &key, ENDPOINT, &mut audio, &events, &mut resume, true) =>
+                result.map_err(|failure| anyhow::anyhow!(failure.message)),
+        }
+    }
 }
 
 /// Deliberately contains no raw socket, response, API key, or server error text.
@@ -358,6 +387,27 @@ async fn run_connection(
     events: &mpsc::Sender<ProviderEvent>,
     resume_handle: &mut Option<String>,
 ) -> SessionResult<()> {
+    run_connection_mode(
+        config,
+        api_key,
+        endpoint,
+        audio,
+        events,
+        resume_handle,
+        false,
+    )
+    .await
+}
+
+async fn run_connection_mode(
+    config: &SessionConfig,
+    api_key: &str,
+    endpoint: &str,
+    audio: &mut mpsc::Receiver<Vec<i16>>,
+    events: &mpsc::Sender<ProviderEvent>,
+    resume_handle: &mut Option<String>,
+    history: bool,
+) -> SessionResult<()> {
     let mut request = endpoint
         .into_client_request()
         .map_err(|_| Failure::fatal("invalid built-in Gemini endpoint"))?;
@@ -378,13 +428,16 @@ async fn run_connection(
     .await
     .map_err(|_| Failure::retry("Gemini connection timed out"))?
     .map_err(socket_error)?;
+    let mut setup = setup_message(config, resume_handle.as_deref());
+    if history {
+        // A single explicit turn in flight makes its finalized input transcript
+        // an unambiguous acknowledgement of the bounded historical utterance.
+        setup["setup"]["realtimeInputConfig"] =
+            json!({"automaticActivityDetection":{"disabled":true}});
+    }
     timeout(
         Duration::from_secs(config.connect_timeout_secs),
-        socket.send(Message::Text(
-            setup_message(config, resume_handle.as_deref())
-                .to_string()
-                .into(),
-        )),
+        socket.send(Message::Text(setup.to_string().into())),
     )
     .await
     .map_err(|_| Failure::retry("Gemini setup send timed out"))?
@@ -418,8 +471,13 @@ async fn run_connection(
     })
     .await
     .map_err(|_| Failure::retry("Gemini setup acknowledgement timed out"))??;
-    discard_queued_audio(audio);
+    if !history {
+        discard_queued_audio(audio);
+    }
     emit(events, ProviderEvent::Connected).await?;
+    if history {
+        return transcribe_history(socket, audio, events, config.vad_silence_ms).await;
+    }
     let (writer, reader) = socket.split();
     let (control_tx, control_rx) = mpsc::channel(8);
     // Independent futures keep receiving translated PCM while capture sends.
@@ -428,6 +486,113 @@ async fn run_connection(
         result = write_audio(writer, audio, control_rx) => result,
         result = read_events(reader, events, resume_handle, control_tx, is_transcription_model(config)) => result,
     }
+}
+
+/// Manual VAD is documented for Live Transcribe. Unlike auto-VAD, it supplies
+/// one final inputTranscription for the activityEnd we explicitly send.
+/// https://ai.google.dev/gemini-api/docs/live-api/live-transcribe
+async fn transcribe_history(
+    mut socket: Socket,
+    audio: &mut mpsc::Receiver<Vec<i16>>,
+    events: &mpsc::Sender<ProviderEvent>,
+    silence_ms: u32,
+) -> SessionResult<()> {
+    let options = super::local::history_options(silence_ms);
+    let (tx, mut rx) = mpsc::channel(2);
+    let producer = async {
+        super::local::segment_history_borrowed(audio, tx, &options)
+            .await
+            .map_err(|_| Failure::fatal("Gemini historical audio segmentation failed"))
+    };
+    let consumer = async {
+        while let Some(segment) = rx.recv().await {
+            timeout(Duration::from_secs(120), async {
+                io_deadline(
+                    socket.send(Message::Text(
+                        json!({"realtimeInput":{"activityStart":{}}})
+                            .to_string()
+                            .into(),
+                    )),
+                )
+                .await?;
+                for samples in segment.samples.chunks(1600) {
+                    io_deadline(socket.send(audio_message(samples)?)).await?;
+                }
+                io_deadline(
+                    socket.send(Message::Text(
+                        json!({"realtimeInput":{"activityEnd":{}}})
+                            .to_string()
+                            .into(),
+                    )),
+                )
+                .await?;
+                loop {
+                    let value = match socket
+                        .next()
+                        .await
+                        .ok_or_else(|| {
+                            Failure::fatal(
+                                "Gemini closed before historical transcription completed",
+                            )
+                        })?
+                        .map_err(socket_error)?
+                    {
+                        Message::Text(text) => parse_json(text.as_bytes())?,
+                        Message::Binary(bytes) => parse_json(&bytes)?,
+                        Message::Ping(data) => {
+                            io_deadline(socket.send(Message::Pong(data))).await?;
+                            continue;
+                        }
+                        Message::Pong(_) => continue,
+                        Message::Close(_) => {
+                            return Err(Failure::fatal(
+                                "Gemini closed before historical transcription completed",
+                            ));
+                        }
+                        Message::Frame(_) => {
+                            return Err(Failure::fatal("invalid raw Gemini frame"));
+                        }
+                    };
+                    if value.get("goAway").is_some() || value.get("toolCall").is_some() {
+                        return Err(Failure::fatal(
+                            "Gemini interrupted historical transcription",
+                        ));
+                    }
+                    if let Some(content) = value.get("serverContent") {
+                        if content["interrupted"] == true {
+                            return Err(Failure::fatal(
+                                "Gemini interrupted historical transcription",
+                            ));
+                        }
+                        let decoded = decode_transcription_content(content)?;
+                        let complete = content
+                            .get("inputTranscription")
+                            .is_some_and(|v| v.get("text").and_then(Value::as_str).is_some());
+                        for mut event in decoded {
+                            if let ProviderEvent::Transcript { metadata, .. } = &mut event {
+                                // Live Transcribe does not promise word timings;
+                                // preserve the actual source segment alignment.
+                                metadata.start_ms = None;
+                                metadata.end_ms = None;
+                                metadata.alignment_ms = Some(segment.start_sample / 16);
+                            }
+                            emit(events, event).await?;
+                        }
+                        if complete {
+                            return Ok(());
+                        }
+                    }
+                }
+            })
+            .await
+            .map_err(|_| {
+                Failure::fatal("Gemini historical transcription final acknowledgement timed out")
+            })??;
+        }
+        Ok(())
+    };
+    tokio::try_join!(producer, consumer)?;
+    Ok(())
 }
 
 fn parse_json(bytes: &[u8]) -> SessionResult<Value> {

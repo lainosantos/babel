@@ -51,7 +51,8 @@ pub enum ProviderEvent {
     TurnComplete,
 }
 
-/// Metadata supplied by a provider, never inferred from text or arrival time.
+/// Metadata supplied by a provider or aligned to the actual captured segment
+/// submitted to finite STT, never inferred from text or receipt time.
 /// Current Gemini Live models do not promise speaker IDs or word timestamps;
 /// the optional fields preserve actual metadata if it is supplied in a reply.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -61,7 +62,7 @@ pub struct TranscriptMetadata {
     pub start_ms: Option<u64>,
     /// Offset from the start of provider-session audio, not wall-clock time.
     pub end_ms: Option<u64>,
-    /// Provider alignment point; not an utterance/word boundary.
+    /// Provider alignment point or source segment start; not a word boundary.
     pub alignment_ms: Option<u64>,
 }
 
@@ -137,6 +138,21 @@ pub trait SpeechProvider: Send + Sync {
         events: Sender<ProviderEvent>,
         cancel: CancellationToken,
     ) -> Result<()>;
+
+    /// Transcribes a finite original-audio stream. Channel EOF flushes pending
+    /// speech; success means every submitted segment received a final result.
+    /// Input is bounded mono PCM16/16 kHz (at most one second per message).
+    /// Offsets refer to this stream, including silence. Never generates audio
+    /// or retries an ambiguous request, which could duplicate saved text.
+    async fn run_history(
+        &self,
+        _config: SessionConfig,
+        _audio: Receiver<Vec<i16>>,
+        _events: Sender<ProviderEvent>,
+        _cancel: CancellationToken,
+    ) -> Result<()> {
+        bail!("this provider does not support finite original-audio transcription")
+    }
 }
 
 pub fn create_provider(kind: &str) -> Result<Arc<dyn SpeechProvider>> {

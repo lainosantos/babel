@@ -1,6 +1,8 @@
-//! Bounded original-PCM bridge. No provider, transcript, recording, or file I/O.
+//! Bounded original-PCM bridge with an optional in-memory original history tap.
+//! No provider, transcript, recording, or file I/O.
 //! The supervisor owns route selection and prevents virtual-cable feedback.
 use super::{AudioOptions, AudioStats, PcmFrame, PlaybackCommand, switching};
+use crate::{history::HistoryBuffer, recording::RecordingLane};
 use anyhow::{Context, Result, anyhow, ensure};
 use std::{
     sync::{Arc, atomic::Ordering},
@@ -32,6 +34,29 @@ pub async fn run_route(
     options: AudioOptions,
     cancel: CancellationToken,
     stats: Arc<AudioStats>,
+) -> Result<()> {
+    run_route_inner(devices, options, cancel, stats, None).await
+}
+
+/// Adds history to an already-selected route; it never starts independent
+/// capture or changes which device/application activates the original route.
+pub async fn run_route_with_history(
+    devices: RouteDevices,
+    options: AudioOptions,
+    cancel: CancellationToken,
+    stats: Arc<AudioStats>,
+    history: Arc<HistoryBuffer>,
+    lane: RecordingLane,
+) -> Result<()> {
+    run_route_inner(devices, options, cancel, stats, Some((history, lane))).await
+}
+
+async fn run_route_inner(
+    devices: RouteDevices,
+    options: AudioOptions,
+    cancel: CancellationToken,
+    stats: Arc<AudioStats>,
+    history: Option<(Arc<HistoryBuffer>, RecordingLane)>,
 ) -> Result<()> {
     let options = options.validate()?;
     let options = AudioOptions {
@@ -82,7 +107,9 @@ pub async fn run_route(
         .context("Reprodução da passagem original")
     });
     let worker_cancel = cancel.clone();
-    jobs.spawn(async move { bridge(captured_rx, play_tx, options, worker_cancel, stats).await });
+    jobs.spawn(async move {
+        bridge_with_history(captured_rx, play_tx, options, worker_cancel, stats, history).await
+    });
     let mut result = tokio::select! {
         biased;
         _=cancel.cancelled()=>Ok(()),
@@ -115,14 +142,79 @@ pub async fn run_route(
     result
 }
 
+#[cfg(test)]
 async fn bridge(
-    mut captured: mpsc::Receiver<PcmFrame>,
+    captured: mpsc::Receiver<PcmFrame>,
     playback: mpsc::Sender<PlaybackCommand>,
     options: AudioOptions,
     cancel: CancellationToken,
     stats: Arc<AudioStats>,
 ) -> Result<()> {
+    bridge_with_history(captured, playback, options, cancel, stats, None).await
+}
+
+struct HistoryTap {
+    resampler: super::resample::Resampler,
+    input: Vec<f32>,
+    output: Vec<f32>,
+    pcm: Vec<i16>,
+    last_capture: Option<std::time::Instant>,
+}
+impl HistoryTap {
+    fn new(sample_rate: u32) -> Self {
+        Self {
+            resampler: super::resample::Resampler::new(sample_rate, 16_000),
+            input: Vec::new(),
+            output: Vec::new(),
+            pcm: Vec::new(),
+            last_capture: None,
+        }
+    }
+
+    fn push(&mut self, frame: &PcmFrame, history: &HistoryBuffer, lane: RecordingLane) {
+        let frame_duration =
+            Duration::from_secs_f64(frame.samples.len() as f64 / f64::from(frame.sample_rate));
+        if self.last_capture.is_some_and(|previous| {
+            frame.captured_at.saturating_duration_since(previous)
+                > frame_duration + Duration::from_millis(50)
+        }) {
+            // Do not carry a filter tail across a dropped capture interval.
+            self.resampler = super::resample::Resampler::new(frame.sample_rate, 16_000);
+        }
+        self.last_capture = Some(frame.captured_at);
+        if frame.sample_rate == 16_000 {
+            history.push(lane, &frame.samples, frame.captured_at);
+            return;
+        }
+        self.input.clear();
+        self.output.clear();
+        self.pcm.clear();
+        self.input.extend(
+            frame
+                .samples
+                .iter()
+                .map(|&sample| f32::from(sample) / 32768.0),
+        );
+        self.resampler.process(&self.input, &mut self.output);
+        self.pcm.extend(
+            self.output
+                .iter()
+                .map(|sample| (sample * 32768.0).round().clamp(-32768.0, 32767.0) as i16),
+        );
+        history.push(lane, &self.pcm, frame.captured_at);
+    }
+}
+
+async fn bridge_with_history(
+    mut captured: mpsc::Receiver<PcmFrame>,
+    playback: mpsc::Sender<PlaybackCommand>,
+    options: AudioOptions,
+    cancel: CancellationToken,
+    stats: Arc<AudioStats>,
+    history: Option<(Arc<HistoryBuffer>, RecordingLane)>,
+) -> Result<()> {
     let _level_reset = LevelReset(stats.clone());
+    let mut history_tap = None;
     loop {
         let frame = tokio::select! {
             biased;
@@ -141,6 +233,15 @@ async fn bridge(
         if frame.captured_at.elapsed() > Duration::from_millis(100) {
             stats.dropped_frames.fetch_add(1, Ordering::Relaxed);
             continue;
+        }
+        if let Some((history, lane)) = &history {
+            if history.enabled() {
+                history_tap
+                    .get_or_insert_with(|| HistoryTap::new(options.sample_rate))
+                    .push(&frame, history, *lane);
+            } else {
+                history_tap = None;
+            }
         }
         let level = (frame
             .samples
@@ -177,6 +278,7 @@ async fn bridge(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::HistoryConfig;
     use std::time::Instant;
     fn options() -> AudioOptions {
         AudioOptions {
@@ -192,6 +294,95 @@ mod tests {
             sample_rate: 48000,
             captured_at: Instant::now(),
         }
+    }
+    #[tokio::test]
+    async fn original_history_resamples_without_changing_live_playback() {
+        let (capture_tx, capture_rx) = mpsc::channel(2);
+        let (play_tx, mut play_rx) = mpsc::channel(2);
+        let cancel = CancellationToken::new();
+        let history = Arc::new(HistoryBuffer::new(&HistoryConfig::default()));
+        let worker_cancel = cancel.clone();
+        let worker_history = history.clone();
+        let worker = tokio::spawn(async move {
+            bridge_with_history(
+                capture_rx,
+                play_tx,
+                options(),
+                worker_cancel,
+                Arc::new(AudioStats::default()),
+                Some((worker_history, RecordingLane::Speaker)),
+            )
+            .await
+        });
+        for _ in 0..2 {
+            capture_tx.send(frame(4000)).await.unwrap();
+            let Some(PlaybackCommand::Audio { samples, .. }) = play_rx.recv().await else {
+                panic!("missing original playback")
+            };
+            assert_eq!(samples, vec![4000; 480]);
+        }
+        let snapshot = history.snapshot(600, Instant::now());
+        assert_eq!(snapshot.frames.len(), 2);
+        assert!(
+            snapshot
+                .frames
+                .iter()
+                .all(|frame| frame.lane == RecordingLane::Speaker)
+        );
+        let pcm = snapshot
+            .frames
+            .iter()
+            .flat_map(|frame| frame.samples())
+            .copied()
+            .collect::<Vec<_>>();
+        assert!((300..=320).contains(&pcm.len()));
+        assert!(pcm[20..].iter().all(|&value| (value - 4000).abs() <= 1));
+        cancel.cancel();
+        worker.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn disabled_history_keeps_passthrough_and_releases_its_filter_tail() {
+        let (capture_tx, capture_rx) = mpsc::channel(2);
+        let (play_tx, mut play_rx) = mpsc::channel(2);
+        let cancel = CancellationToken::new();
+        let history = Arc::new(HistoryBuffer::new(&HistoryConfig::default()));
+        let worker_cancel = cancel.clone();
+        let worker_history = history.clone();
+        let worker = tokio::spawn(async move {
+            bridge_with_history(
+                capture_rx,
+                play_tx,
+                options(),
+                worker_cancel,
+                Arc::new(AudioStats::default()),
+                Some((worker_history, RecordingLane::Microphone)),
+            )
+            .await
+        });
+        capture_tx.send(frame(10000)).await.unwrap();
+        assert!(play_rx.recv().await.is_some());
+        assert!(!history.snapshot(600, Instant::now()).frames.is_empty());
+        history.configure(&HistoryConfig {
+            enabled: false,
+            ..HistoryConfig::default()
+        });
+        capture_tx.send(frame(20000)).await.unwrap();
+        assert!(play_rx.recv().await.is_some());
+        assert!(history.snapshot(600, Instant::now()).frames.is_empty());
+        history.configure(&HistoryConfig::default());
+        capture_tx.send(frame(0)).await.unwrap();
+        assert!(play_rx.recv().await.is_some());
+        let snapshot = history.snapshot(600, Instant::now());
+        assert_eq!(snapshot.frames.len(), 1);
+        assert!(
+            snapshot.frames[0]
+                .samples()
+                .iter()
+                .all(|&sample| sample == 0)
+        );
+        cancel.cancel();
+        worker.await.unwrap().unwrap();
     }
     #[tokio::test]
     async fn pcm_is_bit_exact_and_tracks_the_current_playback_generation() {

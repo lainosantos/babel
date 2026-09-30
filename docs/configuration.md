@@ -377,6 +377,53 @@ Ao criar um TOML manualmente, defina esse campo explicitamente: um arquivo
 existente sem `base_path` é tratado como legado e migrado para a pasta do próprio
 arquivo de configuração, conforme as regras abaixo.
 
+### Histórico de áudio e início avançado
+
+O Babel mantém por padrão até dez minutos de áudio original recente na memória,
+separadamente por origem, enquanto o roteamento está capturando áudio. Configure
+**Ajustes → Histórico de áudio recente** ou o bloco:
+
+```toml
+[history]
+enabled = true
+duration_secs = 600
+```
+
+`duration_secs` aceita inteiros de 1 a 3600. A capacidade é um limite: iniciar o
+Babel há pouco, um dispositivo virtual sem uso ou uma falha de captura podem
+resultar em menos áudio disponível. O histórico é descartado do mais antigo
+para o mais recente à medida que a janela avança. Salvar uma capacidade menor
+remove a parte que excede o novo limite; salvar `enabled = false` limpa toda a
+memória retida. Iniciar/encerrar sessões ou trocar dispositivos não apaga
+automaticamente o histórico. Fechar o aplicativo o perde.
+
+Para incluir um trecho, use **Opções avançadas de início → Incluir histórico
+recente** junto do botão **Iniciar sessão**. Escolha a duração em minutos,
+limitada à capacidade, e confira a disponibilidade por origem. A opção vem
+desmarcada e não é salva no TOML: é uma decisão para cada nova sessão. O início
+normal pelo painel, pela bandeja e por `babel run` na CLI sempre começa sem
+incluir o histórico. Na API, o padrão também é sem histórico: a inclusão exige
+um `history_seconds` positivo nessa requisição. Manter a retenção habilitada
+não ativa a inclusão em nenhuma sessão.
+
+O trecho entra somente na gravação e/ou transcrição habilitadas, usando as
+origens selecionadas para cada uma e os reconhecedores STT da configuração
+atual. Não altera as seleções desses recursos. Não é reproduzido nem traduzido.
+O TXT recebe os resultados do histórico antes dos resultados ao vivo; o painel
+mostra quando esse reconhecimento ainda está pendente. Antes da inclusão
+explícita, nenhum WAV/TXT é criado por essa retenção nem esse histórico é enviado
+para reconhecimento. Os controles são os mesmos no Linux, macOS e Windows.
+
+Na API, `POST /api/start` aceita `history_seconds` como inteiro de 0 até a
+capacidade salva (máximo 3600), junto do nome opcional e da revisão `If-Match`.
+Omitir o campo ou usar zero começa sem histórico. Um valor positivo solicita
+somente a parte disponível da janela; exige gravação ou transcrição habilitada
+com uma origem selecionada que tenha áudio disponível. A capacidade é salva
+em `/api/config`; a escolha de inclusão não é persistida. `/api/status` expõe
+`history.enabled`, `capacity_secs`, `available_secs`, `microphone_secs` e
+`speaker_secs`, além de `history_included_secs` e
+`history_transcription_pending` para a sessão.
+
 ### Pasta base e destinos
 
 Configure **Ajustes → Arquivos da sessão → Pasta base** no painel. O campo
@@ -518,8 +565,9 @@ inválida não faz fallback silencioso para outro dispositivo.
 
 Se o dispositivo falhar ou for removido, o painel informa o erro. Selecione outro
 dispositivo físico pela bandeja para recuperar o áudio na mesma sessão. O trecho
-indisponível pode produzir uma lacuna; áudio antigo não fica acumulado para ser
-reproduzido ou reenviado depois. Mudar idiomas, modelos, vozes e demais opções
+indisponível pode produzir uma lacuna; áudio antigo não fica acumulado nas filas
+de reprodução ou tradução. A retenção opcional em memória é separada dessas
+filas e só entra na gravação/transcrição por escolha explícita no início. Mudar idiomas, modelos, vozes e demais opções
 continua exigindo encerrar a sessão de processamento.
 
 Essas escolhas são salvas no mesmo TOML do painel. O painel acompanha mudanças

@@ -244,6 +244,61 @@ async fn commit_audio(writer: &mut SplitSink<Socket, Message>) -> SessionResult<
     .await
 }
 
+/// One historical utterance in flight keeps provider ordering and memory
+/// bounded. Each explicit commit must receive its own committed + completed
+/// events before the next utterance is submitted; EOF alone is not success.
+pub(super) async fn run_history(
+    mut socket: Socket,
+    audio: &mut mpsc::Receiver<Vec<i16>>,
+    events: &mpsc::Sender<ProviderEvent>,
+    silence_ms: u32,
+) -> SessionResult<()> {
+    let options = super::super::local::history_options(silence_ms);
+    let (tx, mut rx) = mpsc::channel(2);
+    let producer = async {
+        super::super::local::segment_history_borrowed(audio, tx, &options)
+            .await
+            .map_err(|_| Failure::fatal("OpenAI historical audio segmentation failed"))
+    };
+    let consumer = async {
+        while let Some(segment) = rx.recv().await {
+            timeout(Duration::from_secs(120), async {
+                let mut input: Vec<f32> = segment.samples.iter().map(|s| f32::from(*s) / 32768.0).collect();
+                // Realtime commits require at least 100 ms. Padding does not
+                // alter the captured timeline associated with this utterance.
+                input.resize(input.len().max(1600), 0.0);
+                let expected = input.len() * 3 / 2;
+                input.extend_from_slice(&[0.0; 64]);
+                let mut output = Vec::with_capacity(expected + 128);
+                Resampler::new(16000, 24000).process(&input, &mut output);
+                output.truncate(expected);
+                for chunk in output.chunks(24000) {
+                    let bytes: Vec<u8> = chunk.iter().flat_map(|sample| ((sample.clamp(-1.0,1.0)*32767.0).round() as i16).to_le_bytes()).collect();
+                    io_deadline(socket.send(Message::Text(json!({"type":"input_audio_buffer.append","audio":STANDARD.encode(&bytes)}).to_string().into()))).await?;
+                }
+                io_deadline(socket.send(Message::Text(json!({"type":"input_audio_buffer.commit"}).to_string().into()))).await?;
+                let mut state = FinalTranscripts::default();
+                loop {
+                    let value = receive_setup(&mut socket).await?;
+                    let decoded = state.decode(&value)?;
+                    let complete = decoded.iter().any(|event| matches!(event, ProviderEvent::TurnComplete));
+                    for mut event in decoded {
+                        if let ProviderEvent::Transcript { metadata, .. } = &mut event {
+                            // Captured segment alignment, not invented word timestamps.
+                            metadata.alignment_ms = Some(segment.start_sample / 16);
+                        }
+                        emit(events, event).await?;
+                    }
+                    if complete { return Ok(()); }
+                }
+            }).await.map_err(|_| Failure::fatal("OpenAI historical transcription final acknowledgement timed out"))??;
+        }
+        Ok(())
+    };
+    tokio::try_join!(producer, consumer)?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

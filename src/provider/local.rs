@@ -123,6 +123,7 @@ impl LocalProvider {
         mut segments: mpsc::Receiver<Segment>,
         rendered: mpsc::Sender<Vec<i16>>,
         events: &mpsc::Sender<ProviderEvent>,
+        finite: bool,
     ) -> Result<()> {
         let key = if self.whisper_api_key_env.is_empty() {
             None
@@ -261,7 +262,11 @@ impl LocalProvider {
                 .map_err(|_| anyhow::anyhow!("local WAV conversion worker failed"))??;
             rendered.try_send(samples).map_err(|_|anyhow::anyhow!("local translated speech is accumulating faster than playback; shorten segments or choose a faster voice"))?;
         }
-        bail!("local audio segment channel closed unexpectedly")
+        if finite {
+            Ok(())
+        } else {
+            bail!("local audio segment channel closed unexpectedly")
+        }
     }
 }
 
@@ -312,8 +317,36 @@ impl SpeechProvider for LocalProvider {
             biased;
             _=cancel.cancelled()=>Ok(()),
             result=segment_audio(audio,segments_tx,&self.config)=>result,
-            result=self.process(&config,segments_rx,rendered_tx,&events)=>result,
+            result=self.process(&config,segments_rx,rendered_tx,&events,false)=>result,
             result=render_audio(rendered_rx,&events)=>result,
+        }
+    }
+
+    async fn run_history(
+        &self,
+        config: SessionConfig,
+        audio: mpsc::Receiver<Vec<i16>>,
+        events: mpsc::Sender<ProviderEvent>,
+        cancel: CancellationToken,
+    ) -> Result<()> {
+        ensure!(
+            self.transcription_only,
+            "historical audio requires a dedicated STT provider"
+        );
+        validate_endpoint(&self.config.whisper_endpoint)?;
+        let (segments_tx, segments_rx) = mpsc::channel(2);
+        let (rendered_tx, _rendered_rx) = mpsc::channel(1);
+        tokio::select! {
+            biased;
+            _ = cancel.cancelled() => bail!("historical transcription was cancelled"),
+            result = async {
+                emit(&events, ProviderEvent::Connected).await?;
+                tokio::try_join!(
+                    segment_history(audio, segments_tx, &self.config),
+                    self.process(&config, segments_rx, rendered_tx, &events, true),
+                )?;
+                Ok(())
+            } => result,
         }
     }
 }
@@ -475,10 +508,10 @@ fn decode_wav(bytes: &[u8], max_duration_ms: u32) -> Result<Vec<i16>> {
 }
 
 #[derive(Debug)]
-struct Segment {
-    samples: Vec<i16>,
-    start_sample: u64,
-    end_sample: u64,
+pub(super) struct Segment {
+    pub samples: Vec<i16>,
+    pub start_sample: u64,
+    pub end_sample: u64,
 }
 struct Segmenter {
     maximum: usize,
@@ -565,6 +598,60 @@ async fn segment_audio(
         }
     }
     bail!("audio source closed unexpectedly")
+}
+
+/// History has a finite producer: wait for inference capacity instead of the
+/// live path's overload failure, then flush the final unfinished utterance.
+pub(super) async fn segment_history(
+    mut audio: mpsc::Receiver<Vec<i16>>,
+    segments: mpsc::Sender<Segment>,
+    config: &LocalProviderConfig,
+) -> Result<()> {
+    segment_history_borrowed(&mut audio, segments, config).await
+}
+
+pub(super) async fn segment_history_borrowed(
+    audio: &mut mpsc::Receiver<Vec<i16>>,
+    segments: mpsc::Sender<Segment>,
+    config: &LocalProviderConfig,
+) -> Result<()> {
+    let mut segmenter = Segmenter::new(config);
+    let mut total = 0usize;
+    while let Some(samples) = audio.recv().await {
+        ensure!(
+            samples.len() <= INPUT_RATE,
+            "historical input chunk exceeds one second"
+        );
+        total = total
+            .checked_add(samples.len())
+            .ok_or_else(|| anyhow::anyhow!("historical audio length overflow"))?;
+        ensure!(
+            total <= INPUT_RATE * 3600,
+            "historical audio exceeds sixty minutes"
+        );
+        for segment in segmenter.push(&samples) {
+            segments
+                .send(segment)
+                .await
+                .map_err(|_| anyhow::anyhow!("historical transcription consumer closed"))?;
+        }
+    }
+    if !segmenter.active.is_empty() {
+        segments
+            .send(segmenter.finish())
+            .await
+            .map_err(|_| anyhow::anyhow!("historical transcription consumer closed"))?;
+    }
+    Ok(())
+}
+
+pub(super) fn history_options(silence_ms: u32) -> LocalProviderConfig {
+    LocalProviderConfig {
+        segment_ms: 10_000,
+        silence_ms: silence_ms.clamp(100, 2000),
+        vad_threshold: 0.01,
+        ..Default::default()
+    }
 }
 async fn render_audio(
     mut rendered: mpsc::Receiver<Vec<i16>>,
@@ -663,6 +750,78 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(error.contains("cannot keep up"));
+    }
+
+    #[tokio::test]
+    async fn history_backpressures_and_flushes_partial_segment_with_original_offset() {
+        let (audio_tx, audio_rx) = mpsc::channel(8);
+        let (segments_tx, mut segments_rx) = mpsc::channel(1);
+        audio_tx.send(vec![0; 16000]).await.unwrap();
+        for _ in 0..4 {
+            audio_tx.send(vec![4000; 8000]).await.unwrap();
+        }
+        audio_tx.send(vec![4000; 300]).await.unwrap();
+        drop(audio_tx);
+        let worker =
+            tokio::spawn(async move { segment_history(audio_rx, segments_tx, &options()).await });
+        tokio::task::yield_now().await;
+        assert!(
+            !worker.is_finished(),
+            "bounded history must wait for its consumer"
+        );
+        let mut segments = Vec::new();
+        while let Some(segment) = segments_rx.recv().await {
+            segments.push(segment);
+        }
+        worker.await.unwrap().unwrap();
+        assert_eq!(segments.len(), 5);
+        assert_eq!(segments[0].start_sample, 14400);
+        assert_eq!(segments.last().unwrap().end_sample, 48300);
+        assert_eq!(
+            segments.iter().map(|s| s.samples.len()).sum::<usize>(),
+            33900
+        );
+    }
+
+    #[tokio::test]
+    async fn historical_whisper_waits_for_http_final_and_never_translates() {
+        let app = Router::new().route(
+            "/inference",
+            post(|body: Bytes| async move {
+                assert!(body.windows(4).any(|part| part == b"RIFF"));
+                tokio::time::sleep(Duration::from_millis(15)).await;
+                Json(json!({"text":"Original final."}))
+            }),
+        );
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = format!("http://{}/inference", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let provider = LocalProvider::transcription(LocalProviderConfig {
+            whisper_endpoint: endpoint,
+            ..options()
+        })
+        .unwrap();
+        let (tx, rx) = mpsc::channel(8);
+        for _ in 0..4 {
+            tx.send(vec![4000; 8000]).await.unwrap();
+        }
+        tx.send(vec![4000; 100]).await.unwrap();
+        drop(tx);
+        let (events, mut received) = mpsc::channel(16);
+        provider
+            .run_history(session(), rx, events, CancellationToken::new())
+            .await
+            .unwrap();
+        let mut originals = 0;
+        while let Some(event) = received.recv().await {
+            match event {
+                ProviderEvent::Transcript { input: true, .. } => originals += 1,
+                ProviderEvent::Connected | ProviderEvent::TurnComplete => (),
+                unexpected => panic!("history leaked non-STT content: {unexpected:?}"),
+            }
+        }
+        assert_eq!(originals, 5);
+        server.abort();
     }
 
     #[test]

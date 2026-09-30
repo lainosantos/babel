@@ -646,18 +646,20 @@ async fn devices() -> Response {
     }
 }
 
-#[derive(Deserialize)]
+#[derive(Debug, Default, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 struct StartRequest {
     name: Option<String>,
+    #[serde(default)]
+    history_seconds: u32,
 }
 
-fn parse_start_name(
+fn parse_start_request(
     headers: &HeaderMap,
     body: &[u8],
-) -> Result<Option<String>, (StatusCode, &'static str)> {
+) -> Result<StartRequest, (StatusCode, &'static str)> {
     if body.is_empty() {
-        return Ok(None);
+        return Ok(StartRequest::default());
     }
     let content_type = headers
         .get(header::CONTENT_TYPE)
@@ -673,7 +675,7 @@ fn parse_start_name(
             "Envie o nome da sessão como JSON ou inicie sem corpo na requisição.",
         ));
     }
-    serde_json::from_slice::<StartRequest>(body).map(|request| request.name).map_err(|_| (StatusCode::BAD_REQUEST, "JSON inválido para iniciar a sessão. Use um objeto com o campo opcional name do tipo texto."))
+    serde_json::from_slice::<StartRequest>(body).map_err(|_| (StatusCode::BAD_REQUEST, "JSON inválido para iniciar a sessão. Use name como texto e history_seconds como número inteiro não negativo."))
 }
 
 async fn start(State(state): State<DashboardState>, headers: HeaderMap, body: Bytes) -> Response {
@@ -681,8 +683,8 @@ async fn start(State(state): State<DashboardState>, headers: HeaderMap, body: By
         Ok(revision) => revision,
         Err(message) => return api_error(StatusCode::BAD_REQUEST, message),
     };
-    let name = match parse_start_name(&headers, &body) {
-        Ok(name) => name,
+    let request = match parse_start_request(&headers, &body) {
+        Ok(request) => request,
         Err((status, message)) => return api_error(status, message),
     };
     // The controller checks the configuration revision again after preparation.
@@ -691,7 +693,7 @@ async fn start(State(state): State<DashboardState>, headers: HeaderMap, body: By
     operation_result(
         state
             .controller
-            .start_named_if_revision(name, revision)
+            .start_with_history(request.name, request.history_seconds, revision)
             .await,
     )
 }
@@ -1461,9 +1463,12 @@ mod tests {
     #[test]
     fn session_start_accepts_optional_json_and_rejects_malformed_payloads() {
         let mut headers = HeaderMap::new();
-        assert_eq!(parse_start_name(&headers, b"").unwrap(), None);
         assert_eq!(
-            parse_start_name(&headers, br#"{"name":"team"}"#)
+            parse_start_request(&headers, b"").unwrap(),
+            StartRequest::default()
+        );
+        assert_eq!(
+            parse_start_request(&headers, br#"{"name":"team"}"#)
                 .unwrap_err()
                 .0,
             StatusCode::UNSUPPORTED_MEDIA_TYPE
@@ -1472,14 +1477,35 @@ mod tests {
             header::CONTENT_TYPE,
             "application/json; charset=utf-8".parse().unwrap(),
         );
-        assert_eq!(parse_start_name(&headers, br#"{}"#).unwrap(), None);
         assert_eq!(
-            parse_start_name(&headers, br#"{"name":"Team sync"}"#).unwrap(),
-            Some("Team sync".into())
+            parse_start_request(&headers, br#"{}"#).unwrap(),
+            StartRequest::default()
         );
-        for invalid in ["{", "[]", "null", "{\"name\":7}", "{\"unexpected\":true}"] {
+        assert_eq!(
+            parse_start_request(&headers, br#"{"name":"Team sync"}"#).unwrap(),
+            StartRequest {
+                name: Some("Team sync".into()),
+                history_seconds: 0
+            }
+        );
+        assert_eq!(
+            parse_start_request(&headers, br#"{"history_seconds":600}"#)
+                .unwrap()
+                .history_seconds,
+            600
+        );
+        for invalid in [
+            "{",
+            "[]",
+            "null",
+            "{\"name\":7}",
+            "{\"unexpected\":true}",
+            "{\"history_seconds\":-1}",
+            "{\"history_seconds\":1.5}",
+            "{\"history_seconds\":\"600\"}",
+        ] {
             assert_eq!(
-                parse_start_name(&headers, invalid.as_bytes())
+                parse_start_request(&headers, invalid.as_bytes())
                     .unwrap_err()
                     .0,
                 StatusCode::BAD_REQUEST

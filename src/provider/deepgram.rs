@@ -125,6 +125,17 @@ impl DeepgramProvider {
         audio: &mut mpsc::Receiver<Vec<i16>>,
         events: &mpsc::Sender<ProviderEvent>,
     ) -> StreamResult<()> {
+        self.connection_mode(url, key, audio, events, false).await
+    }
+
+    async fn connection_mode(
+        &self,
+        url: &str,
+        key: &str,
+        audio: &mut mpsc::Receiver<Vec<i16>>,
+        events: &mpsc::Sender<ProviderEvent>,
+        history: bool,
+    ) -> StreamResult<()> {
         let mut request = url
             .into_client_request()
             .map_err(|_| Failure::fatal("invalid Deepgram endpoint"))?;
@@ -145,11 +156,16 @@ impl DeepgramProvider {
         .await
         .map_err(|_| Failure::retry("Deepgram connection timed out"))?
         .map_err(socket_failure)?;
-        discard_audio(audio);
+        if !history {
+            discard_audio(audio);
+        }
         // Listen v1 has no separate session configuration/acknowledgement message.
         emit(events, ProviderEvent::Connected).await?;
         let (writer, reader) = socket.split();
         let (control_tx, control_rx) = mpsc::channel(8);
+        if history {
+            return history_stream(writer, reader, audio, events, self.config.diarize).await;
+        }
         tokio::select! {
             result = send_audio(writer, audio, control_rx) => result,
             result = receive(reader, events, control_tx, self.config.diarize) => result,
@@ -255,6 +271,132 @@ impl SpeechProvider for DeepgramProvider {
             }
             discard_audio(&mut audio);
         }
+    }
+
+    async fn run_history(
+        &self,
+        config: SessionConfig,
+        mut audio: mpsc::Receiver<Vec<i16>>,
+        events: mpsc::Sender<ProviderEvent>,
+        cancel: CancellationToken,
+    ) -> Result<()> {
+        let url = self.url(&config.source_language)?;
+        let key = crate::credentials::get(&self.config.api_key_env)?;
+        ensure!(key.len() <= 4096, "Deepgram API key exceeds the limit");
+        tokio::select! {
+            biased;
+            _ = cancel.cancelled() => bail!("historical transcription was cancelled"),
+            result = self.connection_mode(&url, &key, &mut audio, &events, true) =>
+                result.map_err(|failure| anyhow::anyhow!(failure.message)),
+        }
+    }
+}
+
+/// CloseStream flushes all cached audio, then returns final Results followed by
+/// summary Metadata. A socket close or elapsed silence is not that acknowledgement.
+/// https://developers.deepgram.com/docs/close-stream
+async fn history_stream(
+    mut writer: SplitSink<Socket, Message>,
+    mut reader: SplitStream<Socket>,
+    audio: &mut mpsc::Receiver<Vec<i16>>,
+    events: &mpsc::Sender<ProviderEvent>,
+    diarize: bool,
+) -> StreamResult<()> {
+    let (control_tx, mut control_rx) = mpsc::channel(8);
+    let (closed_tx, mut closed_rx) = tokio::sync::oneshot::channel();
+    let sender = async {
+        let mut total = 0usize;
+        loop {
+            tokio::select! {
+                message = control_rx.recv() => {
+                    send(writer.send(message.ok_or_else(|| Failure::fatal("Deepgram historical receiver stopped"))?)).await?;
+                }
+                samples = audio.recv() => {
+                    let Some(samples) = samples else { break; };
+                    if samples.len() > 16000 { return Err(Failure::fatal("Deepgram historical chunk exceeds one second")); }
+                    total = total.saturating_add(samples.len());
+                    if total > 16000 * 3600 { return Err(Failure::fatal("Deepgram historical audio exceeds sixty minutes")); }
+                    if !samples.is_empty() {
+                        let bytes: Vec<u8> = samples.iter().flat_map(|s| s.to_le_bytes()).collect();
+                        send(writer.send(Message::Binary(bytes.into()))).await?;
+                    }
+                }
+            }
+        }
+        send(writer.send(Message::Text(r#"{"type":"CloseStream"}"#.into()))).await?;
+        let _ = closed_tx.send(());
+        // Keep the writer available for Ping until the terminal acknowledgement.
+        loop {
+            send(
+                writer.send(
+                    control_rx
+                        .recv()
+                        .await
+                        .ok_or_else(|| Failure::fatal("Deepgram historical receiver stopped"))?,
+                ),
+            )
+            .await?;
+        }
+    };
+    let receiver = async {
+        let mut finals = Finals::default();
+        let mut closing = false;
+        let deadline = tokio::time::sleep(Duration::from_secs(120));
+        tokio::pin!(deadline);
+        loop {
+            let message = tokio::select! {
+                result = &mut closed_rx, if !closing => {
+                    result.map_err(|_| Failure::fatal("Deepgram historical input did not finish"))?;
+                    closing = true;
+                    deadline.as_mut().reset(Instant::now() + Duration::from_secs(120));
+                    continue;
+                }
+                _ = &mut deadline, if closing => return Err(Failure::fatal("Deepgram historical transcription final acknowledgement timed out")),
+                message = reader.next() => message
+                    .ok_or_else(|| Failure::fatal("Deepgram closed before historical transcription completed"))?
+                    .map_err(socket_failure)?,
+            };
+            let value = match message {
+                Message::Text(text) => parse(text.as_bytes())?,
+                Message::Ping(data) => {
+                    control_tx.try_send(Message::Pong(data)).map_err(|_| {
+                        Failure::fatal("Deepgram historical control queue is congested")
+                    })?;
+                    continue;
+                }
+                Message::Pong(_) => continue,
+                Message::Close(_) => {
+                    return Err(Failure::fatal(
+                        "Deepgram closed before historical transcription completed",
+                    ));
+                }
+                _ => return Err(Failure::fatal("Deepgram ASR returned unexpected content")),
+            };
+            for event in finals.decode(&value, diarize)? {
+                emit(events, event).await?;
+            }
+            if value["type"] == "Metadata" {
+                if !closing {
+                    // The send can finish before this select polls its oneshot.
+                    match closed_rx.try_recv() {
+                        Ok(()) => (),
+                        _ => {
+                            return Err(Failure::fatal(
+                                "Deepgram returned historical completion before input finished",
+                            ));
+                        }
+                    }
+                }
+                if finals.turn_open {
+                    emit(events, ProviderEvent::TurnComplete).await?;
+                }
+                return Ok(());
+            }
+        }
+    };
+    tokio::select! {
+        result = sender => result,
+        result = receiver => result,
     }
 }
 

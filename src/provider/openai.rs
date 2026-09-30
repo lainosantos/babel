@@ -268,6 +268,30 @@ impl SpeechProvider for OpenAiProvider {
         self.run_sessions(&config, &key, audio, events, cancel)
             .await
     }
+
+    async fn run_history(
+        &self,
+        mut config: SessionConfig,
+        mut audio: mpsc::Receiver<Vec<i16>>,
+        events: mpsc::Sender<ProviderEvent>,
+        cancel: CancellationToken,
+    ) -> Result<()> {
+        ensure!(
+            self.transcription_only,
+            "historical audio requires a dedicated STT provider"
+        );
+        config.model.clone_from(&self.transcription_model);
+        transcription::validate(&config)?;
+        let key = crate::credentials::get(&config.api_key_env)?;
+        ensure!(!key.trim().is_empty(), "OpenAI API key is empty");
+        let endpoint = self.url(&config.model)?;
+        tokio::select! {
+            biased;
+            _ = cancel.cancelled() => bail!("historical transcription was cancelled"),
+            result = self.connection_mode(&config, &key, &endpoint, &mut audio, &events, true) =>
+                result.map_err(|failure| anyhow::anyhow!(failure.message)),
+        }
+    }
 }
 
 impl OpenAiProvider {
@@ -322,6 +346,19 @@ impl OpenAiProvider {
         endpoint: &str,
         audio: &mut mpsc::Receiver<Vec<i16>>,
         events: &mpsc::Sender<ProviderEvent>,
+    ) -> SessionResult<()> {
+        self.connection_mode(config, key, endpoint, audio, events, false)
+            .await
+    }
+
+    async fn connection_mode(
+        &self,
+        config: &SessionConfig,
+        key: &str,
+        endpoint: &str,
+        audio: &mut mpsc::Receiver<Vec<i16>>,
+        events: &mpsc::Sender<ProviderEvent>,
+        history: bool,
     ) -> SessionResult<()> {
         let mut request = endpoint
             .into_client_request()
@@ -378,8 +415,13 @@ impl OpenAiProvider {
         })
         .await
         .map_err(|_| Failure::retry("OpenAI session setup timed out"))??;
-        discard_audio(audio);
+        if !history {
+            discard_audio(audio);
+        }
         emit(events, ProviderEvent::Connected).await?;
+        if history {
+            return transcription::run_history(socket, audio, events, config.vad_silence_ms).await;
+        }
         let (writer, reader) = socket.split();
         let (control_tx, control_rx) = mpsc::channel(8);
         if self.transcription_only {
@@ -952,6 +994,166 @@ mod tests {
             .unwrap()
             .unwrap()
             .unwrap();
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn historical_asr_flushes_eof_and_waits_for_committed_final() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = format!("ws://{}/realtime", listener.local_addr().unwrap());
+        let (release, released) = tokio::sync::oneshot::channel();
+        let (pending, pending_rx) = tokio::sync::oneshot::channel();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut socket = tokio_tungstenite::accept_async(stream).await.unwrap();
+            socket
+                .send(Message::Text(
+                    json!({"type":"session.created"}).to_string().into(),
+                ))
+                .await
+                .unwrap();
+            let setup: Value =
+                serde_json::from_str(&socket.next().await.unwrap().unwrap().into_text().unwrap())
+                    .unwrap();
+            assert_eq!(setup["session"]["type"], "transcription");
+            assert!(setup["session"]["audio"]["input"]["turn_detection"].is_null());
+            socket
+                .send(Message::Text(
+                    json!({"type":"session.updated"}).to_string().into(),
+                ))
+                .await
+                .unwrap();
+            for turn in ["a", "b"] {
+                let mut bytes = 0;
+                loop {
+                    let value: Value = serde_json::from_str(
+                        &socket.next().await.unwrap().unwrap().into_text().unwrap(),
+                    )
+                    .unwrap();
+                    match value["type"].as_str().unwrap() {
+                        "input_audio_buffer.append" => {
+                            bytes += STANDARD
+                                .decode(value["audio"].as_str().unwrap())
+                                .unwrap()
+                                .len()
+                        }
+                        "input_audio_buffer.commit" => break,
+                        kind => panic!("history generated unexpected content {kind}"),
+                    }
+                }
+                assert!(bytes >= 4800);
+                // A completed transcript arriving before commit acknowledgement
+                // must not cause the provider to prematurely complete history.
+                socket.send(Message::Text(json!({"type":"conversation.item.input_audio_transcription.completed","item_id":turn,"transcript":"Original final."}).to_string().into())).await.unwrap();
+                if turn == "a" {
+                    socket
+                        .send(Message::Text(
+                            json!({"type":"input_audio_buffer.committed","item_id":turn})
+                                .to_string()
+                                .into(),
+                        ))
+                        .await
+                        .unwrap();
+                }
+            }
+            pending.send(()).unwrap();
+            released.await.unwrap();
+            socket
+                .send(Message::Text(
+                    json!({"type":"input_audio_buffer.committed","item_id":"b"})
+                        .to_string()
+                        .into(),
+                ))
+                .await
+                .unwrap();
+        });
+        let provider =
+            OpenAiProvider::transcription(endpoint, "gpt-live-transcribe".into()).unwrap();
+        let url = provider.url("").unwrap();
+        let (tx, mut rx) = mpsc::channel(4);
+        tx.send(vec![0; 16000]).await.unwrap();
+        tx.send(vec![5000; 1600]).await.unwrap();
+        tx.send(vec![0; 4800]).await.unwrap();
+        tx.send(vec![5000; 321]).await.unwrap();
+        drop(tx);
+        let (events, mut received) = mpsc::channel(16);
+        let worker = tokio::spawn(async move {
+            let config = SessionConfig {
+                vad_silence_ms: 300,
+                ..config()
+            };
+            provider
+                .connection_mode(&config, "synthetic-key", &url, &mut rx, &events, true)
+                .await
+        });
+        pending_rx.await.unwrap();
+        assert!(!worker.is_finished());
+        release.send(()).unwrap();
+        timeout(Duration::from_secs(3), worker)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        let mut alignments = Vec::new();
+        while let Some(event) = received.recv().await {
+            match event {
+                ProviderEvent::Transcript {
+                    input: true,
+                    metadata,
+                    ..
+                } => alignments.push(metadata.alignment_ms),
+                ProviderEvent::Connected | ProviderEvent::TurnComplete => (),
+                unexpected => panic!("history leaked non-STT event {unexpected:?}"),
+            }
+        }
+        assert_eq!(alignments, vec![Some(900), Some(1400)]);
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn historical_asr_close_before_final_is_an_error() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = format!("ws://{}/realtime", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut socket = tokio_tungstenite::accept_async(stream).await.unwrap();
+            socket
+                .send(Message::Text(
+                    json!({"type":"session.created"}).to_string().into(),
+                ))
+                .await
+                .unwrap();
+            socket.next().await.unwrap().unwrap();
+            socket
+                .send(Message::Text(
+                    json!({"type":"session.updated"}).to_string().into(),
+                ))
+                .await
+                .unwrap();
+            loop {
+                let value: Value = serde_json::from_str(
+                    &socket.next().await.unwrap().unwrap().into_text().unwrap(),
+                )
+                .unwrap();
+                if value["type"] == "input_audio_buffer.commit" {
+                    break;
+                }
+            }
+            socket.close(None).await.unwrap();
+        });
+        let provider =
+            OpenAiProvider::transcription(endpoint, "gpt-live-transcribe".into()).unwrap();
+        let url = provider.url("").unwrap();
+        let (tx, mut rx) = mpsc::channel(1);
+        tx.send(vec![5000; 1600]).await.unwrap();
+        drop(tx);
+        let (events, _received) = mpsc::channel(8);
+        assert!(
+            provider
+                .connection_mode(&config(), "synthetic-key", &url, &mut rx, &events, true)
+                .await
+                .is_err()
+        );
         server.await.unwrap();
     }
 

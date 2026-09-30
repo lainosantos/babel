@@ -1,6 +1,7 @@
 mod activity;
 mod agent;
 mod command_tools;
+mod history;
 mod notifications;
 mod routing;
 use routing::{Routing, maintain_routing, stop_routing};
@@ -18,7 +19,7 @@ use std::{
     path::PathBuf,
     sync::{
         Arc, Mutex as StdMutex,
-        atomic::{AtomicU32, AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering},
     },
     time::{Duration, Instant},
 };
@@ -68,6 +69,9 @@ pub struct EngineStatus {
     pub speaker: RouteStatus,
     pub last_error: Option<String>,
     pub local_runtime: crate::local_runtime::RuntimeStatus,
+    pub history: crate::history::HistoryStatus,
+    pub history_included_secs: f64,
+    pub history_transcription_pending: bool,
 }
 
 #[derive(Default)]
@@ -137,6 +141,8 @@ struct Running {
     speaker: Arc<RouteMetrics>,
     physical_input: watch::Sender<String>,
     physical_output: watch::Sender<String>,
+    history_included_secs: f64,
+    history_transcription_pending: Arc<AtomicBool>,
 }
 impl Running {
     fn snapshot(&self) -> EngineStatus {
@@ -167,12 +173,16 @@ impl Running {
             speaker,
             last_error: (!errors.is_empty()).then(|| format!("{}. Escolha outro dispositivo físico pela bandeja para continuar na mesma sessão.", errors.join("; "))),
             local_runtime: Default::default(),
+            history: Default::default(),
+            history_included_secs: self.history_included_secs,
+            history_transcription_pending: self.history_transcription_pending.load(Ordering::Acquire),
         }
     }
 }
 
 struct State {
     config: AppConfig,
+    history: Arc<crate::history::HistoryBuffer>,
     config_revision: u64,
     agent_revision: u64,
     commands: Arc<crate::commands::CommandService>,
@@ -238,6 +248,7 @@ impl Controller {
             local_runtime,
             monitor_cancel: CancellationToken::new(),
             state: Arc::new(Mutex::new(State {
+                history: Arc::new(crate::history::HistoryBuffer::new(&config.history)),
                 config,
                 config_revision: 0,
                 agent_revision: 0,
@@ -342,6 +353,7 @@ impl Controller {
         }
         status.config_revision = state.config_revision;
         status.local_runtime = self.local_runtime.status();
+        status.history = state.history.status(Instant::now());
         if status.running && status.last_error.is_none() {
             status.last_error = state.last.last_error.clone();
         }
@@ -396,6 +408,7 @@ impl Controller {
             maintain_routing(&mut state).await;
             return Err(error);
         }
+        state.history.configure(&config.history);
         state.config = config;
         cancel_pending_start(&mut state);
         self.local_runtime.reconcile(&state.config);
@@ -462,6 +475,14 @@ impl Controller {
         name: Option<String>,
         revision: Option<u64>,
     ) -> Result<()> {
+        self.start_with_history(name, 0, revision).await
+    }
+    pub async fn start_with_history(
+        &self,
+        name: Option<String>,
+        history_seconds: u32,
+        revision: Option<u64>,
+    ) -> Result<()> {
         self.commands.start()?;
         self.start_command_notifications();
         let mut state = self.state.lock().await;
@@ -485,6 +506,7 @@ impl Controller {
             "Uma sessão está sendo preparada"
         );
         state.config.validate_for_start()?;
+        history::validate_request(&state.config, history_seconds)?;
         let configured = state.config.clone();
         let config_revision = state.config_revision;
         let preparing = self.monitor_cancel.child_token();
@@ -550,12 +572,29 @@ impl Controller {
                 route.playback_device
             );
         }
-        // One shared basename and clock for the complete session. Open files
-        // before capturing so path/permission failures are reported immediately.
-        let origin = Instant::now();
-        let SessionFiles { transcript, audio } =
-            create_session_files(&cfg, &session, origin).await?;
+        // Stop the old capture before taking a single snapshot. The new routes
+        // start strictly after this boundary, so no original frame is saved twice.
         stop_routing(&mut state).await?;
+        let now = Instant::now();
+        let mut recent = state.history.snapshot(history_seconds, now);
+        history::select_sources(&mut recent, &cfg, now);
+        if history_seconds > 0 && recent.frames.is_empty() {
+            maintain_routing(&mut state).await;
+            bail!("Nenhum áudio recente disponível para as fontes selecionadas nesta sessão");
+        }
+        let origin = recent.origin;
+        let files = create_session_files(&cfg, &session, origin).await;
+        let SessionFiles { transcript, audio } = match files {
+            Ok(files) => files,
+            Err(error) => {
+                maintain_routing(&mut state).await;
+                return Err(error);
+            }
+        };
+        let history_included_secs = recent.included_secs;
+        let history_transcription_pending = Arc::new(AtomicBool::new(
+            cfg.transcription.enabled && !recent.frames.is_empty(),
+        ));
         let (physical_input, input_changes) = watch::channel(cfg.microphone.capture_device.clone());
         let (physical_output, output_changes) = watch::channel(cfg.speaker.playback_device.clone());
         let cancel = CancellationToken::new();
@@ -573,6 +612,10 @@ impl Controller {
                 audio,
                 input_changes,
                 output_changes,
+                history: state.history.clone(),
+                recent,
+                session_origin: origin,
+                history_transcription_pending: history_transcription_pending.clone(),
             },
         ));
         state.running = Some(Running {
@@ -584,6 +627,8 @@ impl Controller {
             speaker,
             physical_input,
             physical_output,
+            history_included_secs,
+            history_transcription_pending,
         });
         state.last = stopped_status();
         state.routing_error = None;
@@ -734,6 +779,10 @@ struct SessionIo {
     audio: Option<SessionAudioRecorder>,
     input_changes: watch::Receiver<String>,
     output_changes: watch::Receiver<String>,
+    history: Arc<crate::history::HistoryBuffer>,
+    recent: crate::history::HistorySnapshot,
+    session_origin: Instant,
+    history_transcription_pending: Arc<AtomicBool>,
 }
 
 #[derive(Clone)]
@@ -749,6 +798,8 @@ struct RouteIo {
     origin: TranscriptOrigin,
     capture_changes: watch::Receiver<String>,
     playback_changes: watch::Receiver<String>,
+    history: Arc<crate::history::HistoryBuffer>,
+    session_origin: Instant,
 }
 
 async fn run_session(
@@ -761,16 +812,32 @@ async fn run_session(
     let mut jobs = JoinSet::new();
     let transcript_tx = if let Some(writer) = io.transcript {
         let (tx, rx) = mpsc::channel(128);
-        jobs.spawn(async move { writer.run(rx).await.context("Transcrição consolidada") });
+        let recent = io.recent.clone();
+        let config = cfg.clone();
+        let history_cancel = cancel.child_token();
+        let pending = io.history_transcription_pending.clone();
+        jobs.spawn(async move {
+            history::write_transcript(writer, rx, config, recent, history_cancel, pending)
+                .await
+                .context("Transcrição consolidada")
+        });
         Some(tx)
     } else {
         None
     };
     let audio_tx = if let Some(writer) = io.audio {
         let (tx, rx) = mpsc::channel(256);
+        let frames = io.recent.frames.clone();
         jobs.spawn(async move {
             writer
-                .run(rx)
+                .run_with_history(
+                    rx,
+                    frames.into_iter().map(|frame| AudioRecord {
+                        lane: frame.lane,
+                        samples: frame.samples().to_vec(),
+                        captured_at: frame.captured_at,
+                    }),
+                )
                 .await
                 .context("Gravação do áudio original misturado")
         });
@@ -778,6 +845,9 @@ async fn run_session(
     } else {
         None
     };
+    // Only the prefix workers retain this snapshot. Release the supervisor's
+    // references now so old PCM is freed as soon as replay has completed.
+    drop(io.recent);
     // Keep the unchanged virtual endpoints' watch senders alive throughout the session.
     let (_mic_virtual_tx, mic_virtual_rx) = watch::channel(cfg.microphone.playback_device.clone());
     let (_speaker_virtual_tx, speaker_virtual_rx) =
@@ -840,6 +910,8 @@ async fn run_session(
                     origin,
                     capture_changes,
                     playback_changes,
+                    history: io.history.clone(),
+                    session_origin: io.session_origin,
                 },
             ));
         }
@@ -934,6 +1006,8 @@ async fn run_route(
         origin,
         mut capture_changes,
         mut playback_changes,
+        history,
+        session_origin,
     } = io;
     if capture_changes.borrow().is_empty() || playback_changes.borrow().is_empty() {
         metrics.state("unconfigured");
@@ -1105,6 +1179,7 @@ async fn run_route(
     }
     let mut connected = false;
     let mut stt_connected = false;
+    let mut stt_offset_ms = None;
     let mut tap_resampler = audio::resample::Resampler::new(capture_rate, INPUT_RATE);
     let mut original_float = Vec::with_capacity(4800);
     let mut tap_float = Vec::with_capacity(1600);
@@ -1161,12 +1236,13 @@ async fn run_route(
                         }
                         ProviderEvent::Reconnecting { .. } => {
                             stt_connected = false;
+                            stt_offset_ms = None;
                             metrics.reconnects.fetch_add(1, Ordering::Relaxed);
                             if !translating { metrics.state("reconnecting"); }
                         }
                         _ => {}
                     }
-                    record_recognition_event(event, &transcript_tx, &metrics)?;
+                    record_recognition_event_at(event, &transcript_tx, &metrics, stt_offset_ms.unwrap_or(0))?;
                 }
                 frame = captured_rx.recv() => {
                     if cancel.is_cancelled() { break Ok(()); }
@@ -1175,7 +1251,7 @@ async fn run_route(
                     metrics.input_level.store(input_level.to_bits(), Ordering::Relaxed);
                     ensure!(frame.sample_rate == capture_rate, "Formato de captura incompatível");
                     if !translating {
-                        let taps = if needs_provider || audio_tx.is_some() {
+                        let taps = if needs_provider || audio_tx.is_some() || cfg.history.enabled {
                             original_float.clear(); tap_float.clear();
                             original_float.extend(frame.samples.iter().map(|&v| f32::from(v) / 32768.0));
                             tap_resampler.process(&original_float, &mut tap_float);
@@ -1191,6 +1267,7 @@ async fn run_route(
                         } else { metrics.audio.dropped_frames.fetch_add(1, Ordering::Relaxed); }
                         frame.samples = taps;
                     }
+                    history.push(match origin { TranscriptOrigin::Microphone => RecordingLane::Microphone, TranscriptOrigin::Speaker => RecordingLane::Speaker }, &frame.samples, frame.captured_at);
                     if let Some(sender) = &audio_tx {
                         sender.try_send(AudioRecord { lane: match origin { TranscriptOrigin::Microphone => RecordingLane::Microphone, TranscriptOrigin::Speaker => RecordingLane::Speaker }, samples: frame.samples.clone(), captured_at: frame.captured_at })
                             .map_err(|_| anyhow!("Gravação de áudio original indisponível ou lenta; sessão parada para evitar perda silenciosa"))?;
@@ -1199,6 +1276,10 @@ async fn run_route(
                         if frame.captured_at.elapsed() > Duration::from_millis(u64::from(cfg.audio.max_capture_age_ms)) {
                             metrics.audio.dropped_frames.fetch_add(1, Ordering::Relaxed);
                         } else {
+                            if transcribing && stt_connected && stt_offset_ms.is_none() {
+                                let start = frame.captured_at.checked_sub(Duration::from_secs_f64(frame.samples.len() as f64 / f64::from(INPUT_RATE))).unwrap_or(frame.captured_at);
+                                stt_offset_ms = Some(start.saturating_duration_since(session_origin).as_millis().min(u128::from(u64::MAX)) as u64);
+                            }
                             fanout_original_audio(frame.samples,
                                 (translating && connected).then_some(&input_tx),
                                 (transcribing && stt_connected).then_some(&stt_input_tx), &metrics);
@@ -1226,7 +1307,8 @@ async fn run_route(
     // Save finals already delivered before cancellation. Never wait for a model
     // to finish another turn or replay a result into a later device activation.
     while let Ok(event) = stt_events_rx.try_recv() {
-        if let Err(error) = record_recognition_event(event, &transcript_tx, &metrics)
+        if let Err(error) =
+            record_recognition_event_at(event, &transcript_tx, &metrics, stt_offset_ms.unwrap_or(0))
             && cleanup_result.is_ok()
         {
             cleanup_result = Err(error);
@@ -1268,17 +1350,36 @@ fn fanout_original_audio(
     }
 }
 
+#[cfg(test)]
 fn record_recognition_event(
     event: ProviderEvent,
     transcript: &Option<TranscriptSink>,
     metrics: &RouteMetrics,
 ) -> Result<()> {
+    record_recognition_event_at(event, transcript, metrics, 0)
+}
+fn record_recognition_event_at(
+    event: ProviderEvent,
+    transcript: &Option<TranscriptSink>,
+    metrics: &RouteMetrics,
+    offset_ms: u64,
+) -> Result<()> {
     match event {
         ProviderEvent::Transcript {
             input: true,
             text,
-            metadata,
+            mut metadata,
         } => {
+            for value in [
+                &mut metadata.start_ms,
+                &mut metadata.end_ms,
+                &mut metadata.alignment_ms,
+            ]
+            .into_iter()
+            .flatten()
+            {
+                *value = value.saturating_add(offset_ms);
+            }
             metrics
                 .view
                 .lock()
@@ -1628,6 +1729,8 @@ mod tests {
             speaker: Arc::new(RouteMetrics::default()),
             physical_input: input,
             physical_output: output,
+            history_included_secs: 0.0,
+            history_transcription_pending: Arc::new(AtomicBool::new(false)),
         });
         let (interface, revision) = controller
             .set_interface_language("en".into(), Some(0))

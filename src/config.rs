@@ -23,6 +23,7 @@ pub struct AppConfig {
     pub speaker: RouteConfig,
     pub transcription: TranscriptionConfig,
     pub recording: RecordingConfig,
+    pub history: HistoryConfig,
     pub files: FileConfig,
 }
 
@@ -108,6 +109,31 @@ impl Default for RecordingConfig {
             speaker: true,
             directory: "recordings".into(),
         }
+    }
+}
+
+/// Original audio retained only in memory, independently of file sessions.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct HistoryConfig {
+    pub enabled: bool,
+    pub duration_secs: u32,
+}
+impl Default for HistoryConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            duration_secs: 600,
+        }
+    }
+}
+impl HistoryConfig {
+    pub fn validate(&self) -> Result<()> {
+        ensure!(
+            (1..=3600).contains(&self.duration_secs),
+            "Histórico de áudio: 1 a 3600 segundos"
+        );
+        Ok(())
     }
 }
 
@@ -354,6 +380,7 @@ impl Default for AppConfig {
             },
             transcription: TranscriptionConfig::default(),
             recording: RecordingConfig::default(),
+            history: HistoryConfig::default(),
             files: FileConfig::default(),
         }
     }
@@ -510,6 +537,7 @@ impl AppConfig {
         self.interface.validate()?;
         self.agent.validate()?;
         self.local_runtime.validate()?;
+        self.history.validate()?;
         ensure!(self.version == 1, "Versão de configuração não suportada");
         crate::storage::resolve_base(&self.files.base_path)?;
         crate::session::validate_pattern(&self.files.name_pattern)?;
@@ -813,6 +841,29 @@ fn canonical_device(id: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn original_history_defaults_and_bounds_are_backward_compatible() {
+        let mut document = toml::Value::try_from(AppConfig::default()).unwrap();
+        document.as_table_mut().unwrap().remove("history");
+        let mut config: AppConfig = document.try_into().unwrap();
+        assert!(config.history.enabled);
+        assert_eq!(config.history.duration_secs, 600);
+        config.validate().unwrap();
+        for duration in [0, 3601, u32::MAX] {
+            config.history.duration_secs = duration;
+            assert!(config.validate().is_err());
+        }
+        for duration in [1, 600, 3600] {
+            config.history.duration_secs = duration;
+            config.validate().unwrap();
+        }
+        config.history.enabled = false;
+        let serialized = toml::to_string(&config).unwrap();
+        let restored: AppConfig = toml::from_str(&serialized).unwrap();
+        assert!(!restored.history.enabled);
+        assert_eq!(restored.history.duration_secs, 3600);
+    }
 
     #[test]
     fn managed_local_defaults_validate_without_an_external_installation() {

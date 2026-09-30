@@ -65,6 +65,158 @@ async fn task_result(task: JoinHandle<Result<()>>) -> Result<()> {
 }
 
 #[tokio::test]
+async fn history_manual_turn_flushes_eof_and_waits_for_final_transcript() {
+    let (listener, endpoint) = listener().await;
+    let (release, released) = tokio::sync::oneshot::channel();
+    let (flushed, flushed_rx) = tokio::sync::oneshot::channel();
+    let server = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        let mut socket = accept_async(stream).await.unwrap();
+        let setup: Value =
+            serde_json::from_str(&socket.next().await.unwrap().unwrap().into_text().unwrap())
+                .unwrap();
+        assert_eq!(
+            setup["setup"]["realtimeInputConfig"]["automaticActivityDetection"]["disabled"],
+            true
+        );
+        socket
+            .send(Message::Text(
+                json!({"setupComplete":{}}).to_string().into(),
+            ))
+            .await
+            .unwrap();
+        let mut samples = 0;
+        let mut started = false;
+        loop {
+            let value: Value =
+                serde_json::from_str(&socket.next().await.unwrap().unwrap().into_text().unwrap())
+                    .unwrap();
+            let input = &value["realtimeInput"];
+            if input.get("activityStart").is_some() {
+                started = true;
+            }
+            if let Some(data) = input["audio"]["data"].as_str() {
+                assert!(started);
+                samples += STANDARD.decode(data).unwrap().len() / 2;
+            }
+            if input.get("activityEnd").is_some() {
+                break;
+            }
+        }
+        assert_eq!(samples, 1921); // 100 ms preroll + unfinished final speech.
+        socket
+            .send(Message::Text(
+                json!({"serverContent":{"interimInputTranscription":{"text":"wrong partial"}}})
+                    .to_string()
+                    .into(),
+            ))
+            .await
+            .unwrap();
+        flushed.send(()).unwrap();
+        released.await.unwrap();
+        socket
+            .send(Message::Text(
+                json!({"serverContent":{"inputTranscription":{"text":"Original final."}}})
+                    .to_string()
+                    .into(),
+            ))
+            .await
+            .unwrap();
+    });
+    let (tx, mut rx) = mpsc::channel(2);
+    tx.send(vec![0; 16000]).await.unwrap();
+    tx.send(vec![5000; 321]).await.unwrap();
+    drop(tx);
+    let (events, mut received) = mpsc::channel(8);
+    let worker = tokio::spawn(async move {
+        let config = SessionConfig {
+            model: TRANSCRIBE_MODEL.into(),
+            ..config()
+        };
+        run_connection_mode(
+            &config,
+            "synthetic-key",
+            &endpoint,
+            &mut rx,
+            &events,
+            &mut None,
+            true,
+        )
+        .await
+    });
+    flushed_rx.await.unwrap();
+    assert!(!worker.is_finished());
+    release.send(()).unwrap();
+    timeout(Duration::from_secs(3), worker)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert_eq!(event(&mut received).await, ProviderEvent::Connected);
+    assert!(matches!(
+        event(&mut received).await,
+        ProviderEvent::Transcript {
+            input: true,
+            metadata: TranscriptMetadata {
+                alignment_ms: Some(900),
+                ..
+            },
+            ..
+        }
+    ));
+    assert_eq!(event(&mut received).await, ProviderEvent::TurnComplete);
+    assert!(received.recv().await.is_none());
+    server.await.unwrap();
+}
+
+#[tokio::test]
+async fn historical_gemini_close_without_final_is_an_error() {
+    let (listener, endpoint) = listener().await;
+    let server = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        let mut socket = accept_async(stream).await.unwrap();
+        socket.next().await.unwrap().unwrap();
+        socket
+            .send(Message::Text(
+                json!({"setupComplete":{}}).to_string().into(),
+            ))
+            .await
+            .unwrap();
+        loop {
+            let value: Value =
+                serde_json::from_str(&socket.next().await.unwrap().unwrap().into_text().unwrap())
+                    .unwrap();
+            if value["realtimeInput"].get("activityEnd").is_some() {
+                break;
+            }
+        }
+        socket.close(None).await.unwrap();
+    });
+    let (tx, mut rx) = mpsc::channel(1);
+    tx.send(vec![5000; 1600]).await.unwrap();
+    drop(tx);
+    let (events, _received) = mpsc::channel(8);
+    let config = SessionConfig {
+        model: TRANSCRIBE_MODEL.into(),
+        ..config()
+    };
+    assert!(
+        run_connection_mode(
+            &config,
+            "synthetic-key",
+            &endpoint,
+            &mut rx,
+            &events,
+            &mut None,
+            true
+        )
+        .await
+        .is_err()
+    );
+    server.await.unwrap();
+}
+
+#[tokio::test]
 async fn dedicated_asr_sends_text_setup_and_only_final_originals() {
     let (listener, endpoint) = listener().await;
     let server = tokio::spawn(async move {
