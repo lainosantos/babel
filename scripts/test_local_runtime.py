@@ -15,15 +15,24 @@ import build_local_runtime as build
 import local_runtime_packaging as package
 
 
+def pe_header(machine):
+    header = bytearray(70)
+    header[:2] = b"MZ"
+    struct.pack_into("<I", header, 60, 64)
+    header[64:68] = b"PE\0\0"
+    struct.pack_into("<H", header, 68, machine)
+    return header
+
+
 def fixture(root, system="linux", arch="x86_64"):
     services = {}
     for name in ("whisper", "llama", "piper"):
-        path = root / name / "bin" / name
+        path = root / name / "bin" / (name + (".exe" if system == "windows" else ""))
         path.parent.mkdir(parents=True)
         header = bytearray(64)
         header[:6] = b"\x7fELF\x02\x01"
         struct.pack_into("<H", header, 18, 62)
-        path.write_bytes(header)
+        path.write_bytes(pe_header(package.PE_MACHINES[arch]) if system == "windows" else header)
         path.chmod(0o755)
         services[name] = {"executable": path.relative_to(root).as_posix()}
     data = root / "piper/share/espeak-ng-data"
@@ -78,7 +87,7 @@ endforeach()
             crt = vs / "VC/Redist/MSVC/14.44.1/x64/Microsoft.VC143.CRT"
             crt.mkdir(parents=True)
             for name in ("vcruntime140.dll", "msvcp140.dll"):
-                (crt / name).write_bytes(b"private CRT fixture")
+                (crt / name).write_bytes(pe_header(0x8664))
             inspector = vs / "VC/Tools/MSVC/14.44.1/bin/Hostx64/x64/dumpbin.exe"
             inspector.parent.mkdir(parents=True)
             inspector.touch()
@@ -99,8 +108,55 @@ endforeach()
             for service in ("whisper", "llama", "piper"):
                 binaries = destination / service / "bin"
                 for name in ("vcruntime140.dll", "msvcp140.dll"):
-                    self.assertEqual((binaries / name).read_bytes(), b"private CRT fixture")
+                    self.assertEqual((binaries / name).read_bytes(), pe_header(0x8664))
                 self.assertIn(binaries / (service + ".exe"), inspected)
+
+    def test_windows_arm_crt_foreign_companion_is_omitted_but_required_dependencies_fail(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            vs = root / "vs"
+            crt = vs / "VC/Redist/MSVC/14.51.1/arm64/Microsoft.VC145.CRT"
+            crt.mkdir(parents=True)
+            (crt / "vcruntime140.dll").write_bytes(pe_header(0xAA64))
+            # Microsoft's ARM64 redistributable ships this x64 companion too.
+            (crt / "vcruntime140_1.dll").write_bytes(pe_header(0x8664))
+            inspector = vs / "VC/Tools/MSVC/14.51.1/bin/Hostx64/arm64/dumpbin.exe"
+            inspector.parent.mkdir(parents=True)
+            inspector.touch()
+            destination = root / "runtime"
+            fixture(destination, "windows", "aarch64")
+            imports = "    vcruntime140.dll\n    KERNEL32.dll\n"
+
+            def inspect(*args, **kwargs):
+                return mock.Mock(stdout=str(vs) if "-property" in args else imports)
+
+            with mock.patch.object(build, "run", side_effect=inspect):
+                build.windows_runtime(destination, "aarch64")
+                for service in ("whisper", "llama", "piper"):
+                    binaries = destination / service / "bin"
+                    self.assertEqual(package.pe_machine(binaries / "vcruntime140.dll"), 0xAA64)
+                    self.assertFalse((binaries / "vcruntime140_1.dll").exists())
+                imports += "    vcruntime140_1.dll\n"
+                with self.assertRaisesRegex(ValueError, "Unbundled runtime dependency.*vcruntime140_1.dll"):
+                    build.windows_runtime(destination, "aarch64")
+
+    def test_pe_architecture_stays_strict_and_reports_the_offending_file(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            fixture(root, "windows", "aarch64")
+            manifest = package.validate(root, "windows", "aarch64")
+            dependency = root / "llama/bin/foreign.dll"
+            for machine in (0x8664, 0xA641, 0xA64E):
+                with self.subTest(machine=machine):
+                    dependency.write_bytes(pe_header(machine))
+                    build.write_manifest(root, "windows", "aarch64", manifest["services"])
+                    with self.assertRaisesRegex(ValueError, f"foreign.dll.*0x{machine:04X}.*0xAA64"):
+                        package.validate(root, "windows", "aarch64")
+            for header in (b"MZ", pe_header(0xAA64)[:68], pe_header(0xAA64)[:64] + b"wrong!"):
+                with self.subTest(header=header):
+                    dependency.write_bytes(header)
+                    with self.assertRaisesRegex(ValueError, "Invalid PE.*foreign.dll"):
+                        package.pe_machine(dependency)
 
     def test_windows_generator_matches_installed_visual_studio_and_cmake(self):
         generators = json.dumps({"generators": [{"name": name} for name in ["NMake Makefiles", "Visual Studio 17 2022", "Visual Studio 18 2026"]]})

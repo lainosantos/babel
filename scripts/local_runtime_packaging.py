@@ -7,6 +7,21 @@ import shutil
 import stat
 import struct
 
+PE_MACHINES = {"x86_64": 0x8664, "aarch64": 0xAA64}
+
+
+def pe_machine(path):
+    """Read the native PE machine without executing vendor code."""
+    with path.open("rb") as stream:
+        header = stream.read(64)
+        if len(header) != 64 or header[:2] != b"MZ":
+            raise ValueError(f"Invalid PE DOS header: {path.name}")
+        stream.seek(struct.unpack_from("<I", header, 60)[0])
+        pe = stream.read(6)
+        if len(pe) != 6 or pe[:4] != b"PE\0\0":
+            raise ValueError(f"Invalid PE signature or truncated machine header: {path.name}")
+        return struct.unpack_from("<H", pe, 4)[0]
+
 
 def sha256(path):
     with path.open("rb") as source:
@@ -60,7 +75,7 @@ def validate(root, system, arch):
     if not (root / data / "phondata").is_file():
         raise ValueError("Piper phoneme data is missing")
     # Inspect every native file, including backend DLLs loaded at runtime.
-    for relative in expected:
+    for relative in sorted(expected):
         file = root / relative
         with file.open("rb") as stream:
             header = stream.read(64)
@@ -69,11 +84,10 @@ def validate(root, system, arch):
                     raise ValueError("ELF inference dependency has the wrong architecture")
             elif header[:2] == b"MZ":
                 if system != "windows" or len(header) < 64:
-                    raise ValueError("Unexpected PE inference dependency")
-                stream.seek(struct.unpack_from("<I", header, 60)[0])
-                pe = stream.read(6)
-                if pe[:4] != b"PE\0\0" or struct.unpack_from("<H", pe, 4)[0] != {"x86_64": 0x8664, "aarch64": 0xAA64}[arch]:
-                    raise ValueError("PE inference dependency has the wrong architecture")
+                    raise ValueError(f"Unexpected PE inference dependency: {relative}")
+                machine = pe_machine(file)
+                if machine != PE_MACHINES[arch]:
+                    raise ValueError(f"PE inference dependency has the wrong architecture: {relative} (machine 0x{machine:04X}, expected 0x{PE_MACHINES[arch]:04X})")
             elif header[:4] == b"\xcf\xfa\xed\xfe":
                 if system != "macos" or struct.unpack_from("<I", header, 4)[0] != {"x86_64": 0x1000007, "aarch64": 0x100000c}[arch]:
                     raise ValueError("Mach-O inference dependency has the wrong architecture")

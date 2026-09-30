@@ -23,6 +23,8 @@ import tempfile
 import urllib.request
 import zipfile
 
+from local_runtime_packaging import PE_MACHINES, pe_machine, validate
+
 ROOT = Path(__file__).resolve().parents[1]
 LOCK = Path(__file__).with_name("local_runtime.lock.json")
 PATCHES = {"whisper": "whisper-dynamic-port.patch", "llama": "llama-readiness.patch", "piper": "piper-managed.patch", "espeak": "espeak-windows-io.patch"}
@@ -246,7 +248,14 @@ def windows_runtime(destination, arch):
     candidates = sorted((Path(vs) / "VC/Redist/MSVC").glob("*/" + ("arm64" if arch == "aarch64" else "x64") + "/Microsoft.VC*.CRT"))
     if not candidates:
         raise ValueError("Visual C++ redistributable DLLs are missing from the build toolchain")
-    for dll in candidates[-1].glob("*.dll"):
+    for dll in sorted(candidates[-1].glob("*.dll")):
+        # Microsoft's ARM64 CRT directory also contains the x64-only
+        # vcruntime140_1.dll companion. Keep our native payload strict rather
+        # than shipping foreign binaries or accepting them in the validator.
+        machine = pe_machine(dll)
+        if machine != PE_MACHINES[arch]:
+            print(f"Skipping foreign CRT companion {dll.name}: machine 0x{machine:04X}, target 0x{PE_MACHINES[arch]:04X}", flush=True)
+            continue
         for service in ("whisper", "llama", "piper"):
             copy_regular(dll, destination / service / "bin" / dll.name, True)
     notices = list((Path(vs) / "Licenses").glob("**/*REDIST*"))
@@ -354,6 +363,7 @@ def build(args):
             if path.is_dir():
                 path.chmod(0o755)
         write_manifest(payload, system, arch, services)
+        validate(payload, system, arch)
         # Executable smoke never loads a model or starts a listener.
         for name, service in services.items():
             smoke_command([payload / service["executable"], "--help"])
@@ -364,7 +374,6 @@ def build(args):
 
 
 def extract_artifacts(directory, output):
-    from local_runtime_packaging import validate
     archives = sorted(directory.glob("*.tar.gz"))
     if not archives:
         raise ValueError("No native runtime CI artifacts were downloaded")
