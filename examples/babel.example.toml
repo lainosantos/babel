@@ -36,9 +36,9 @@ connect_timeout_secs = 15
 max_reconnect_attempts = 5
 
 [providers.local]
-# Integrated engines start automatically; model weights download on first selection.
+# Selection downloads weights; sessions load the engines only for enabled features.
 whisper_endpoint = "auto"
-whisper_model = "base"
+whisper_model = "base-q5_1"
 ollama_endpoint = "auto"
 translation_api = "ollama" # Only used for an explicitly configured external endpoint.
 translation_model = "qwen3-0.6b"
@@ -52,7 +52,8 @@ request_timeout_secs = 30
 [local_runtime]
 # Empty uses the current account's application cache; explicit paths must be absolute.
 directory = ""
-threads = 4
+threads = 2
+idle_unload_secs = 60 # Release session models from RAM after this idle interval.
 
 [audio]
 quality = "balanced"
@@ -134,7 +135,7 @@ punctuate = true
 
 [transcription.providers.whisper]
 endpoint = "auto" # Built-in engine with a dynamically assigned local port.
-model = "base" # tiny, base or small; multilingual weights.
+model = "base-q5_1" # Multilingual compact default; tiny-q5_1 and small-q5_1 also available.
 api_key_env = "" # Optional only for an external endpoint; never store a secret here.
 segment_ms = 2000
 silence_ms = 300
@@ -156,3 +157,8 @@ directory = "recordings"
 # base_path = '/Users/ana/Babel'
 # base_path = 'C:\Users\Ana\Babel'
 name_pattern = "{date}-{time}-{session}-{id}"
+
+[agent]
+whisper_model = "base-q5_1" # Managed command recognizer, installed by setup_whisper.py.
+local_threads = 2 # Whisper only, bounded by available CPUs.
+idle_unload_secs = 60 # Whisper after mic inactivity; Needle after the last command.
