@@ -1,4 +1,5 @@
-//! Observe consumers of the virtual endpoints without opening a hardware stream.
+//! Observe virtual-endpoint consumers and the selected system microphone without
+//! opening a hardware stream. Speaker activity always requires an external client.
 //! Linux combines PulseAudio subscription events with bounded, periodic snapshots.
 
 #[cfg(any(target_os = "macos", test))]
@@ -69,10 +70,17 @@ mod linux {
 
     #[derive(Default, Debug)]
     struct UseSnapshot {
+        microphone_default: bool,
         microphone_clients: HashSet<u64>,
         speaker_clients: HashSet<u64>,
         microphone_error: Option<String>,
         speaker_error: Option<String>,
+    }
+
+    impl UseSnapshot {
+        fn microphone_active(&self) -> bool {
+            self.microphone_default || !self.microphone_clients.is_empty()
+        }
     }
 
     #[derive(Debug, Clone, Copy)]
@@ -159,7 +167,7 @@ mod linux {
                         }
                         publish(
                             &state,
-                            !current.microphone_clients.is_empty(),
+                            current.microphone_active(),
                             !current.speaker_clients.is_empty(),
                             current.microphone_error.clone(),
                             current.speaker_error.clone(),
@@ -194,6 +202,7 @@ mod linux {
                     // Never keep a route open using activity from its old endpoint.
                     invalidate_direction(&state, true);
                     snapshot.microphone_clients.clear();
+                    snapshot.microphone_default = false;
                 }
                 result = speaker_capture.changed(), if speaker_watch_open => {
                     speaker_watch_open = result.is_ok();
@@ -217,8 +226,7 @@ mod linux {
     fn apply_event(event: Event, snapshot: &mut UseSnapshot, state: &watch::Sender<EndpointUse>) {
         match event {
             Event::RemovedSourceOutput(id) => {
-                if snapshot.microphone_clients.remove(&id) && snapshot.microphone_clients.is_empty()
-                {
+                if snapshot.microphone_clients.remove(&id) && !snapshot.microphone_active() {
                     let current = state.borrow().clone();
                     publish(
                         state,
@@ -358,7 +366,27 @@ mod linux {
             let short = pactl(&["list", "short", "modules"], MAX_SNAPSHOT_BYTES).await?;
             snapshot["modules"] = Value::Array(parse_short_modules(&short)?);
         }
-        evaluate(&snapshot, mic_device, speaker_device)
+        // The system default is a user's microphone selection even if no app
+        // has opened capture yet. Query it only to authorize the microphone;
+        // a default output never authorizes speaker capture or playback.
+        let default_source = pactl(&["get-default-source"], 4096)
+            .await
+            .and_then(|bytes| {
+                String::from_utf8(bytes).context("default microphone name was not UTF-8")
+            });
+        let mut result = evaluate(
+            &snapshot,
+            mic_device,
+            speaker_device,
+            default_source.as_deref().ok().map(str::trim),
+        )?;
+        if let Err(error) = default_source {
+            result.microphone_clients.clear();
+            result.microphone_error = Some(format!(
+                "Could not inspect the system microphone selection: {error:#}"
+            ));
+        }
+        Ok(result)
     }
 
     fn parse_short_modules(bytes: &[u8]) -> Result<Vec<Value>> {
@@ -492,6 +520,18 @@ mod linux {
         Ok(mic_sources)
     }
 
+    fn default_microphone_selected(
+        sources: &[Value],
+        microphone_sources: &HashSet<u64>,
+        default_source: &str,
+    ) -> bool {
+        !default_source.is_empty()
+            && sources.iter().any(|source| {
+                source["name"].as_str() == Some(default_source)
+                    && index(&source["index"]).is_some_and(|id| microphone_sources.contains(&id))
+            })
+    }
+
     fn speaker_sink(sinks: &[Value], sources: &[Value], speaker_device: &str) -> Result<u64> {
         let monitor = sources
             .iter()
@@ -516,7 +556,12 @@ mod linux {
         ))
     }
 
-    fn evaluate(snapshot: &Value, mic_device: &str, speaker_device: &str) -> Result<UseSnapshot> {
+    fn evaluate(
+        snapshot: &Value,
+        mic_device: &str,
+        speaker_device: &str,
+        default_source: Option<&str>,
+    ) -> Result<UseSnapshot> {
         let sinks = array(snapshot, "sinks")?;
         let sources = array(snapshot, "sources")?;
         let modules = array(snapshot, "modules")?;
@@ -535,6 +580,8 @@ mod linux {
                 HashSet::new()
             }
         };
+        result.microphone_default = default_source
+            .is_some_and(|name| default_microphone_selected(sources, &mic_sources, name));
         let speaker_sink_id = match speaker_sink(sinks, sources, speaker_device) {
             Ok(id) => Some(id),
             Err(error) => {
@@ -592,6 +639,7 @@ mod linux {
         }
         if result.microphone_error.is_some() {
             result.microphone_clients.clear();
+            result.microphone_default = false;
         }
         if result.speaker_error.is_some() {
             result.speaker_clients.clear();

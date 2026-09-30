@@ -40,6 +40,7 @@ const MAX_SESSIONS: i32 = 256;
 struct RouteObservation {
     pair: Pair,
     active: bool,
+    microphone_default: bool,
     callback_epoch: u64,
 }
 
@@ -172,7 +173,13 @@ fn changed_mapping(
 ) -> bool {
     current.as_ref().is_ok_and(|current| {
         previous.as_ref().is_none_or(|previous| {
-            previous.pair != current.pair || previous.callback_epoch != current.callback_epoch
+            previous.pair != current.pair
+                || policy::client_epoch_changed(
+                    previous.microphone_default,
+                    current.microphone_default,
+                    previous.callback_epoch,
+                    current.callback_epoch,
+                )
         })
     })
 }
@@ -339,8 +346,8 @@ fn inspect(
         return Ok((Err(error.to_string()), Err(error.to_string())));
     }
     Ok((
-        inspect_route(&enumerator, microphone, mic_observer),
-        inspect_route(&enumerator, speaker, speaker_observer),
+        inspect_route(&enumerator, microphone, mic_observer, true),
+        inspect_route(&enumerator, speaker, speaker_observer, false),
     ))
 }
 
@@ -411,8 +418,34 @@ fn inspect_route(
     enumerator: &DeviceEnumerator,
     pair: Result<Pair>,
     observer: &mut Observer,
+    microphone: bool,
 ) -> RouteResult {
-    let result = pair.and_then(|pair| observer.inspect(enumerator, pair));
+    let result = pair
+        .and_then(|pair| observer.inspect(enumerator, pair))
+        .map(|mut route| {
+            if microphone {
+                // Windows permits separate defaults for calls and other apps. An
+                // unavailable role grants no authorization; external sessions are
+                // still inspected above. Never query default render devices here.
+                let defaults: Vec<String> = [
+                    wasapi::Role::Console,
+                    wasapi::Role::Multimedia,
+                    wasapi::Role::Communications,
+                ]
+                .iter()
+                .filter_map(|role| {
+                    enumerator
+                        .get_default_device_for_role(&wasapi::Direction::Capture, role)
+                        .ok()
+                })
+                .filter_map(|device| device.get_id().ok())
+                .collect();
+                route.microphone_default =
+                    policy::microphone_requested(&route.pair, &defaults, false);
+                route.active |= route.microphone_default;
+            }
+            route
+        });
     if result.is_err() {
         observer.clear();
     }
@@ -540,6 +573,7 @@ impl Observer {
                 .sessions
                 .values()
                 .any(|session| session.activity.active()),
+            microphone_default: false,
             callback_epoch: self.signal.epoch(),
         })
     }

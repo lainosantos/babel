@@ -208,3 +208,64 @@ async fn changed_selection_closes_immediately_while_hal_worker_is_busy() {
     cancel.cancel();
     task.await.unwrap();
 }
+
+#[test]
+fn system_input_selection_activates_only_mic_and_releases_on_physical_selection() {
+    let (state, receiver) = tokio::sync::watch::channel(EndpointUse::default());
+    let mut tracker = UseTracker::default();
+    let mut snapshot = classify_processes(42, Some(10), Some(20), &[]);
+    snapshot.select_default_microphone(Some(10));
+    tracker.publish(&state, snapshot.clone());
+    let epoch = receiver.borrow().microphone_epoch;
+    assert!(receiver.borrow().microphone);
+    assert!(!receiver.borrow().speaker);
+    for default in [Some(30), Some(20), Some(0), None] {
+        snapshot.select_default_microphone(default);
+        tracker.publish(&state, snapshot.clone());
+        assert!(!receiver.borrow().microphone);
+        assert!(!receiver.borrow().speaker);
+    }
+    assert!(receiver.borrow().microphone_epoch > epoch);
+    snapshot = classify_processes(42, Some(10), Some(20), &[process(100, &[10], &[])]);
+    snapshot.select_default_microphone(Some(30));
+    tracker.publish(&state, snapshot);
+    assert!(receiver.borrow().microphone);
+}
+
+#[test]
+fn selected_system_input_does_not_survive_errors_or_stale_selection() {
+    let (state, receiver) = tokio::sync::watch::channel(EndpointUse::default());
+    let mut tracker = UseTracker::default();
+    let mut observed = observation();
+    observed.snapshot.select_default_microphone(Some(10));
+    let snapshot = observed.validate(Instant::now(), "replacement-mic", "speaker");
+    assert!(!snapshot.microphone_default);
+    tracker.publish(&state, snapshot);
+    assert!(!receiver.borrow().microphone);
+    let mut snapshot = classify_processes(42, Some(10), Some(20), &[]);
+    snapshot.select_default_microphone(Some(10));
+    snapshot.microphone_error = Some("device disconnected".into());
+    tracker.publish(&state, snapshot);
+    assert!(!receiver.borrow().microphone);
+    let mut snapshot = classify_processes(42, Some(10), Some(10), &[]);
+    snapshot.select_default_microphone(Some(10));
+    tracker.publish(&state, snapshot);
+    assert!(!receiver.borrow().microphone);
+    assert!(!receiver.borrow().speaker);
+}
+
+#[test]
+fn default_mic_remains_active_after_last_external_client_closes() {
+    let (state, receiver) = tokio::sync::watch::channel(EndpointUse::default());
+    let mut tracker = UseTracker::default();
+    let mut snapshot = classify_processes(42, Some(10), Some(20), &[process(100, &[10], &[])]);
+    snapshot.select_default_microphone(Some(10));
+    tracker.publish(&state, snapshot.clone());
+    let epoch = receiver.borrow().microphone_epoch;
+    snapshot.microphone_clients.clear();
+    tracker.publish(&state, snapshot);
+    assert!(receiver.borrow().microphone);
+    assert_eq!(receiver.borrow().microphone_epoch, epoch);
+    tracker.invalidate_selection(&state, true);
+    assert!(!receiver.borrow().microphone);
+}

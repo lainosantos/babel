@@ -271,8 +271,10 @@ pastas; o destino não depende de onde o aplicativo foi iniciado.
   áudio não abre STT. Se ambas as direções forem selecionadas para transcrição,
   haverá duas conexões/requisições independentes, mesmo usando o mesmo provider.
   Tradução e STT em nuvem simultâneos também podem ter cobranças separadas.
-- O Babel processa uma rota somente enquanto o dispositivo virtual correspondente
-  estiver em uso. Ao desativá-lo, cancela os processadores e descarta áudio antigo.
+- O microfone é processado enquanto Babel é o microfone padrão do sistema ou
+  um aplicativo usa seu microfone virtual. A saída exige um aplicativo enviando
+  áudio ao Babel. Ao desativar uma rota, o Babel cancela seus processadores e
+  descarta áudio antigo das filas.
   A ativação de comandos por voz continua restrita ao microfone e usa sua própria
   configuração, sem depender do STT de arquivo.
 - Filas são limitadas e o roteamento não aguarda uma chamada STT. Congestionamento

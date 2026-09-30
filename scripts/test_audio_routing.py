@@ -103,7 +103,7 @@ class AudioSandbox:
         self.pactl("load-module", "module-null-sink", "sink_name=babel_test_first")
         self.pactl("load-module", "module-null-sink", "sink_name=babel_test_other")
 
-    def stream(self, device, *, record=False, pinned=False, name="Babel routing test", pcm=None):
+    def stream(self, device, *, record=False, pinned=False, fixed_target=False, name="Babel routing test", pcm=None):
         args = [
             "pacat", "--record" if record else "--playback", "--raw",
             "--format=s16le", "--channels=1", "--rate=48000", "--device=" + device,
@@ -115,6 +115,11 @@ class AudioSandbox:
                 "babel.target=" + device, "node.dont-move=true",
                 "node.dont-reconnect=true", "node.dont-fallback=true",
             ])
+        elif fixed_target:
+            # Simulate an app retaining its explicit input selection when
+            # WirePlumber moves ordinary default-following capture streams.
+            # It remains an external consumer, without Babel ownership tags.
+            args.append("--property=node.dont-move=true")
         if record:
             source = subprocess.DEVNULL
         else:
@@ -287,6 +292,7 @@ def check_babel(sandbox, executable, snapshot):
     assert not (sandbox.root / "recordings").exists()
     assert not (sandbox.root / "transcripts").exists()
     print("PASS: idle history retains only selected originals in RAM and creates no session files.")
+    check_default_microphone(sandbox, babel, mic_targets)
 
     config = babel.api("config")
     config["recording"]["enabled"] = True
@@ -321,6 +327,44 @@ def check_babel(sandbox, executable, snapshot):
     print("PASS: recording keeps its session/file across deactivation; resumed routes use fresh processes.")
     check_history_recording(sandbox, babel, speaker_targets, recordings[0])
     sandbox.stop(babel.process, graceful=True)
+
+
+def check_default_microphone(sandbox, babel, mic_targets):
+    """A default virtual mic activates routing without requiring a capture app."""
+    sandbox.pactl("set-default-source", "babel_microphone")
+    babel.expect_routes(mic_targets)
+    wait_for(lambda: babel.api("agent/status")["microphone_active"],
+             "default microphone feeds the command tap without a capture app")
+    status = babel.api("status")
+    assert not status["running"]
+    assert status["microphone"]["state"] == "passthrough"
+    assert status["speaker"]["state"] == "waiting_for_app"
+    original_pids = {s["properties"]["application.process.id"] for s in sandbox.own_streams()}
+
+    microphone_app = sandbox.stream("babel_microphone", record=True, name="Default mic capture test")
+    babel.expect_routes(mic_targets)
+    sandbox.stop(microphone_app)
+    babel.expect_routes(mic_targets)
+    assert babel.api("agent/status")["microphone_active"]
+    assert original_pids == {s["properties"]["application.process.id"] for s in sandbox.own_streams()}, \
+        "Closing a capture app interrupted the still-selected default microphone"
+
+    microphone_app = sandbox.stream("babel_microphone", record=True, fixed_target=True, name="Explicit mic selection test")
+    babel.expect_routes(mic_targets)
+    sandbox.pactl("set-default-source", "babel_test_other.monitor")
+    babel.expect_routes(mic_targets)
+    assert babel.api("agent/status")["microphone_active"], \
+        "Changing the default interrupted an app explicitly using Babel"
+    sandbox.stop(microphone_app)
+    babel.expect_routes(set())
+    wait_for(lambda: not babel.api("agent/status")["microphone_active"],
+             "physical default and no Babel capture app release the command tap")
+    retained = babel.api("status")["history"]["microphone_secs"]
+    time.sleep(0.3)
+    assert babel.api("status")["history"]["microphone_secs"] == retained
+    assert not (sandbox.root / "recordings").exists()
+    assert not (sandbox.root / "transcripts").exists()
+    print("PASS: system-default mic routes and activates the command tap without an app; physical selection releases it unless explicitly used.")
 
 
 def check_history_recording(sandbox, babel, speaker_targets, previous_recording):

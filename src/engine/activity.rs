@@ -1,5 +1,6 @@
-//! A route owns devices and provider connections only while an application uses
-//! its virtual endpoint. Session identity and file writers live outside this scope.
+//! A route owns devices and provider connections while its virtual endpoint is
+//! selected: the microphone may be the system default or used by an application;
+//! the speaker requires application playback. Session/file writers outlive this scope.
 use super::*;
 use crate::audio::activity::EndpointUse;
 use std::future::Future;

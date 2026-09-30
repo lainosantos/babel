@@ -785,11 +785,11 @@ test('a waiting virtual endpoint has no active diagram or stale levels while the
   p.routeStatus('microphone', { state: 'waiting_for_app', input_level: 0.5, output_level: 0.25, captured_frames: 123, last_input_transcript: 'Original microphone words' });
   await p.poll();
   assert.equal(p.byId('session-state').textContent, 'Áudio original');
-  assert.equal(p.byId('microphone-state').textContent, 'Aguardando aplicativo');
+  assert.equal(p.byId('microphone-state').textContent, 'Roteamento inativo');
   assert.match(p.byId('microphone-state').title, /microfone virtual/);
   assert.equal(p.byId('microphone-signal').textContent, '—');
   assert.equal(p.byId('microphone-signal').classList.contains('original'), false);
-  assert.match(p.byId('microphone-signal').parentElement.getAttribute('aria-label'), /aguardando um aplicativo/);
+  assert.match(p.byId('microphone-signal').parentElement.getAttribute('aria-label'), /microfone virtual ser o padrão do sistema ou ser usado por um aplicativo/);
   for (const side of ['input', 'output']) {
     assert.equal(p.byId(`microphone-${side}`).value, 0);
     assert.equal(p.byId(`microphone-${side}-db`).textContent, '−∞ dB');
@@ -803,7 +803,7 @@ test('a waiting virtual endpoint has no active diagram or stale levels while the
   p.byId('start').click();
   await settle(() => !p.byId('stop').hidden && !p.byId('stop').disabled);
   assert.equal(p.byId('session-state').textContent, 'Sessão ativa');
-  assert.equal(p.byId('microphone-state').textContent, 'Aguardando aplicativo');
+  assert.equal(p.byId('microphone-state').textContent, 'Roteamento inativo');
   assert.equal(p.byId('microphone-signal').textContent, '—');
   assert.equal(p.byId('speaker-signal').textContent, 'IA');
   p.routeStatus('microphone', { input_level: 0.3, output_level: 0.2 });
@@ -819,7 +819,7 @@ test('both endpoints waiting is distinct from no routing and does not stop a rec
   p.routing(false);
   for (const route of ['microphone', 'speaker']) p.routeStatus(route, { state: 'waiting_for_app', input_level: 0.8, output_level: 0.7 });
   await p.poll();
-  assert.equal(p.byId('session-state').textContent, 'Aguardando aplicativo');
+  assert.equal(p.byId('session-state').textContent, 'Roteamento inativo');
   assert.equal(p.byId('status-dot').classList.contains('running'), false);
   assert.equal(p.byId('routing-error').hidden, true);
   p.set('microphone-enabled', false); p.set('speaker-enabled', false); p.set('recording-enabled', true);
@@ -832,14 +832,14 @@ test('both endpoints waiting is distinct from no routing and does not stop a rec
   assert.equal(p.config().recording.enabled, true);
   assert.equal(p.config().transcription.enabled, false);
   for (const route of ['microphone', 'speaker']) {
-    assert.equal(p.byId(`${route}-state`).textContent, 'Aguardando aplicativo');
+    assert.equal(p.byId(`${route}-state`).textContent, 'Roteamento inativo');
     assert.equal(p.byId(`${route}-signal`).textContent, '—');
     assert.equal(p.byId(`${route}-input`).value, 0);
     assert.equal(p.byId(`${route}-output`).value, 0);
   }
   p.byId('stop').click();
   await settle(() => p.byId('stop').hidden);
-  assert.equal(p.byId('session-state').textContent, 'Aguardando aplicativo');
+  assert.equal(p.byId('session-state').textContent, 'Roteamento inativo');
   assert.equal(p.config().recording.enabled, true);
 });
 
@@ -876,13 +876,13 @@ test('waiting endpoint labels follow the interface language and real device erro
   p.routing(false);
   for (const route of ['microphone', 'speaker']) p.routeStatus(route, { state: 'waiting_for_app' });
   await p.poll();
-  assert.equal(p.byId('session-state').textContent, 'Waiting for an app');
-  assert.equal(p.byId('speaker-state').textContent, 'Waiting for an app');
+  assert.equal(p.byId('session-state').textContent, 'Routing inactive');
+  assert.equal(p.byId('speaker-state').textContent, 'Routing inactive');
   assert.match(p.byId('speaker-state').title, /virtual output/);
   await chooseInterface(p, 'pt');
-  assert.equal(p.byId('session-state').textContent, 'Aguardando aplicativo');
+  assert.equal(p.byId('session-state').textContent, 'Roteamento inativo');
   assert.match(p.byId('speaker-state').title, /saída virtual/);
-  assert.match(p.byId('microphone-signal').parentElement.getAttribute('aria-label'), /aguardando um aplicativo/);
+  assert.match(p.byId('microphone-signal').parentElement.getAttribute('aria-label'), /microfone virtual ser o padrão do sistema ou ser usado por um aplicativo/);
   p.routeStatus('speaker', { state: 'waiting_for_app', device_error: 'Device disconnected', input_level: 1 });
   await p.poll();
   assert.equal(p.byId('speaker-state').textContent, 'Dispositivo indisponível');

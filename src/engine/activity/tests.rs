@@ -91,7 +91,7 @@ impl Harness {
 }
 
 #[tokio::test]
-async fn no_microphone_capture_until_an_app_selects_it_and_speaker_changes_do_not_restart_it() {
+async fn no_microphone_capture_until_selected_and_speaker_changes_do_not_restart_it() {
     let mut h = Harness::new(TranscriptOrigin::Microphone);
     tokio::task::yield_now().await;
     assert!(h.opened.try_recv().is_err());

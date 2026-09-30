@@ -1,5 +1,6 @@
 //! CoreAudio process clients of the two configured virtual cables (macOS 14.2+).
-//! No hardware streams, default-device queries, or audio taps are opened here.
+//! The selected system input also authorizes microphone routing. No hardware
+//! streams or audio taps are opened here; speaker usage still requires a client.
 
 use std::{
     collections::BTreeSet,
@@ -120,6 +121,7 @@ impl Observation {
         }
         if self.microphone_setting != microphone {
             self.snapshot.microphone_clients.clear();
+            self.snapshot.microphone_default = false;
             self.snapshot.microphone_device = None;
             self.snapshot.microphone_error = None;
         }
@@ -146,11 +148,20 @@ struct ProcessUse {
 struct UseSnapshot {
     microphone_device: Option<u32>,
     speaker_device: Option<u32>,
+    microphone_default: bool,
     microphone_clients: BTreeSet<(u32, u32)>,
     speaker_clients: BTreeSet<(u32, u32)>,
     microphone_error: Option<String>,
     speaker_error: Option<String>,
     error: Option<String>,
+}
+
+impl UseSnapshot {
+    fn select_default_microphone(&mut self, default_input: Option<u32>) {
+        self.microphone_default = self
+            .microphone_device
+            .is_some_and(|id| id != 0 && Some(id) == default_input);
+    }
 }
 
 fn classify_processes(
@@ -214,6 +225,7 @@ impl UseTracker {
         let mut next = self.previous.clone();
         if microphone {
             next.microphone_clients.clear();
+            next.microphone_default = false;
             next.microphone_device = None;
             next.microphone_error = None;
         } else {
@@ -227,17 +239,19 @@ impl UseTracker {
     fn publish(&mut self, state: &tokio::sync::watch::Sender<EndpointUse>, mut next: UseSnapshot) {
         if next.error.is_some() || next.microphone_error.is_some() {
             next.microphone_clients.clear();
+            next.microphone_default = false;
         }
         if next.error.is_some() || next.speaker_error.is_some() {
             next.speaker_clients.clear();
         }
-        let microphone = !next.microphone_clients.is_empty();
+        let microphone = next.microphone_default || !next.microphone_clients.is_empty();
         let speaker = !next.speaker_clients.is_empty();
         let microphone_replaced = self.previous.microphone_device != next.microphone_device
-            || !self
-                .previous
-                .microphone_clients
-                .is_subset(&next.microphone_clients);
+            || (!(self.previous.microphone_default && next.microphone_default)
+                && !self
+                    .previous
+                    .microphone_clients
+                    .is_subset(&next.microphone_clients));
         let speaker_replaced = self.previous.speaker_device != next.speaker_device
             || !self
                 .previous

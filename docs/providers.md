@@ -79,8 +79,10 @@ O Babel implementa uma biblioteca separada de design/clonagem e síntese com Gem
 ## Uso sem tradução e validação
 
 Desligue a tradução da direção desejada para encaminhar o áudio original. Esse
-percurso funciona sem sessão enquanto um aplicativo usa o dispositivo virtual;
-também permanece disponível durante uma sessão de gravação. Não há um provedor
+percurso funciona sem sessão: o microfone ativa quando Babel é o padrão do
+sistema ou um aplicativo usa seu microfone virtual; a saída exige um aplicativo
+enviando áudio ao Babel. Também permanece disponível durante uma sessão de
+gravação. Não há um provedor
 de diagnóstico para selecionar, e roteamento e gravação, com transcrição e
 tradução desligadas, não abrem conexões de IA nem exigem chave. A transcrição
 independente usa o perfil `transcription.providers.*` escolhido para cada origem, mesmo que a tradução dessa direção esteja ativa. Gemini, OpenAI, Deepgram e Whisper estão descritos no [guia de transcrição](transcription.md).

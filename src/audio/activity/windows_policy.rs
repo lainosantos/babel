@@ -1,5 +1,6 @@
 //! Portable policy for Windows endpoint pairing and session activity. The OS
-//! adapter supplies driver metadata, never an OS default or a guessed GUID.
+//! adapter supplies exact driver metadata and capture-default endpoint IDs,
+//! never a guessed GUID or an output-default activity fallback.
 
 use std::{
     collections::{HashMap, HashSet},
@@ -108,6 +109,27 @@ pub(super) fn independent(microphone: &Pair, speaker: &Pair) -> Result<()> {
         "select two independent Windows virtual cables for microphone and speaker"
     );
     Ok(())
+}
+
+/// The microphone feed is a render endpoint, but apps and Windows select its
+/// paired capture endpoint. Speaker defaults cannot authorize either route.
+pub(super) fn microphone_requested(
+    pair: &Pair,
+    default_capture_ids: &[String],
+    external: bool,
+) -> bool {
+    external || default_capture_ids.iter().any(|id| id == &pair.opposite)
+}
+
+pub(super) fn client_epoch_changed(
+    previous_default: bool,
+    current_default: bool,
+    previous: u64,
+    current: u64,
+) -> bool {
+    // While system selection independently holds the mic open, a capture app
+    // opening/closing does not interrupt wake-word audio or reset its queues.
+    !(previous_default && current_default) && previous != current
 }
 
 pub(super) fn external_process(process_id: u32, babel_process_id: u32) -> bool {
@@ -439,5 +461,37 @@ mod tests {
         assert!(!external_process(123, 123));
         assert!(external_process(456, 123));
         assert!(external_process(0, 123));
+    }
+    #[test]
+    fn system_capture_default_matches_paired_capture_id_and_keeps_app_authorization() {
+        let mic = pair(&babel_endpoints(), "babel-mic-render", Direction::Render).unwrap();
+        assert!(microphone_requested(
+            &mic,
+            &["babel-mic-capture".into()],
+            false
+        ));
+        assert!(microphone_requested(
+            &mic,
+            &["physical-capture".into(), "babel-mic-capture".into()],
+            false
+        ));
+        for defaults in [
+            vec![],
+            vec!["physical-capture".into()],
+            vec!["babel-mic-render".into()],
+            vec!["babel-speaker-capture".into()],
+            vec!["babel-mic-capture-copy".into()],
+        ] {
+            assert!(!microphone_requested(&mic, &defaults, false));
+            assert!(microphone_requested(&mic, &defaults, true));
+        }
+    }
+    #[test]
+    fn stable_system_mic_ignores_client_epoch_but_other_routes_keep_edges() {
+        assert!(!client_epoch_changed(true, true, 1, 3));
+        assert!(client_epoch_changed(false, false, 1, 3));
+        assert!(client_epoch_changed(true, false, 1, 3));
+        assert!(client_epoch_changed(false, true, 1, 3));
+        assert!(!client_epoch_changed(false, false, 3, 3));
     }
 }

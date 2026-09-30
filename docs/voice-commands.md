@@ -1,8 +1,43 @@
 # Comandos de voz locais com Needle 3 e MCP
 
-O agente usa uma cópia do **microfone físico original que alimenta o Babel**. Funciona durante o encaminhamento de áudio original e durante sessões de tradução, transcrição ou gravação. Não abre outro microfone, não ouve a saída dos interlocutores e não depende de uma sessão de gravação. A opção `agent.enabled` vem ligada. Depois da instalação dos serviços locais descrita abaixo, o Babel pode iniciá-los e descobrir suas portas automaticamente. A escuta só acontece enquanto um aplicativo usa o microfone virtual Babel; a rota de saída nunca ativa o agente.
+O agente usa uma cópia do **microfone físico original que alimenta o Babel**. Funciona durante o encaminhamento de áudio original e durante sessões de tradução, transcrição ou gravação. Não abre outro microfone, não ouve a saída dos interlocutores e não depende de uma sessão de gravação. A opção `agent.enabled` vem ligada. Depois da instalação dos serviços locais descrita abaixo, o Babel pode iniciá-los e descobrir suas portas automaticamente. A escuta fica ativa quando Babel é o microfone padrão do sistema ou quando um aplicativo usa explicitamente o microfone virtual Babel; a rota de saída nunca ativa o agente.
+
+Para usar comandos sem abrir um aplicativo de chamada ou gravação, escolha
+**Babel como microfone padrão nas configurações de áudio do sistema** e mantenha
+**Escutar comandos de voz** habilitado em Comandos. O Babel captura o microfone
+físico escolhido em Roteamento. Não é necessário iniciar uma sessão.
+
+Escolher o microfone físico como padrão pausa a captura e a escuta do Babel,
+a menos que algum aplicativo ainda esteja usando explicitamente o microfone
+virtual. Nesse caso, altere também o microfone desse aplicativo ou encerre sua
+captura. Desligar **Escutar comandos de voz** pausa somente o agente; o áudio
+ainda pode ser encaminhado. A saída continua dependendo de áudio enviado por
+um aplicativo ao Babel e nunca ativa comandos. Isso vale nos três sistemas.
 
 Diga **“Babel, acenda a luz da cozinha”**, ou diga **“Babel”**, espere a indicação de ativação e então dê o comando. O nome é configurável. A comparação ignora maiúsculas/minúsculas, exige palavras completas e aceita um cumprimento inicial como “Oi, Babel” ou “Hey, Babel”. Uma menção no meio de uma conversa (“eu uso o Babel”) não ativa ferramentas. Depois de uma ativação sem comando, o prazo padrão para a próxima fala é oito segundos. “Babel, cancelar” cancela essa ativação; durante uma chamada em processamento, use o botão de cancelar no painel.
+
+## Escuta e processamento
+
+Enquanto a rota do microfone está ativa, o Babel captura continuamente o PCM do
+microfone físico selecionado. O agente aproveita uma cópia dessa mesma captura;
+não abre um segundo microfone. Selecionar Babel como microfone padrão mantém
+essa rota ativa mesmo sem um aplicativo de chamada. Desabilitar comandos de voz
+interrompe a escuta do agente, mas não desativa uma rota ainda necessária ao
+sistema ou a um aplicativo.
+
+O filtro atual usa o nível de energia RMS para separar trechos com som e
+silêncio. Trechos não silenciosos seguem para o Whisper local, que reconhece o
+texto; o Babel então procura o nome de ativação. Assim, uma fala sem “Babel”
+também pode passar pelo Whisper, mas não aciona o Needle nem ferramentas. O
+Needle só é chamado depois do nome de ativação e de um comando. Esse filtro de
+energia não é um classificador dedicado de palavra de ativação; o Babel ainda
+não implementa esse tipo de detector.
+
+A escuta de comandos não cria WAV ou TXT. A gravação e a transcrição de arquivos
+dependem de uma sessão com esses recursos habilitados separadamente. A retenção
+opcional de áudio recente fica limitada à memória; só entra nos arquivos de
+uma sessão quando você marca **Incluir histórico recente** naquele início.
+Nenhuma dessas escolhas é ativada automaticamente pelo nome de ativação.
 
 ## Fluxo
 
@@ -56,7 +91,8 @@ scripts/needle_bridge.py
 ```
 
 Os helpers são iniciados quando o agente habilitado precisa atender ao microfone
-virtual em uso. Ao deixar de usar esse microfone, o Babel pausa a escuta e
+virtual ativo, por ser o padrão do sistema ou estar em uso por um aplicativo.
+Quando nenhuma dessas condições permanece, o Babel pausa a escuta e
 descarta falas pendentes; mantém os processos já iniciados para reutilização.
 Desabilitar o agente ou sair normalmente do aplicativo encerra os helpers que
 ele iniciou. Fechar apenas a janela de configurações não encerra o app. Com o
@@ -219,7 +255,8 @@ nesses logs. Em execução manual, não ative `--print-realtime`,
 | `Whisper model is not ready` | O serviço identificado ainda não respondeu com sucesso ao health check; confira a instalação e o arquivo do modelo. |
 
 Após corrigir uma instalação, o Babel tenta iniciar/usar os helpers novamente
-enquanto o agente está habilitado e o microfone virtual em uso. A página de
+enquanto o agente está habilitado e o microfone virtual é o padrão do sistema
+ou está em uso por um aplicativo. A página de
 configurações apenas consulta o estado: não captura uma gravação de teste nem
 executa ferramentas MCP por conta própria.
 

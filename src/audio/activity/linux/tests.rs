@@ -41,7 +41,7 @@ fn external_clients(snapshot: &mut Value) {
 }
 
 fn evaluated(snapshot: &Value) -> UseSnapshot {
-    evaluate(snapshot, "babel_mic_bus", "babel_speaker.monitor").unwrap()
+    evaluate(snapshot, "babel_mic_bus", "babel_speaker.monitor", None).unwrap()
 }
 
 #[test]
@@ -92,7 +92,7 @@ fn corked_clients_do_not_open_hardware_and_invalid_states_close_only_their_route
 fn missing_endpoint_closes_only_the_affected_route() {
     let mut snapshot = fixture();
     external_clients(&mut snapshot);
-    let result = evaluate(&snapshot, "missing_mic_bus", "babel_speaker.monitor").unwrap();
+    let result = evaluate(&snapshot, "missing_mic_bus", "babel_speaker.monitor", None).unwrap();
     assert!(result.microphone_clients.is_empty());
     assert!(
         result
@@ -102,7 +102,7 @@ fn missing_endpoint_closes_only_the_affected_route() {
             .contains("unavailable")
     );
     assert_eq!(result.speaker_clients, HashSet::from([310]));
-    let result = evaluate(&snapshot, "babel_mic_bus", "missing_speaker.monitor").unwrap();
+    let result = evaluate(&snapshot, "babel_mic_bus", "missing_speaker.monitor", None).unwrap();
     assert_eq!(result.microphone_clients, HashSet::from([210]));
     assert!(result.speaker_clients.is_empty());
     assert!(
@@ -248,5 +248,113 @@ async fn oversized_snapshot_output_is_rejected_without_unbounded_allocation() {
 
 #[test]
 fn invalid_snapshot_is_global_inspection_failure() {
-    assert!(evaluate(&json!({}), "babel_mic_bus", "babel_speaker.monitor").is_err());
+    assert!(evaluate(&json!({}), "babel_mic_bus", "babel_speaker.monitor", None).is_err());
+}
+
+#[test]
+fn selected_system_mic_activates_without_clients_and_never_activates_output() {
+    for name in ["babel_microphone", "babel_mic_bus.monitor"] {
+        let snapshot = fixture();
+        let result = evaluate(
+            &snapshot,
+            "babel_mic_bus",
+            "babel_speaker.monitor",
+            Some(name),
+        )
+        .unwrap();
+        assert!(result.microphone_active(), "{name}");
+        assert!(result.microphone_clients.is_empty());
+        assert!(result.speaker_clients.is_empty());
+    }
+    for name in [
+        "real_microphone",
+        "babel_speaker.monitor",
+        "babel_microphone_typo",
+        "",
+    ] {
+        let result = evaluate(
+            &fixture(),
+            "babel_mic_bus",
+            "babel_speaker.monitor",
+            Some(name),
+        )
+        .unwrap();
+        assert!(!result.microphone_active(), "{name}");
+        assert!(result.speaker_clients.is_empty());
+    }
+}
+
+#[test]
+fn switching_system_mic_releases_route_but_explicit_app_capture_keeps_it_active() {
+    let mut snapshot = fixture();
+    let (sender, receiver) = watch::channel(EndpointUse::default());
+    for (name, active, epoch) in [("babel_microphone", true, 1), ("real_microphone", false, 2)] {
+        let result = evaluate(
+            &snapshot,
+            "babel_mic_bus",
+            "babel_speaker.monitor",
+            Some(name),
+        )
+        .unwrap();
+        publish(&sender, result.microphone_active(), false, None, None, None);
+        assert_eq!(receiver.borrow().microphone, active);
+        assert_eq!(receiver.borrow().microphone_epoch, epoch);
+        assert_eq!(receiver.borrow().speaker_epoch, 0);
+    }
+    external_clients(&mut snapshot);
+    let result = evaluate(
+        &snapshot,
+        "babel_mic_bus",
+        "babel_speaker.monitor",
+        Some("real_microphone"),
+    )
+    .unwrap();
+    assert!(result.microphone_active());
+    assert!(!result.microphone_default);
+}
+
+#[test]
+fn system_default_does_not_bypass_moved_stream_or_missing_endpoint_checks() {
+    let mut snapshot = fixture();
+    snapshot["source_outputs"][1]["source"] = json!(21);
+    let result = evaluate(
+        &snapshot,
+        "babel_mic_bus",
+        "babel_speaker.monitor",
+        Some("babel_microphone"),
+    )
+    .unwrap();
+    assert!(!result.microphone_active());
+    assert!(result.microphone_error.is_some());
+    let result = evaluate(
+        &fixture(),
+        "missing_mic",
+        "babel_speaker.monitor",
+        Some("babel_microphone"),
+    )
+    .unwrap();
+    assert!(!result.microphone_active());
+    assert!(result.microphone_error.is_some());
+}
+
+#[test]
+fn removing_last_capture_client_does_not_close_system_selected_mic() {
+    let mut snapshot = fixture();
+    external_clients(&mut snapshot);
+    let mut result = evaluate(
+        &snapshot,
+        "babel_mic_bus",
+        "babel_speaker.monitor",
+        Some("babel_microphone"),
+    )
+    .unwrap();
+    let (sender, receiver) = watch::channel(EndpointUse::default());
+    publish(&sender, true, true, None, None, None);
+    apply_event(Event::RemovedSourceOutput(210), &mut result, &sender);
+    assert!(receiver.borrow().microphone);
+    assert_eq!(receiver.borrow().microphone_epoch, 1);
+    assert!(result.microphone_clients.is_empty());
+    apply_event(Event::RemovedSinkInput(310), &mut result, &sender);
+    assert!(!receiver.borrow().speaker);
+    assert!(receiver.borrow().microphone);
 }

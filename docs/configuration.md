@@ -6,7 +6,8 @@ O painel separa os controles em seis páginas:
 
 - **Roteamento:** escolha o microfone e a saída físicos e os dispositivos virtuais
   de cada direção. O encaminhamento do áudio original funciona sem iniciar uma
-  sessão, enquanto um aplicativo usa o dispositivo virtual correspondente.
+  sessão. O microfone ativa quando Babel é o padrão do sistema ou um aplicativo
+  o utiliza; a saída ativa quando um aplicativo envia áudio ao Babel.
 - **Tradução e vozes:** ative a tradução de cada direção, escolha idiomas,
   provedores e vozes e configure os perfis e as credenciais de IA compartilhados.
   A biblioteca de vozes fica nesta página.
@@ -111,8 +112,20 @@ O painel verifica Host/Origin e não carrega scripts/fontes de terceiros.
 O Babel tem um caminho de áudio local e uma sessão opcional de processamento.
 Enquanto o programa estiver aberto, as rotas configuradas encaminham o microfone
 físico para o microfone virtual e a saída virtual para a saída física. Sem uma
-sessão ativa, o conteúdo encaminhado é o áudio original, sem chamadas de IA nem
-criação de arquivos.
+sessão ativa, o conteúdo encaminhado é o áudio original, sem acionar os
+tradutores nem criar arquivos de sessão.
+
+O microfone fica ativo quando **Babel é o microfone padrão do sistema**, mesmo
+sem um aplicativo capturando áudio, ou quando algum aplicativo usa explicitamente
+o microfone virtual Babel. Isso também permite a escuta de comandos de voz, se
+habilitada. Para pausar essa rota, escolha o microfone físico como padrão do
+sistema e pare de usar Babel nos aplicativos que o selecionaram explicitamente.
+A escolha de um novo padrão não desconecta esses aplicativos.
+
+A saída é independente: só abre enquanto um aplicativo envia áudio à saída
+virtual Babel. Selecionar Babel apenas como saída padrão, sem reprodução de
+algum aplicativo, não abre essa rota nem ativa comandos. Essas regras são as
+mesmas no Linux, macOS e Windows.
 
 `microphone.enabled` e `speaker.enabled` controlam **somente a tradução** de cada
 direção. Eles não desligam captura, reprodução, transcrição ou gravação. Durante
@@ -390,7 +403,7 @@ duration_secs = 600
 ```
 
 `duration_secs` aceita inteiros de 1 a 3600. A capacidade é um limite: iniciar o
-Babel há pouco, um dispositivo virtual sem uso ou uma falha de captura podem
+Babel há pouco, uma rota inativa ou uma falha de captura podem
 resultar em menos áudio disponível. O histórico é descartado do mais antigo
 para o mais recente à medida que a janela avança. Salvar uma capacidade menor
 remove a parte que excede o novo limite; salvar `enabled = false` limpa toda a

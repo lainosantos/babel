@@ -2,8 +2,11 @@
 
 A opção **Iniciar com o sistema** abre a bandeja e o painel do Babel no login do
 usuário. Ela vem **desativada**. Ao abrir, o Babel encaminha o áudio
-original entre os dispositivos configurados quando um aplicativo usa o dispositivo
-virtual correspondente. Tradução, transcrição e gravação
+original entre os dispositivos configurados. O microfone ativa quando Babel é
+o microfone padrão do sistema ou um aplicativo usa explicitamente seu microfone
+virtual. A saída ativa somente enquanto um aplicativo envia áudio ao Babel.
+Comandos de voz habilitados podem escutar o microfone mesmo sem um aplicativo
+de chamada aberto, inclusive logo após o login. Tradução, transcrição e gravação
 aguardam **Iniciar sessão**; o encaminhamento original não envia áudio aos
 provedores nem cria arquivos. O início automático também não instala dispositivos
 virtuais.

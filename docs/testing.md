@@ -67,7 +67,8 @@ python3 scripts/test_audio_routing.py --babel target/debug/babel
 ```
 
 O cenário verifica a proteção contra mover os próprios streams do Babel,
-ausência de captura/reprodução quando nenhum aplicativo usa os virtuais,
+ausência de captura/reprodução quando nenhum aplicativo usa os virtuais e
+o microfone padrão do sistema não é Babel,
 ativação independente de microfone/saída, troca do aplicativo para o dispositivo
 físico simulado e retorno ao Babel. Repete a sequência numa sessão com gravação:
 o ID e o único WAV são preservados, enquanto os subprocessos de áudio são novos.
@@ -362,13 +363,16 @@ independentemente. Use fones se testar microfone físico depois.
 
 | Cenário | Resultado a verificar |
 |---|---|
-| Nenhum aplicativo usando os cabos | Ambas as rotas aguardam; nenhum stream físico do Babel aberto, medidores instantâneos zerados. |
+| Nenhum aplicativo usando os cabos; microfone padrão físico | Ambas as rotas aguardam; nenhum stream físico do Babel aberto, medidores instantâneos zerados. |
+| Babel como microfone padrão, sem aplicativo capturando | O microfone abre, os medidores respondem e comandos habilitados podem escutar; a saída continua inativa. |
+| Padrão muda de Babel para o microfone físico, sem consumidor explícito | O microfone fecha e os comandos deixam de escutar. |
+| Babel escolhido só como saída padrão, sem reprodução | A saída permanece inativa; não há realimentação provocada pelos streams do próprio Babel. |
 | Aplicativo captura somente a ponta do mic virtual | Só o microfone abre; áudio chega à captura do aplicativo e a saída do Babel continua esperando. |
 | Aplicativo reproduz somente no cabo de saída | Só a saída abre; áudio chega ao destino físico escolhido. |
 | Ambas as pontas em uso | Duas rotas independentes, sem realimentação ou duplicação de áudio. |
 | Aplicativo troca a saída para o físico, mantendo o mic virtual | A rota de saída fecha; o mic permanece ativo. Retornar ao cabo retoma a saída sem tocar áudio acumulado. |
-| Aplicativo troca o mic para o físico, mantendo a saída virtual | A rota do mic fecha; saída permanece ativa. Comandos de voz do Babel não podem disparar por áudio de saída. |
-| Apenas o padrão global do SO muda | Aplicativo explicitamente conectado ao cabo continua atendido; padrão global não substitui a identidade configurada. |
+| Aplicativo troca o mic para o físico, mantendo a saída virtual; padrão do sistema também físico | A rota do mic fecha; saída permanece ativa. Comandos de voz do Babel não podem disparar por áudio de saída. |
+| Padrão de microfone muda para o físico, mas um aplicativo ainda captura Babel | O aplicativo explicitamente conectado continua atendido; microfone e comandos habilitados permanecem ativos. |
 | Físico trocado pelo painel/bandeja em sessão ativa | Novo físico recebe a rota; sessão e arquivos permanecem os mesmos, sem replay do backlog. |
 | Físico desconectado e reconectado, ou segundo físico escolhido | Diagnóstico e tentativa de recuperação da identidade selecionada; nenhum fallback silencioso para o padrão. |
 | Sessão com gravação original, tradução/transcrição desligadas | Um WAV contém as duas origens na mesma linha do tempo; pausa/retomada mantém o ID e o arquivo. |

@@ -76,14 +76,18 @@ dispositivos ou reabra suas configurações de áudio. Escolha a saída virtual 
 aplicativo específico. Aplicativos que só aceitam a saída padrão exigem a escolha
 manual do usuário no sistema.
 
-O Babel só abre cada rota quando um aplicativo usa seu dispositivo virtual:
-reprodução em `babel_speaker` ativa a saída; captura em `babel_microphone` ativa
-o microfone. Selecionar o dispositivo e manter o aplicativo pausado pode mostrar
-**Aguardando aplicativo**. Trocar a saída do aplicativo para o alto-falante real
-fecha a rota de saída do Babel; o microfone continua independente. Voltar ao
-virtual retoma a rota sem encerrar a sessão nem criar novos arquivos.
-O controle segue os fluxos efetivamente conectados: mudar apenas o padrão do
-sistema não desativa um aplicativo que tenha escolhido explicitamente o Babel.
+Escolher **Babel_Microphone como microfone padrão do sistema** abre a rota
+do microfone e permite comandos de voz habilitados, mesmo sem um aplicativo
+capturando áudio. Uma captura explícita de outro aplicativo em `babel_microphone`
+também abre essa rota. Para pausá-la, escolha o microfone físico como padrão e
+encerre qualquer captura explícita do Babel nos aplicativos.
+
+A saída só abre quando um aplicativo reproduz em `babel_speaker`; escolher a
+saída como padrão sem reproduzir áudio não basta. Trocar a saída do aplicativo
+para o alto-falante real fecha essa rota; o microfone continua independente.
+Rotas sem essas condições mostram **Roteamento inativo**. Voltar a ativá-las
+retoma o áudio sem encerrar a sessão nem criar novos arquivos. Mudar apenas
+o padrão do sistema não desativa aplicativos que escolheram explicitamente Babel.
 
 Em PipeWire, os streams do Babel usam `node.dont-move`, `node.dont-reconnect` e
 `node.dont-fallback` para evitar que uma troca de padrão os desvie para outro
@@ -136,12 +140,16 @@ converte para o formato do percurso de tradução. Não é necessário criar um
 dispositivo agregado ou Multi-Output.
 
 O monitor CoreAudio consulta processos externos que usam o **UID selecionado**,
-distinguindo captura e reprodução e excluindo o próprio Babel. Capturar Babel
-Microphone em outro aplicativo abre a rota do microfone físico; reproduzir em
-Babel Speaker abre a rota para os fones. Mudar o padrão global não encerra um
-aplicativo conectado explicitamente ao dispositivo. Quando o uso termina, a
-rota mostra **Aguardando aplicativo**, fecha seus streams e descarta o áudio
-pendente. A outra direção e os arquivos da sessão continuam.
+distinguindo captura e reprodução e excluindo o próprio Babel. Escolher Babel
+Microphone como entrada padrão do macOS abre a rota do microfone físico e
+permite comandos de voz habilitados, mesmo sem captura por outro aplicativo.
+Uma captura explícita de Babel Microphone também abre essa rota. Escolher o
+microfone físico como padrão só a fecha se nenhum aplicativo ainda usa Babel.
+
+Reproduzir em Babel Speaker abre a rota para os fones; apenas escolhê-lo como
+saída padrão não basta. Quando a condição de atividade deixa de existir, a rota
+mostra **Roteamento inativo**, fecha seus streams e descarta o áudio pendente.
+A outra direção e os arquivos da sessão continuam.
 
 Selecione os dispositivos diretamente nos aplicativos: o monitor não expande
 automaticamente Aggregate/Multi-Output. Sistemas anteriores a 14.2, APIs
@@ -201,11 +209,16 @@ via WASAPI. Não ative “Escutar este dispositivo” nos virtuais: isso criaria
 segunda rota fora do controle do Babel. Use **Atualizar dispositivos** depois da
 instalação e selecione as pontas da tabela.
 
-O monitor de sessões WASAPI verifica a ponta usada pelo aplicativo externo:
-captura em **Babel Microphone** libera a rota do microfone; reprodução em
-**Babel Speaker** libera a rota de saída. As próprias sessões do Babel são
-excluídas. Cada direção fica em **Aguardando aplicativo** quando sua ponta não
-está em uso, mesmo que a outra direção ou a sessão de gravação continuem ativas.
+O monitor verifica o microfone padrão do Windows e as sessões WASAPI externas.
+Escolher **Babel Microphone** como microfone padrão abre a rota do microfone e
+permite comandos de voz habilitados, mesmo sem um aplicativo capturando áudio.
+Uma captura explícita em Babel Microphone também abre essa rota. Escolher o
+microfone físico como padrão só a fecha se nenhum aplicativo ainda usa Babel.
+
+Reprodução de um aplicativo em **Babel Speaker** abre a rota de saída; escolher
+a saída como padrão sem reprodução não basta. As sessões do próprio Babel são
+excluídas. Cada direção mostra **Roteamento inativo** quando sua condição de
+atividade não é atendida, mesmo com a outra direção ou sessão ainda ativa.
 
 O pareamento verifica a descrição de cada endpoint fornecida pelo driver e a
 identidade de interface **Babel Audio v1**. Os IDs WASAPI são preservados como
@@ -233,8 +246,10 @@ Referência oficial: [limites da enumeração de sessões WASAPI](https://learn.
 
 ## Limites de desempenho e validação
 
-A suspensão por uso do dispositivo virtual é independente por direção nos
-três backends. Ausência de uso fecha os streams da rota, descarta suas filas e
+A suspensão é independente por direção nos três backends. O microfone exige
+Babel como padrão do sistema ou um aplicativo consumidor; a saída exige um
+aplicativo reproduzindo nela. Quando a condição deixa de existir, o Babel fecha
+os streams da rota, descarta suas filas e
 encerra o processamento correspondente; a retomada cria um novo percurso, sem
 reproduzir respostas antigas. O nome/ID da sessão e seus writers permanecem
 os mesmos. A detecção no macOS e Windows tem os requisitos e limites descritos

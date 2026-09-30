@@ -368,6 +368,210 @@ mod tests {
         assert!(pcm[4800..].iter().all(|&v| v == 2000));
     }
 
+    #[tokio::test]
+    async fn both_historical_lanes_share_one_mixed_wav_and_interleaved_transcript_clock() {
+        // Responses are explicitly released in microphone/speaker/microphone
+        // order. No real recognizer, capture device or scheduler delay is used.
+        let (requests, mut pending_requests) = mpsc::channel(4);
+        let app = axum::Router::new().route(
+            "/inference",
+            axum::routing::post(move |body: axum::body::Bytes| {
+                let requests = requests.clone();
+                async move {
+                    let form = String::from_utf8_lossy(&body);
+                    assert!(form.contains("name=\"translate\"\r\n\r\nfalse"));
+                    let microphone = form.contains("name=\"language\"\r\n\r\npt");
+                    assert!(microphone || form.contains("name=\"language\"\r\n\r\nen"));
+                    let (reply, response) = tokio::sync::oneshot::channel::<&'static str>();
+                    requests.send((microphone, reply)).await.unwrap();
+                    axum::Json(serde_json::json!({"text": response.await.unwrap()}))
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = format!("http://{}/inference", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let directory = tempfile::tempdir().unwrap();
+        let mut config = AppConfig::default();
+        config.recording.enabled = true;
+        config.transcription.enabled = true;
+        config.transcription.directory = directory.path().to_string_lossy().into_owned();
+        config.transcription.microphone_recognition.provider = "whisper".into();
+        config.transcription.microphone_recognition.language = "pt".into();
+        config.transcription.speaker_recognition.provider = "whisper".into();
+        config.transcription.speaker_recognition.language = "en".into();
+        config.transcription.providers.whisper.endpoint = endpoint;
+        config.transcription.providers.whisper.segment_ms = 500;
+        config.transcription.providers.whisper.silence_ms = 100;
+
+        let now = Instant::now() - Duration::from_secs(2);
+        let origin = now - Duration::from_secs(1);
+        let buffer = HistoryBuffer::new(&config.history);
+        for (lane, value, end_ms) in [
+            (RecordingLane::Microphone, 1000, 500),
+            (RecordingLane::Speaker, 3000, 500),
+            (RecordingLane::Microphone, 2000, 1000),
+        ] {
+            buffer.push(lane, &[value; 8000], origin + Duration::from_millis(end_ms));
+        }
+        let mut snapshot = buffer.snapshot(10, now);
+        select_sources(&mut snapshot, &config, now);
+        assert_eq!(snapshot.origin, origin);
+        assert_eq!(snapshot.included_secs, 1.0);
+        assert_eq!(snapshot.frames.len(), 3);
+        let recorder =
+            SessionAudioRecorder::create(directory.path(), "combined", snapshot.origin, true, true)
+                .await
+                .unwrap();
+        let writer = TranscriptWriter::create_merged(
+            &config.transcription,
+            "combined",
+            "session",
+            "Two lanes",
+        )
+        .await
+        .unwrap();
+        let (audio, audio_rx) = mpsc::channel(2);
+        let (live, live_rx) = mpsc::channel(2);
+        for (lane, origin, value, text) in [
+            (
+                RecordingLane::Microphone,
+                TranscriptOrigin::Microphone,
+                4000,
+                "microfone ao vivo",
+            ),
+            (
+                RecordingLane::Speaker,
+                TranscriptOrigin::Speaker,
+                6000,
+                "saída ao vivo",
+            ),
+        ] {
+            audio
+                .send(AudioRecord {
+                    lane,
+                    samples: vec![value; 8000],
+                    captured_at: snapshot.origin + Duration::from_millis(1500),
+                })
+                .await
+                .unwrap();
+            live.send(TranscriptRecord::Routed {
+                origin,
+                record: Box::new(TranscriptRecord::Text {
+                    input: true,
+                    text: text.into(),
+                    metadata: TranscriptMetadata {
+                        start_ms: Some(1000),
+                        end_ms: Some(1500),
+                        ..Default::default()
+                    },
+                    received_at: chrono::Utc::now().to_rfc3339(),
+                }),
+            })
+            .await
+            .unwrap();
+        }
+        drop(audio);
+        drop(live);
+        let frames = snapshot.frames.clone();
+        let transcript = tokio::spawn(write_transcript(
+            writer,
+            live_rx,
+            config,
+            snapshot,
+            CancellationToken::new(),
+            Arc::new(AtomicBool::new(true)),
+        ));
+        recorder
+            .run_with_history(
+                audio_rx,
+                frames.into_iter().map(|frame| AudioRecord {
+                    lane: frame.lane,
+                    samples: frame.samples().to_vec(),
+                    captured_at: frame.captured_at,
+                }),
+            )
+            .await
+            .unwrap();
+
+        let mut first_microphone = None;
+        let mut first_speaker = None;
+        for _ in 0..2 {
+            let (microphone, reply) =
+                tokio::time::timeout(Duration::from_secs(3), pending_requests.recv())
+                    .await
+                    .unwrap()
+                    .unwrap();
+            let slot = if microphone {
+                &mut first_microphone
+            } else {
+                &mut first_speaker
+            };
+            assert!(slot.replace(reply).is_none());
+        }
+        let text_path = directory.path().join("combined.txt");
+        async fn wait_for_text(path: &std::path::Path, expected: &str) {
+            tokio::time::timeout(Duration::from_secs(3), async {
+                while !tokio::fs::read_to_string(path)
+                    .await
+                    .unwrap()
+                    .contains(expected)
+                {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .unwrap();
+        }
+        first_microphone
+            .unwrap()
+            .send("microfone histórico 1")
+            .unwrap();
+        wait_for_text(&text_path, "microfone histórico 1").await;
+        let (microphone, second_microphone) =
+            tokio::time::timeout(Duration::from_secs(3), pending_requests.recv())
+                .await
+                .unwrap()
+                .unwrap();
+        assert!(microphone);
+        first_speaker.unwrap().send("saída histórica").unwrap();
+        wait_for_text(&text_path, "saída histórica").await;
+        second_microphone.send("microfone histórico 2").unwrap();
+        tokio::time::timeout(Duration::from_secs(3), transcript)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        server.abort();
+
+        let mut wav = hound::WavReader::open(directory.path().join("combined.wav")).unwrap();
+        assert_eq!(wav.spec().channels, 1);
+        assert_eq!(wav.spec().sample_rate, 16_000);
+        let pcm = wav.samples::<i16>().map(Result::unwrap).collect::<Vec<_>>();
+        assert_eq!(pcm.len(), 24_000);
+        assert!(pcm[..8000].iter().all(|&sample| sample == 2000));
+        assert!(pcm[8000..16000].iter().all(|&sample| sample == 1000));
+        assert!(pcm[16000..].iter().all(|&sample| sample == 5000));
+        let text = tokio::fs::read_to_string(text_path).await.unwrap();
+        let lines = [
+            "[microfone] [áudio +0.000–0.500s] microfone histórico 1",
+            "[saída recebida] [áudio +0.000–0.500s] saída histórica",
+            "[microfone] [áudio +0.500–1.000s] microfone histórico 2",
+            "[microfone] [áudio +1.000–1.500s] microfone ao vivo",
+            "[saída recebida] [áudio +1.000–1.500s] saída ao vivo",
+        ];
+        let positions = lines.map(|line| {
+            assert_eq!(
+                text.matches(line).count(),
+                1,
+                "missing or duplicated result: {line}\n{text}"
+            );
+            text.find(line).unwrap()
+        });
+        assert!(positions.windows(2).all(|pair| pair[0] < pair[1]));
+        assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 2);
+    }
+
     #[test]
     fn only_selected_recording_or_transcription_sources_are_recovered() {
         let buffer = HistoryBuffer::new(&Default::default());

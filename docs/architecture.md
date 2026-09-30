@@ -109,15 +109,23 @@ sessão com tradução desligada. Cópias para ASR/WAV são convertidas para 16 
 Iniciar/encerrar sessão pode reabrir streams e produzir um breve intervalo, sem
 trocar os dispositivos virtuais selecionados pelos outros aplicativos.
 
-No Linux, um monitor de uso fecha cada rota enquanto nenhum aplicativo usa seu
-endpoint virtual. Ele acompanha eventos do servidor PulseAudio/pipewire-pulse e
-confere snapshots limitados; fluxos internos do Babel e do remapeamento não
-contam como consumidores. Uma aplicação com seleção própria continua funcionando
-mesmo quando o padrão do sistema é outro dispositivo. O estado `waiting_for_app`
+Nos três backends, o microfone ativa quando o endpoint virtual Babel é a entrada
+padrão do sistema ou um aplicativo externo o usa explicitamente. A seleção
+como padrão basta para abrir a captura e permitir comandos de voz, sem exigir
+um aplicativo consumidor. A saída permanece condicionada à reprodução de um
+aplicativo externo no endpoint virtual; selecioná-la como padrão, sozinha, não
+abre a rota. Fluxos do próprio Babel não ativam a saída.
+
+No Linux, o monitor acompanha o padrão de entrada e eventos do servidor
+PulseAudio/pipewire-pulse e confere snapshots limitados; fluxos internos do Babel
+e do remapeamento não contam como consumidores. Uma aplicação com seleção
+própria continua funcionando quando o padrão do sistema muda para outro
+dispositivo. O estado `waiting_for_app`
 mostra essa espera; `running` continua representando a sessão, enquanto
 `routing_active` só fica ativo se alguma direção estiver processando.
 
-Ao deixar de usar o virtual, o supervisor cancela captura, reprodução, provedor e
+Quando a condição de atividade da rota deixa de existir, o supervisor cancela
+captura, reprodução, provedor e
 ativação por voz daquela direção. Fecha os streams e descarta suas filas antes
 de reabrir. A próxima ativação cria novas conexões e canais: eventos de áudio ou
 transcrição da conexão antiga não entram na nova. Epochs separados por direção
@@ -126,11 +134,13 @@ O nome/ID da sessão e os writers TXT/WAV permanecem; a transcrição recebe uma
 quebra, e o WAV mantém o relógio da sessão. Essa pausa pode interromper uma frase
 em processamento, mas não reproduz a frase atrasada depois de voltar.
 Falha de inspeção fecha as rotas e aparece no painel. No Windows, um worker COM
-MTA inspeciona as sessões WASAPI do lado oposto de cada cabo Babel (ou VB-Audio opcional), excluindo
+MTA consulta o microfone padrão do sistema e inspeciona as sessões WASAPI do
+lado oposto de cada cabo Babel (ou VB-Audio opcional), excluindo
 o PID do Babel. O pareamento usa IDs de endpoints e metadados do driver; pares
 ausentes, ambíguos ou compartilhados entre as duas rotas são recusados. A consulta
 periódica é complementada por callbacks de estado das sessões já descobertas.
-No macOS 14.2+, um worker consulta os processos CoreAudio a cada 200 ms e cruza
+No macOS 14.2+, um worker consulta a entrada padrão e os processos CoreAudio
+a cada 200 ms e cruza
 PID, estado e dispositivos por direção; não usa o estado global do dispositivo,
 que incluiria o próprio Babel. Sistemas anteriores suspendem as rotas com um
 diagnóstico, sem captura contínua como fallback. Essas consultas não capturam

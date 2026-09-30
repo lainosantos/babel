@@ -98,8 +98,12 @@ atalho **Ajustar retenção do histórico** abre esses controles. Salve para apl
 Reduzir a capacidade descarta a parte mais antiga; desativar apaga o histórico.
 Aumentar a capacidade não recupera áudio já descartado.
 
-A retenção acompanha o roteamento enquanto os dispositivos virtuais estão em
-uso. Não cria arquivos nem envia esse histórico para transcrição antes de você
+A retenção acompanha as rotas ativas. O histórico do microfone se forma quando
+Babel é o microfone padrão do sistema ou um aplicativo usa seu microfone virtual;
+o da saída só se forma enquanto um aplicativo envia áudio ao Babel. Escolher
+o microfone físico como padrão pausa a captura do microfone se nenhum aplicativo
+ainda usa Babel. A retenção não cria arquivos nem envia esse histórico para
+transcrição antes de você
 incluí-lo explicitamente em uma sessão. O áudio continua na memória ao iniciar
 ou encerrar sessões e durante trocas de dispositivos; lacunas de captura não
 são recuperáveis. Fechar o Babel perde todo o histórico. A mesma opção funciona

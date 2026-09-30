@@ -7,8 +7,8 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result, ensure};
 use coreaudio_hal::{
     AudioObject, MissingQualifier, PROCESS_INPUT_DEVICES, PROCESS_IS_RUNNING_INPUT,
-    PROCESS_IS_RUNNING_OUTPUT, PROCESS_OUTPUT_DEVICES, PROCESS_PID, SYSTEM_TRANSLATE_UID_TO_DEVICE,
-    System,
+    PROCESS_IS_RUNNING_OUTPUT, PROCESS_OUTPUT_DEVICES, PROCESS_PID, SYSTEM_DEFAULT_INPUT,
+    SYSTEM_TRANSLATE_UID_TO_DEVICE, System,
 };
 use cpal::traits::DeviceTrait;
 use tokio::sync::{mpsc, watch};
@@ -145,8 +145,8 @@ fn inspect(
         });
     }
     // Process objects are supported from macOS 14.2. Older HALs return an
-    // unsupported-property error; there is deliberately no default-device or
-    // DeviceIsRunningSomewhere fallback (both include our own client).
+    // unsupported-property error. DeviceIsRunningSomewhere is never used:
+    // it includes our own client and would leave the speaker self-activated.
     let processes = system
         .processes()
         .context("enumerating CoreAudio process objects")?;
@@ -223,6 +223,16 @@ fn inspect(
         uses.push(usage);
     }
     let mut snapshot = classify_processes(own_pid, microphone_device, speaker_device, &uses);
+    if microphone_device.is_some() && microphone_error.is_none() {
+        match system.get_property(SYSTEM_DEFAULT_INPUT) {
+            Ok(id) => snapshot.select_default_microphone(Some(id)),
+            Err(error) => {
+                microphone_error = Some(format!(
+                    "CoreAudio could not inspect the system microphone selection: {error}"
+                ))
+            }
+        }
+    }
     snapshot.microphone_error = microphone_error;
     snapshot.speaker_error = speaker_error;
     Ok(snapshot)
