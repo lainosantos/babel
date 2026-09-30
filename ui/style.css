@@ -133,9 +133,6 @@ code { font-size: .92em; }
 .history-buffer .field-hint { margin: 4px 0; }
 .history-buffer-update { display: inline-flex; align-items: center; gap: 6px; margin-top: 7px; color: var(--muted); font-size: 10px; }
 .history-buffer-update[data-live="true"]::before { content: ""; width: 5px; height: 5px; border-radius: 50%; background: var(--output); }
-.history-available > div { display: grid; grid-template-columns: minmax(0, 1fr) 13ch; gap: 10px; align-items: baseline; }
-.history-available dt { min-width: 0; }
-.history-available dd { margin: 0; text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
 .history-request-field { margin-top: 18px; }
 .history-request-field input { max-width: 125px; }
 .history-retention-field { max-width: 240px; margin-top: 20px; }

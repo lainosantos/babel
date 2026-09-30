@@ -1609,8 +1609,6 @@ test('history is opt-in per start with shorter availability and the existing rev
   p.set('recording-speaker', false);
   p.set('history-include', true);
   p.set('session-name', 'Meeting with history');
-  assert.equal(p.byId('history-available-microphone').textContent, '03 min 00 s');
-  assert.equal(p.byId('history-available-speaker').textContent, '01 min 30 s');
   assert.match(p.byId('history-availability-hint').textContent, /only the available portion/);
   p.byId('start').click();
   await settle(() => !p.byId('stop').hidden);
@@ -1647,8 +1645,6 @@ test('advanced start shows live combined audio without enabling history or chang
     const duration = `${String(Math.floor(seconds / 60)).padStart(2, '0')} min ${String(seconds % 60).padStart(2, '0')} s`;
     assert.equal(reading.textContent, duration);
     assert.equal(reading.textContent.length, 11, 'digit boundaries keep a stable clock width');
-    assert.equal(p.byId('history-available-microphone').textContent, duration);
-    assert.equal(p.byId('history-available-speaker').textContent, duration);
     assert.equal(p.byId('history-start-options').open, true);
     assert.equal(p.byId('history-request-minutes').value, '1.5');
     assert.equal(p.byId('history-include').checked, true);

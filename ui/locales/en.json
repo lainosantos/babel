@@ -659,8 +659,6 @@
   "history.buffer_live": "Updated every second",
   "history.buffer_unavailable": "Live buffer information unavailable",
   "history.buffer_disabled": "Buffer disabled",
-  "history.source_microphone": "Microphone",
-  "history.source_speaker": "Incoming audio",
   "history.disabled_hint": "Enable and save history retention in Settings to keep recent audio.",
   "history.features_hint": "Enable recording or transcription to include recent history.",
   "history.empty_hint": "No history is available for the selected sources yet. Microphone history needs Babel as the system microphone or in use by an app. Received-audio history needs an app sending audio to Babel.",

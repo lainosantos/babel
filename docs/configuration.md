@@ -424,7 +424,10 @@ automaticamente o histórico. Fechar o aplicativo o perde.
 
 Para incluir um trecho, use **Opções avançadas de início → Incluir histórico
 recente** junto do botão **Iniciar sessão**. Escolha a duração em minutos,
-limitada à capacidade, e confira a disponibilidade por origem. A opção vem
+limitada à capacidade. O contador **Áudio disponível na memória** mostra o total
+armazenado, atualizado a cada segundo. Entrada e saída são consideradas juntas:
+trechos simultâneos contam uma vez e lacunas sem captura não aumentam o total.
+A capacidade configurada aparece separadamente. A opção vem
 desmarcada e não é salva no TOML: é uma decisão para cada nova sessão. O início
 normal pelo painel, pela bandeja e por `babel run` na CLI sempre começa sem
 incluir o histórico. Na API, o padrão também é sem histórico: a inclusão exige
@@ -445,7 +448,7 @@ Omitir o campo ou usar zero começa sem histórico. Um valor positivo solicita
 somente a parte disponível da janela; exige gravação ou transcrição habilitada
 com uma origem selecionada que tenha áudio disponível. A capacidade é salva
 em `/api/config`; a escolha de inclusão não é persistida. `/api/status` expõe
-`history.enabled`, `capacity_secs`, `available_secs`, `microphone_secs` e
+`history.enabled`, `capacity_secs`, `available_secs`, `combined_audio_secs`, `microphone_secs` e
 `speaker_secs`, além de `history_included_secs` e
 `history_transcription_pending` para a sessão.
 

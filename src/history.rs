@@ -63,8 +63,9 @@ pub struct HistoryStatus {
     pub capacity_secs: u32,
     /// Wall-clock coverage up to now, including gaps after/between captures.
     pub available_secs: f64,
-    /// Union of retained sample intervals across both lanes: gaps are excluded
-    /// and simultaneous microphone/output audio is counted only once.
+    /// Union of the sample timelines reconstructed for mixed recording: real
+    /// gaps are excluded, callback jitter is absorbed, and simultaneous lanes
+    /// count once. Original PCM chunks within a lane remain consecutive.
     pub combined_audio_secs: f64,
     /// Retained PCM durations per lane, excluding gaps.
     pub microphone_secs: f64,
@@ -169,40 +170,61 @@ impl Contents {
     }
 
     fn combined_audio_duration(&self) -> Duration {
-        // Capture end timestamps are monotonic within each lane, but starts
-        // need not be: a longer frame may start before its predecessor. Merge
-        // backwards by end time so variable frame sizes and overlapping chunks
-        // require neither sorting nor a temporary allocation for each status.
-        let mut microphone = self.lanes[0].frames.iter().rev().peekable();
-        let mut speaker = self.lanes[1].frames.iter().rev().peekable();
-        let mut interval: Option<(Instant, Instant)> = None;
-        let mut total = Duration::ZERO;
+        let Some(origin) = self.first_sample() else {
+            return Duration::ZERO;
+        };
+        // Mirror SessionAudioRecorder::append: callback/pipe batches may stamp
+        // several consecutive PCM frames with almost the same wall clock. Each
+        // lane advances by its sample count; scheduler jitter up to 50 ms does
+        // not create gaps or make those original samples overlap themselves.
+        // Reconstructed starts are monotonic, permitting a forward merge with
+        // constant memory and no sorting or allocations in the status path.
+        fn intervals(lane: &Lane, origin: Instant) -> impl Iterator<Item = (u64, u64)> + '_ {
+            let mut expected: Option<u64> = None;
+            lane.frames.iter().map(move |frame| {
+                let end_by_clock = (frame
+                    .captured_at
+                    .saturating_duration_since(origin)
+                    .as_nanos()
+                    * SAMPLE_RATE as u128
+                    / 1_000_000_000) as u64;
+                let samples = frame.samples().len() as u64;
+                let candidate = end_by_clock.saturating_sub(samples);
+                let start = match expected {
+                    Some(next) if candidate <= next.saturating_add(SAMPLE_RATE as u64 / 20) => next,
+                    _ => candidate,
+                };
+                let end = start + samples;
+                expected = Some(end);
+                (start, end)
+            })
+        }
+        let mut microphone = intervals(&self.lanes[0], origin).peekable();
+        let mut speaker = intervals(&self.lanes[1], origin).peekable();
+        let mut interval: Option<(u64, u64)> = None;
+        let mut total = 0_u64;
         loop {
             let next = match (microphone.peek(), speaker.peek()) {
-                (Some(mic), Some(output)) if mic.captured_at >= output.captured_at => {
-                    microphone.next()
-                }
+                (Some(mic), Some(output)) if mic.0 <= output.0 => microphone.next(),
                 (Some(_), Some(_)) => speaker.next(),
                 (Some(_), None) => microphone.next(),
                 (None, Some(_)) => speaker.next(),
                 (None, None) => break,
             };
-            let Some(frame) = next else { break };
-            let start = frame.started_at();
-            let end = frame.captured_at;
+            let Some((start, end)) = next else { break };
             interval = Some(match interval {
-                Some((earliest, latest)) if end >= earliest => (earliest.min(start), latest),
+                Some((earliest, latest)) if start <= latest => (earliest, latest.max(end)),
                 Some((earliest, latest)) => {
-                    total += latest.duration_since(earliest);
+                    total += latest - earliest;
                     (start, end)
                 }
                 None => (start, end),
             });
         }
         if let Some((start, end)) = interval {
-            total += end.duration_since(start);
+            total += end - start;
         }
-        total
+        Duration::from_nanos(total * SAMPLE_NANOS)
     }
 }
 
@@ -439,11 +461,11 @@ mod tests {
     }
 
     #[test]
-    fn combined_audio_handles_variable_frame_starts_and_cross_lane_overlap() {
+    fn combined_audio_reconstructs_variable_frames_and_cross_lane_overlap() {
         let history = buffer(10);
         let now = Instant::now();
-        // Starts are deliberately out of order in the microphone lane: the
-        // second, longer chunk fully contains the first despite ending later.
+        // The later PCM chunk has an earlier nominal wall-clock start. The
+        // recorder places it after the first chunk instead of overlaying it.
         history.push(Microphone, &[1; 1600], now - Duration::from_millis(500));
         history.push(
             Microphone,
@@ -454,7 +476,7 @@ mod tests {
         let status = history.status(now);
         assert_eq!(status.microphone_secs, 1.1);
         assert_eq!(status.speaker_secs, 0.55);
-        assert_eq!(status.combined_audio_secs, 1.4);
+        assert_eq!(status.combined_audio_secs, 1.1);
     }
 
     #[test]
@@ -492,6 +514,137 @@ mod tests {
         assert_eq!(disabled.available_secs, 0.0);
         assert_eq!(disabled.buffered_bytes, 0);
         assert_eq!(HistoryStatus::default().combined_audio_secs, 0.0);
+    }
+
+    #[test]
+    fn combined_audio_preserves_all_pcm_from_a_batched_capture() {
+        let history = buffer(10);
+        let now = Instant::now();
+        // Four distinct 10 ms PCM chunks arrive together from the audio pipe.
+        for _ in 0..4 {
+            history.push(Microphone, &[1; 160], now);
+        }
+        let status = history.status(now);
+        assert_eq!(status.microphone_secs, 0.04);
+        assert_eq!(status.combined_audio_secs, 0.04);
+        assert_eq!(
+            history
+                .status(now + Duration::from_secs(1))
+                .combined_audio_secs,
+            0.04
+        );
+    }
+
+    #[test]
+    fn combined_audio_aligns_simultaneous_lanes_with_different_callback_jitter() {
+        let history = buffer(10);
+        let now = Instant::now();
+        let origin = now - Duration::from_secs(2);
+        // Both sources have 400 ms of consecutive audio. Their batching and
+        // delivery jitter differ, so raw capture-time intervals would not.
+        for index in 0..40_u64 {
+            let end_ms = if index == 0 { 10 } else { (index / 4 + 1) * 40 };
+            history.push(
+                Microphone,
+                &[1; 160],
+                origin + Duration::from_millis(end_ms),
+            );
+        }
+        for index in 0..20_u64 {
+            let batch = index / 2;
+            let end_ms = if index == 0 {
+                20
+            } else {
+                (batch + 1) * 40 + if batch % 2 == 0 { 15 } else { 5 }
+            };
+            history.push(Speaker, &[2; 320], origin + Duration::from_millis(end_ms));
+        }
+        let status = history.status(now);
+        assert_eq!(status.microphone_secs, 0.4);
+        assert_eq!(status.speaker_secs, 0.4);
+        assert_eq!(status.combined_audio_secs, 0.4);
+        // A real 590 ms pause is excluded, unlike scheduler jitter.
+        history.push(Microphone, &[3; 160], origin + Duration::from_secs(1));
+        assert_eq!(history.status(now).combined_audio_secs, 0.41);
+    }
+
+    #[test]
+    fn combined_batched_audio_expires_at_retained_sample_precision() {
+        let history = buffer(1);
+        let now = Instant::now();
+        let captured = now - Duration::from_millis(990);
+        for _ in 0..4 {
+            history.push(Microphone, &[1; 160], captured);
+        }
+        assert_eq!(history.status(now).combined_audio_secs, 0.04);
+        assert_eq!(
+            history
+                .status(now + Duration::from_millis(5))
+                .combined_audio_secs,
+            0.02
+        );
+        assert_eq!(
+            history
+                .status(now + Duration::from_millis(11))
+                .combined_audio_secs,
+            0.0
+        );
+    }
+
+    #[tokio::test]
+    async fn combined_audio_matches_non_silent_samples_written_by_mixed_recorder() {
+        use crate::recording::{AudioRecord, SessionAudioRecorder};
+        let history = buffer(10);
+        let now = Instant::now();
+        let origin = now - Duration::from_secs(2);
+        for end_ms in [20, 40, 40, 40, 250] {
+            history.push(
+                Microphone,
+                &[2000; 160],
+                origin + Duration::from_millis(end_ms),
+            );
+        }
+        for end_ms in [30, 50, 50, 50, 255] {
+            history.push(
+                Speaker,
+                &[4000; 160],
+                origin + Duration::from_millis(end_ms),
+            );
+        }
+        let expected = history.status(now).combined_audio_secs;
+        let snapshot = history.snapshot(10, now);
+        let directory = tempfile::tempdir().unwrap();
+        let recorder = SessionAudioRecorder::create(
+            directory.path(),
+            "combined-counter",
+            snapshot.origin,
+            true,
+            true,
+        )
+        .await
+        .unwrap();
+        let path = recorder.path().to_owned();
+        let (sender, receiver) = tokio::sync::mpsc::channel(1);
+        drop(sender);
+        recorder
+            .run_with_history(
+                receiver,
+                snapshot.frames.into_iter().map(|frame| AudioRecord {
+                    lane: frame.lane,
+                    samples: frame.samples().to_vec(),
+                    captured_at: frame.captured_at,
+                }),
+            )
+            .await
+            .unwrap();
+        let reader = hound::WavReader::open(path).unwrap();
+        let occupied = reader
+            .into_samples::<i16>()
+            .map(Result::unwrap)
+            .filter(|sample| *sample != 0)
+            .count();
+        assert_eq!(expected, occupied as f64 / SAMPLE_RATE as f64);
+        assert_eq!(expected, 0.065);
     }
 
     #[test]

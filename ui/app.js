@@ -621,11 +621,6 @@
     const update = byId('history-buffer-update');
     update.textContent = t(!known ? 'history.buffer_unavailable' : buffer.enabled ? 'history.buffer_live' : 'history.buffer_disabled');
     update.dataset.live = String(Boolean(known && buffer.enabled));
-    for (const route of routeNames) {
-      const seconds = buffer?.[`${route}_secs`];
-      byId(`history-available-${route}`).textContent = state.statusFresh && Number.isFinite(seconds)
-        ? historyDuration(seconds, true) : '—';
-    }
   }
 
   function updateHistoryControls(unavailable, running) {

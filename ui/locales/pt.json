@@ -659,8 +659,6 @@
   "history.buffer_live": "Atualizado a cada segundo",
   "history.buffer_unavailable": "Informações do buffer indisponíveis no momento",
   "history.buffer_disabled": "Buffer desativado",
-  "history.source_microphone": "Microfone",
-  "history.source_speaker": "Áudio recebido",
   "history.disabled_hint": "Ative e salve a retenção do histórico em Ajustes para manter áudio recente.",
   "history.features_hint": "Ative a gravação ou a transcrição para incluir histórico recente.",
   "history.empty_hint": "Ainda não há histórico das origens selecionadas. O histórico do microfone requer Babel como padrão do sistema ou em uso por um aplicativo. O histórico da saída requer um aplicativo enviando áudio ao Babel.",

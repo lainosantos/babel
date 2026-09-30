@@ -226,12 +226,8 @@
             <span id="history-buffer-update" class="history-buffer-update"></span>
           </div>
           <label class="checkbox-label"><input id="history-include" type="checkbox" disabled aria-describedby="history-start-scope history-availability-hint"><span data-i18n="history.include">Include recent history</span></label>
-          <label class="history-request-field"><span data-i18n="history.request_minutes">Include up to (minutes)</span><input id="history-request-minutes" type="number" value="10" min="0.016666666666666666" max="10" step="any" required disabled aria-describedby="history-request-error history-buffer-duration history-available"></label>
+          <label class="history-request-field"><span data-i18n="history.request_minutes">Include up to (minutes)</span><input id="history-request-minutes" type="number" value="10" min="0.016666666666666666" max="10" step="any" required disabled aria-describedby="history-request-error history-buffer-duration"></label>
           <p id="history-request-error" class="file-path-error" role="alert" hidden></p>
-          <dl id="history-available" class="history-available field-hint">
-            <div><dt data-i18n="history.source_microphone">Microphone</dt><dd id="history-available-microphone">—</dd></div>
-            <div><dt data-i18n="history.source_speaker">Incoming audio</dt><dd id="history-available-speaker">—</dd></div>
-          </dl>
           <p id="history-availability-hint" class="field-hint"></p>
           <p id="history-start-scope" class="field-hint" data-i18n="history.scope">Applies only to the sources selected for recording and transcription. Translation and playback start with live audio. This choice resets after every session start.</p>
           <p class="field-hint" data-i18n="history.start_privacy">Before you start, this history is neither written to files nor sent for transcription.</p>
