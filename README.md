@@ -132,7 +132,9 @@ principal. Permita a captura de microfone ao aplicativo/terminal.
 - [Gemini Live](docs/providers.md): protocolos, modelos, transcrições,
   capacidades e restrições da tradução contínua.
 - [OpenAI, Deepgram e serviços open source](docs/other-providers.md): Realtime
-  Translate, Realtime conversacional, Deepgram STT, whisper.cpp, Ollama e Piper.
+  Translate, Realtime conversacional, Deepgram STT e inferência local.
+- [Modelos locais integrados](docs/local-inference.md): Whisper, Qwen e Piper,
+  preparação automática, armazenamento, downloads e uso offline.
 - [Vozes Gemini e ElevenLabs](docs/voices.md): biblioteca, voice design,
   clonagem, seleção por faixa, formatos, requisitos, custos e limites.
 - [Arquitetura, segurança de memória e desempenho](docs/architecture.md).
@@ -148,7 +150,7 @@ principal. Permita a captura de microfone ao aplicativo/terminal.
 | Gemini 3.8 Live | Speech-to-speech por turnos/VAD | Voz pronta nativa; TTS opcional |
 | OpenAI Realtime Translate | Contínua, áudio para áudio | Voz do modelo; TTS opcional |
 | OpenAI Realtime | Speech-to-speech por turnos/VAD | Voz pronta nativa; TTS opcional |
-| whisper.cpp + Ollama + Piper | Pipeline local por trechos | Vozes Piper instaladas; TTS de nuvem opcional |
+| Whisper + Qwen + Piper integrados | Pipeline local por trechos | Vozes Piper do catálogo; TTS de nuvem opcional |
 | Gemini 3.8 TTS | Síntese do texto traduzido, não tradutor isolado | Vozes prontas, design e clonagem cadastrada |
 | ElevenLabs | Síntese do texto traduzido, não tradutor isolado | Vozes da biblioteca, design e instant voice clone |
 
@@ -160,12 +162,20 @@ tradutor ou sem tradução. Cada origem escolhe seu próprio provider e idioma.
 | Gemini | `gemini-3.5-transcribe-live` | Sem diarização ou tempos por palavra no streaming |
 | OpenAI | `gpt-live-transcribe` | Sem identificação de falantes ou tempos por palavra no adaptador padrão |
 | Deepgram | Nova-3 via Listen v1 | Diarização configurável e tempos fornecidos nas palavras |
-| Whisper | Servidor whisper.cpp configurado pelo usuário | Offsets dos trechos capturados, sem identificação de falantes |
+| Whisper | Motor integrado, modelo Base; Tiny/Small opcionais | Offsets dos trechos capturados, sem identificação de falantes |
 
 Perfis de reconhecimento usam `transcription.providers.*`; a escolha e o idioma
 ficam em `transcription.microphone_recognition` e
 `transcription.speaker_recognition`. O texto de entrada do tradutor STS não é
 gravado nem substitui esse reconhecimento. Veja [configuração e exemplos](docs/transcription.md).
+
+Os providers locais em modo integrado são preparados ao salvar a seleção. Os
+instaladores incluem os motores; pesos ausentes são baixados com verificação de
+hash e reutilizados offline. Não é preciso instalar ou iniciar Python, Ollama
+ou serviços separados. Endpoints externos, incluindo Ollama, continuam opcionais
+para instalações próprias. A UI acompanha preparação e permite escolher a pasta
+absoluta dos modelos e as threads de reconhecimento/tradução.
+
 
 A biblioteca permite criar várias vozes, listar os perfis da conta e selecionar
 uma voz para cada direção. O áudio de referência/consentimento é enviado somente

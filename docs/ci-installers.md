@@ -39,6 +39,40 @@ impede o upload daquele instalador. Logs de falhas WDK são preservados separada
 Os artefatos são downloads da execução; o workflow não cria automaticamente uma
 GitHub Release nem publica arquivos em outro serviço.
 
+## Motores de inferência incluídos
+
+Antes dos instaladores, o job `local-runtime` compila whisper.cpp, llama.cpp e
+Piper a partir de arquivos fixados por commit, tamanho e SHA-256 em
+`scripts/local_runtime.lock.json`. A matriz tem cinco alvos:
+
+| Payload | Runner nativo |
+|---|---|
+| Linux x64 | `ubuntu-22.04` |
+| macOS ARM64 | `macos-15` |
+| macOS Intel | `macos-15-intel` |
+| Windows x64 | `windows-2022` |
+| Windows ARM64 | `windows-11-arm` |
+
+Cada payload inclui bibliotecas nativas, dados eSpeak, licenças, fontes
+correspondentes Piper/eSpeak e manifesto de integridade. Os runtimes Windows
+incluem privadamente as DLLs Visual C++ necessárias ao ONNX; o usuário não
+precisa instalar um redistribuível separado. No macOS, os runtimes Intel/ARM64
+ficam separados dentro do app universal; após assinar seus binários, o pacote
+atualiza os hashes antes de assinar o bundle externo.
+
+O job executa `scripts/test_bundled_inference.py` com pesos pinados do catálogo:
+Whisper recebe silêncio sintético, Qwen traduz uma frase fixa e o mesmo processo
+Piper produz dois WAVs. Isso verifica carregamento real, porta dinâmica, JSON,
+caminhos Unicode e áudio válido, sem microfone ou credenciais. Os modelos do
+teste usam cache pelo hash de `src/local_runtime/models.json` e não entram nos
+instaladores. A aprovação de todos esses jobs é requisito dos builds de pacotes.
+
+Os artefatos intermediários se chamam `babel-local-runtime-<sistema>-<arquitetura>`.
+Cada empacotador recebe somente os payloads do seu sistema e valida arquitetura,
+permissões aplicáveis e hashes. Assim, selecionar um provider local no app
+instalado não exige Python, Ollama, CMake ou instalação manual de servidores;
+precisa apenas baixar os pesos ainda ausentes na primeira preparação.
+
 ## O que cada build verifica
 
 ### Linux
@@ -80,7 +114,9 @@ do ZIP contra o manifesto. O job x64 adicionalmente instala o **aplicativo** em
 uma pasta temporária do runner, compara seus arquivos com o manifesto, executa
 apenas `babel --version`, confirma que nenhum driver Babel foi criado e testa a
 desinstalação. Não abre áudio nem instala o driver no runner. ARM64 passa pelo
-build e inspeção de payload; não é executado no host x64.
+build e inspeção do aplicativo/driver; eles não são executados no host x64.
+Os motores de inferência ARM64 são compilados e exercitados separadamente no
+runner nativo Windows ARM64 da matriz `local-runtime`.
 
 ## Assinatura e alcance da validação
 
@@ -117,8 +153,10 @@ corrente ou da pasta protegida do aplicativo:
 `--config` continua permitindo escolher outro arquivo. A CLI `babel` mantém o
 comportamento explícito de desenvolvimento com `babel.toml` no diretório corrente.
 Autostart é uma escolha do usuário nas configurações. O painel continua usando
-porta dinâmica. Nenhum pacote inclui API keys, modelos, gravações, transcrições
-ou configurações da máquina de desenvolvimento.
+porta dinâmica. Os pacotes incluem os motores, mas não os pesos dos modelos,
+API keys, gravações, transcrições ou configurações da máquina de desenvolvimento.
+Pesos são preparados automaticamente ao salvar a seleção local; veja
+[armazenamento, downloads e uso offline](local-inference.md).
 
 ## Reproduzir localmente
 

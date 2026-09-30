@@ -121,8 +121,11 @@ Ela verifica, entre outros comportamentos:
 - Resampling com rejeição de aliasing e continuidade entre blocos.
 - WebSockets reais contra servidores locais de teste: confirmação de setup antes
   de transmitir áudio, streaming de PCM, transcrições, reconexão e cancelamento.
-- HTTP local contra mocks de whisper.cpp, Ollama e Piper; multipart WAV,
-  segmentação VAD, alinhamento de texto e limites de resposta.
+- HTTP local contra mocks de whisper.cpp, chat Ollama/OpenAI compatível e Piper;
+  multipart WAV, segmentação VAD, alinhamento de texto e limites de resposta.
+- Gerenciamento local: integridade de modelos/componentes, portas anunciadas,
+  cancelamento, recursos ativos independentes da preparação opcional e snapshots
+  sem persistência das portas temporárias.
 - Uso de voz externa com provider local sem chamar Piper nem gerar WAV descartado.
 - Síntese e gestão de vozes contra mocks HTTP; autenticação, limites de upload,
   respostas malformadas e erros sem exposição de chaves ou conteúdo privado.
@@ -137,6 +140,31 @@ Ela verifica, entre outros comportamentos:
 
 Mocks validam o protocolo implementado; não medem a qualidade de tradução, a
 latência de um serviço remoto ou a disponibilidade de um modelo na sua conta.
+
+## Smoke com modelos locais reais
+
+`scripts/test_bundled_inference.py` carrega os motores do pacote e os pesos
+pinados de Whisper Tiny, Qwen3 0.6B e Piper en_US-lessac. Ele verifica portas
+dinâmicas, inferência Whisper sobre um segundo de silêncio sintético, tradução
+de uma frase fixa e duas falas no mesmo processo Piper, incluindo caminhos
+Unicode e amostras WAV float válidas. Os filhos são encerrados no fim, inclusive
+em falha. Não captura microfone, não abre dispositivos de áudio e não usa chaves.
+
+```sh
+python3 scripts/test_bundled_inference.py \
+  --runtime-dir artifacts/local-runtime/linux-x86_64 \
+  --model-cache "$HOME/.local/share/babel/models"
+python3 -m unittest discover -s scripts -p test_bundled_inference_contracts.py -v
+```
+
+O smoke real e seus quatro contratos passaram localmente no Linux em 29/09/2026.
+O CI executa o mesmo cenário nos runtimes Linux x64, macOS Intel/ARM64 e Windows
+x64/ARM64; o resultado de cada execução hospedada precisa ser consultado. Isso
+não significa que os cenários macOS/Windows já foram aprovados localmente.
+O download inicial usa cache por hash e precisa de rede; arquivos verificados
+existentes são reutilizados. Python é requisito desse teste, não do aplicativo
+instalado. O teste comprova carregamento/protocolo, não qualidade por idioma,
+diarização, consumo prolongado de memória ou latência fim a fim.
 
 ## Integração com o servidor de áudio Linux
 
@@ -364,8 +392,10 @@ um registro de execução já concluída.
 
 - Chamadas autenticadas reais a Gemini, OpenAI e ElevenLabs. Os testes descritos
   não consumiram créditos nem enviaram voz a esses serviços.
-- Inferência com modelos reais de whisper.cpp, Ollama e Piper, incluindo consumo
-  de RAM/VRAM, qualidade por par de idiomas e velocidade no hardware escolhido.
+- Qualidade por par de idiomas, consumo de RAM/VRAM e velocidade de inferência
+  local no hardware escolhido. O smoke real Whisper/Qwen/Piper passou no Linux;
+  execução nativa macOS/Windows é verificada separadamente pelo CI. Servidores
+  externos opcionais, como Ollama, exigem sua própria validação.
 - Carregamento/instalação dos drivers próprios Babel (ou cabos externos opcionais),
   assinaturas, Driver Verifier no Windows, permissões de microfone,
   desconexão física e recuperação de dispositivos.
@@ -374,7 +404,8 @@ um registro de execução já concluída.
   benchmark que comprove desempenho “extremo”.
 
 Veja [plataformas](platforms.md) para a topologia e os drivers e
-[outros providers](other-providers.md) para provisionar modelos e serviços.
+[modelos locais](local-inference.md) para preparação integrada e
+[outros providers](other-providers.md) para endpoints externos opcionais.
 
 
 ## Drivers próprios: testes separados do aplicativo
@@ -409,8 +440,9 @@ cargo clippy --locked --all-targets --target x86_64-pc-windows-gnu \
 `.github/workflows/native-drivers.yml` separa os testes portáveis, build com SDK
 macOS, build WDK x64/ARM64 e empacotamento dos três sistemas. Usa runners hospedados
 e versões/hashes fixados dos pacotes NuGet oficiais do SDK/WDK. O CI não carrega
-drivers nem abre áudio; somente o instalador do aplicativo Windows x64 é exercitado
-em uma pasta temporária do runner. Os artefatos de desenvolvimento são identificados
+drivers nem abre dispositivos de áudio. O instalador do aplicativo Windows x64
+é exercitado em uma pasta temporária; a matriz de runtimes faz inferência
+separadamente com entradas sintéticas nos cinco alvos. Os artefatos de desenvolvimento são identificados
 como tal. Ter o workflow no repositório não é evidência de sua execução.
 
 Depois de compilar, assinar e instalar no sistema de destino, execute o smoke

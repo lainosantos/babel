@@ -25,7 +25,7 @@ sua própria sessão e contexto; os provedores recebem as origens separadamente.
 A flag `enabled` de cada faixa seleciona somente tradução: a rota continua
 encaminhando áudio original quando essa flag está desligada. Transcrição e
 gravação selecionam suas fontes separadamente. Sem tradução, o adaptador de ASR
-produz somente texto original, sem executar tradutor ou sintetizador.
+produz somente texto original, sem enviar esse áudio ao tradutor ou sintetizador.
 A gravação opcional mistura os originais somente no WAV local. Falhas de
 processamento, provedor ou escrita encerram a sessão e permanecem no status.
 O monitor restaura a passagem original automaticamente após o fechamento dos
@@ -47,6 +47,35 @@ ordenadas para preservar a sequência das falas. Isso pode perder contexto de
 prosódia entre trechos e acrescenta inferência, rede e custo.
 No tradutor local, selecionar um TTS externo pula o Piper: reconhecimento e
 tradução entregam texto diretamente ao sintetizador escolhido.
+
+## Inferência local gerenciada
+
+`local_runtime` prepara os providers locais selecionados na configuração salva,
+mesmo com a respectiva função desligada. O plano reúne os modelos Whisper
+necessários, o tradutor Qwen via llama.cpp e as vozes Piper usadas pelas rotas.
+O STT continua separado do tradutor: configuração e processamento próprios,
+compartilhando um motor carregado quando o modelo coincide.
+
+O manager verifica os componentes empacotados e baixa pesos ausentes do catálogo
+pinado por tamanho/SHA-256. Os motores nativos são processos filhos persistentes;
+Whisper e llama.cpp anunciam a porta de loopback já reservada por `bind(0)`.
+Piper usa JSON por stdin/stdout, atrás de um gateway HTTP Rust com porta dinâmica.
+Somente o snapshot efetivo recebe esses endpoints; o TOML preserva `auto`.
+
+Preparação e progresso aparecem em `EngineStatus.local_runtime`. Iniciar a sessão
+aguarda apenas os recursos das funções ativas. Um Whisper já pronto pode atender
+STT enquanto componentes locais selecionados, mas inativos, ainda são preparados;
+uma falha nessa preparação opcional não invalida o endpoint STT disponível.
+Cancelar o início interrompe a espera da sessão. Alterar a seleção reconcilia o
+plano, cancela a preparação anterior e encerra os filhos que deixam de pertencer
+a ele; sair do Babel encerra os processos gerenciados. Endpoints externos
+explícitos permanecem sob responsabilidade do usuário.
+
+Preparar modelos não abre captura para tradução/transcrição nem cria arquivos
+de sessão. Depois do primeiro download, inferência integrada funciona offline.
+O diretório de pesos é próprio e absoluto, separado dos TXT/WAV; `threads`
+controla Whisper/llama.cpp, sem prometer controlar threads internas de Piper.
+Veja [modelos locais](local-inference.md) para catálogo, caminhos e limites.
 
 ## Sessão, arquivos e troca de dispositivo
 
@@ -72,7 +101,8 @@ pode estar desligada. Os writers trabalham fora dos callbacks de áudio.
 `EngineStatus.running` representa a sessão de processamento/arquivos; ela pode
 conter só gravação, só reconhecimento ou uma combinação com tradução. Sem sessão,
 `routing_active` e `routing_error` descrevem a passagem original local. Essa
-passagem não abre provedores nem arquivos. `stop()` encerra a sessão e retoma o
+passagem não envia áudio a provedores nem abre arquivos. Motores locais
+selecionados podem ficar preparados independentemente da sessão. `stop()` encerra a sessão e retoma o
 original; `shutdown()` encerra também esse roteamento quando o aplicativo sai.
 O original usa PCM16 mono a 48 kHz e quadros de 10 ms, inclusive durante uma
 sessão com tradução desligada. Cópias para ASR/WAV são convertidas para 16 kHz.
@@ -138,7 +168,7 @@ No macOS, uma ponte C usa os layouts do SDK Apple; no Windows, C++ fica na
 integração WaveRT/PortCls e Rust `no_std` transporta o PCM em armazenamento fixo.
 Veja [divisão dos drivers e instalação](native-drivers.md).
 Rust verifica a propriedade dos buffers e os acessos no núcleo seguro.
-Bibliotecas de rede, áudio, sistema, drivers, firmware, whisper.cpp/Ollama/Piper e modelos externos não herdam uma
+Bibliotecas de rede, áudio, sistema, drivers, firmware, whisper.cpp/llama.cpp/Piper/ONNX e modelos externos não herdam uma
 prova de segurança apenas porque o chamador é Rust. Não há afirmação de que todo
 o stack ou todos os drivers sejam livres de `unsafe`/C/C++.
 
@@ -187,8 +217,9 @@ segmenta a fala antes de executar STT → tradução → TTS. Modelos dedicados 
 fala contínua, mas latência e disponibilidade dependem da conta, região, rede,
 carga do serviço e limites. O modo de voz TTS adiciona outra requisição por trecho.
 
-Não há meta de milissegundos garantida nem benchmark de latência da IA sem chaves
-reais. Avalie p50/p95/p99 por idioma e hardware, durante uma sessão longa, além da
+Não há meta de milissegundos garantida. O smoke de inferência local carrega
+modelos reais, mas não mede latência de conversas; benchmarks de serviços de
+nuvem dependem de acesso autenticado. Avalie p50/p95/p99 por idioma e hardware, durante uma sessão longa, além da
 média. O teste virtual local verifica transporte e funcionamento, não qualidade
 semântica, prosódia, diarização ou desempenho de nuvem.
 
