@@ -9,6 +9,8 @@ mod local;
 mod openai;
 pub mod stt;
 
+pub(crate) use gemini::translation_target_language as gemini_translation_target_language;
+
 use std::sync::Arc;
 
 use anyhow::{Result, bail};

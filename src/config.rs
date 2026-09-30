@@ -682,6 +682,9 @@ impl AppConfig {
                     "Invalid language code for {name} (e.g. pt-BR)"
                 );
             }
+            if route.enabled && route.provider == "gemini" && self.continuous_translation(route) {
+                crate::provider::gemini_translation_target_language(&route.target_language)?;
+            }
             ensure!(
                 route.gain.is_finite() && (0.0..=4.0).contains(&route.gain),
                 "Gain for {name}: 0 to 4"
@@ -1333,6 +1336,37 @@ mod tests {
         cfg.validate().unwrap();
         cfg.providers.gemini.model = "gemini-3.8-flash".into();
         assert!(cfg.validate().is_err());
+    }
+    #[test]
+    fn gemini_translation_targets_are_checked_only_for_enabled_translate_routes() {
+        let mut cfg = AppConfig::default();
+        cfg.microphone.target_language = "xx-US".into();
+        assert!(
+            cfg.validate()
+                .unwrap_err()
+                .to_string()
+                .contains("target language")
+        );
+        cfg.microphone.enabled = false;
+        cfg.validate().unwrap();
+        cfg.microphone.enabled = true;
+        cfg.microphone.provider = "openai".into();
+        cfg.validate().unwrap();
+        cfg.microphone.provider = "gemini".into();
+        cfg.providers.gemini.model = "gemini-3.8-live".into();
+        cfg.validate().unwrap();
+        cfg.providers.gemini.model = TRANSLATE_MODEL.into();
+        cfg.microphone.target_language = "en-US".into();
+        cfg.speaker.target_language = "pt-PT".into();
+        cfg.validate().unwrap();
+        assert_eq!(cfg.microphone.target_language, "en-US");
+        cfg.speaker.target_language = "pt".into();
+        assert!(
+            cfg.validate()
+                .unwrap_err()
+                .to_string()
+                .contains("pt-BR or pt-PT")
+        );
     }
     #[test]
     fn dated_openai_translation_models_keep_continuous_restrictions() {

@@ -51,6 +51,18 @@ on the Google account. Models may change; their names remain configurable.
 The `models/` prefix is optional. Translation-specific mode activates only for
 the documented identifier, not a partial match.
 
+Live Translate accepts a specific set of target codes. Babel maps regional
+locales such as `en-US` and `en-GB` to the documented `en`, and `es-MX` to `es`,
+when constructing the request. Saved settings retain the original locale;
+the provider does not offer a separate regional target for those languages.
+`pt-BR` and `pt-PT` remain distinct. Chinese `zh-CN`/`zh-SG` map to `zh-Hans`,
+and `zh-TW`/`zh-HK`/`zh-MO` to `zh-Hant`; an explicit script takes precedence.
+Choose a specific variant for bare `pt` or `zh`. Unsupported languages, scripts
+and extensions fail validation before connecting. This mapping applies only
+to the dedicated Gemini translator, not generic Live, STT or other providers.
+See the [supported targets](https://ai.google.dev/gemini-api/docs/live-api/live-translate#supported-languages)
+(checked 2026-09-30).
+
 In continuous mode, nonempty prompts are configuration errors. The client sends
 no `clientContent`, text or end-of-turn markers. In generic mode, the prompt
 instructs the model to treat captured questions/commands as content to translate.
@@ -174,6 +186,13 @@ translation. See [library, requirements and examples](voices.md),
   compatibility is undocumented.
 - Cancellation interrupts connections, setup waits, networking and queues.
   Unexpected capture closure is an error, not successful completion.
+- A remote close reports its numeric code and stage (setup acknowledgement,
+  live streaming or historical transcription), without the remote reason.
+  Codes 1002, 1003 and 1007 distinguish protocol, message type and payload
+  rejection; 1009 means the server's message limit was exceeded. Code 1008
+  indicates a policy rejection that may involve settings or account access.
+  Codes 1011, 1012 and 1013 use the bounded recovery policy for server failures,
+  restarts and overload. A close code alone does not identify the rejected field.
 
 ## Use without translation and validation
 
@@ -192,6 +211,13 @@ little-endian PCM, multiple fragments, transcripts, cancellation, session
 resumption, retry budgets, sanitized errors and capture EOF. They do not prove
 account authorization or actual translation quality; those require a valid key
 and real audio.
+
+For an opt-in connection check, set `GEMINI_API_KEY` in your shell and run
+`cargo run --locked --example gemini_connection_smoke`. It opens the official
+service using the default translator and `en-US`, sends synthetic silence,
+pauses input and checks that the connection survives the heartbeat window.
+It never opens audio devices or reads your configuration. This check may incur
+provider usage; it verifies connection/protocol behavior, not translation quality.
 
 ## Official references
 

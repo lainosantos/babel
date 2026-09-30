@@ -1,4 +1,4 @@
-use std::{future::Future, time::Duration};
+use std::{borrow::Cow, future::Future, time::Duration};
 
 use anyhow::{Result, bail, ensure};
 use async_trait::async_trait;
@@ -19,6 +19,9 @@ use tokio_tungstenite::{
 use tokio_util::sync::CancellationToken;
 
 use super::{ProviderEvent, SessionConfig, SpeechProvider, TranscriptMetadata};
+
+mod languages;
+pub(crate) use languages::target_language_code as translation_target_language;
 
 const ENDPOINT: &str = "wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent";
 const TRANSLATE_MODEL: &str = "gemini-3.5-live-translate-preview";
@@ -95,20 +98,20 @@ impl SpeechProvider for GeminiTranscriptionProvider {
 /// Deliberately contains no raw socket, response, API key, or server error text.
 #[derive(Debug)]
 struct Failure {
-    message: &'static str,
+    message: Cow<'static, str>,
     retryable: bool,
 }
 
 impl Failure {
     fn fatal(message: &'static str) -> Self {
         Self {
-            message,
+            message: Cow::Borrowed(message),
             retryable: false,
         }
     }
     fn retry(message: &'static str) -> Self {
         Self {
-            message,
+            message: Cow::Borrowed(message),
             retryable: true,
         }
     }
@@ -188,13 +191,7 @@ fn validate_config(config: &SessionConfig) -> Result<()> {
             config.prompt.trim().is_empty(),
             "Live Translate does not support custom prompts; select gemini-3.8-live to customize instructions"
         );
-        ensure!(
-            config
-                .target_language
-                .chars()
-                .all(|c| c.is_ascii_alphanumeric() || c == '-'),
-            "Live Translate target must be a BCP-47 language code"
-        );
+        translation_target_language(&config.target_language)?;
     } else {
         ensure!(
             (100..=2_000).contains(&config.vad_silence_ms),
@@ -220,7 +217,7 @@ fn is_transcription_model(config: &SessionConfig) -> bool {
         == TRANSCRIBE_MODEL
 }
 
-fn setup_message(config: &SessionConfig, resume_handle: Option<&str>) -> Value {
+fn setup_message(config: &SessionConfig, resume_handle: Option<&str>) -> Result<Value> {
     let model = if config.model.starts_with("models/") {
         config.model.clone()
     } else {
@@ -234,11 +231,13 @@ fn setup_message(config: &SessionConfig, resume_handle: Option<&str>) -> Value {
             } else {
                 vec![&config.source_language]
             };
-        return json!({"setup": {"model": model, "generationConfig": {"responseModalities": ["TEXT"]}, "inputAudioTranscription": {"languageCodes": languages, "mode": "VERBATIM"}}});
+        return Ok(
+            json!({"setup": {"model": model, "generationConfig": {"responseModalities": ["TEXT"]}, "inputAudioTranscription": {"languageCodes": languages, "mode": "VERBATIM"}}}),
+        );
     }
     if is_translation_model(config) {
         setup["generationConfig"]["translationConfig"] = json!({
-            "targetLanguageCode": config.target_language,
+            "targetLanguageCode": translation_target_language(&config.target_language)?,
             "echoTargetLanguage": false,
         });
     } else {
@@ -276,7 +275,7 @@ fn setup_message(config: &SessionConfig, resume_handle: Option<&str>) -> Value {
     if config.output_transcription {
         setup["outputAudioTranscription"] = json!({});
     }
-    json!({"setup": setup})
+    Ok(json!({"setup": setup}))
 }
 
 async fn run_sessions(
@@ -408,6 +407,9 @@ async fn run_connection_mode(
     resume_handle: &mut Option<String>,
     history: bool,
 ) -> SessionResult<()> {
+    // Reject unsupported targets before opening an authenticated connection.
+    let mut setup = setup_message(config, resume_handle.as_deref())
+        .map_err(|_| Failure::fatal("Gemini Live Translate target language is unsupported"))?;
     let mut request = endpoint
         .into_client_request()
         .map_err(|_| Failure::fatal("invalid built-in Gemini endpoint"))?;
@@ -428,7 +430,6 @@ async fn run_connection_mode(
     .await
     .map_err(|_| Failure::retry("Gemini connection timed out"))?
     .map_err(socket_error)?;
-    let mut setup = setup_message(config, resume_handle.as_deref());
     if history {
         // A single explicit turn in flight makes its finalized input transcript
         // an unambiguous acknowledgement of the bounded historical utterance.
@@ -463,7 +464,10 @@ async fn run_connection_mode(
                 Message::Ping(data) => io_deadline(socket.send(Message::Pong(data))).await?,
                 Message::Pong(_) => {}
                 Message::Close(frame) => {
-                    return Err(close_failure(frame.as_ref().map(|f| u16::from(f.code))));
+                    return Err(close_failure(
+                        frame.as_ref().map(|f| u16::from(f.code)),
+                        CloseStage::Setup,
+                    ));
                 }
                 Message::Frame(_) => return Err(Failure::fatal("unexpected raw WebSocket frame")),
             }
@@ -544,9 +548,10 @@ async fn transcribe_history(
                             continue;
                         }
                         Message::Pong(_) => continue,
-                        Message::Close(_) => {
-                            return Err(Failure::fatal(
-                                "Gemini closed before historical transcription completed",
+                        Message::Close(frame) => {
+                            return Err(close_failure(
+                                frame.as_ref().map(|f| u16::from(f.code)),
+                                CloseStage::History,
                             ));
                         }
                         Message::Frame(_) => {
@@ -716,7 +721,10 @@ async fn read_events(
             }
             Message::Pong(_) => continue,
             Message::Close(frame) => {
-                return Err(close_failure(frame.as_ref().map(|f| u16::from(f.code))));
+                return Err(close_failure(
+                    frame.as_ref().map(|f| u16::from(f.code)),
+                    CloseStage::Streaming,
+                ));
             }
             Message::Frame(_) => return Err(Failure::fatal("unexpected raw WebSocket frame")),
         };
@@ -776,15 +784,46 @@ fn decode_transcription_content(content: &Value) -> SessionResult<Vec<ProviderEv
     Ok(events)
 }
 
-fn close_failure(code: Option<u16>) -> Failure {
-    match code {
-        Some(1008) => Failure::fatal(
-            "Gemini rejected session policy or authentication; check model access and settings",
+#[derive(Clone, Copy)]
+enum CloseStage {
+    Setup,
+    Streaming,
+    History,
+}
+
+fn close_failure(code: Option<u16>, stage: CloseStage) -> Failure {
+    let stage = match stage {
+        CloseStage::Setup => "setup acknowledgement",
+        CloseStage::Streaming => "live streaming",
+        CloseStage::History => "historical transcription",
+    };
+    let (category, retryable) = match code {
+        Some(1000) => ("session ended normally", true),
+        Some(1001) => ("server going away", true),
+        Some(1002) => ("protocol violation", false),
+        Some(1003) => ("unsupported message type", false),
+        Some(1007) => ("invalid message payload", false),
+        Some(1008) => (
+            "policy or authentication rejected; check model access and settings",
+            false,
         ),
-        Some(1002 | 1003 | 1007 | 1009) => {
-            Failure::fatal("Gemini rejected the WebSocket protocol or message format")
+        Some(1009) => ("message exceeds server size limit", false),
+        Some(1011) => ("temporary server failure", true),
+        Some(1012) => ("server restart", true),
+        Some(1013) => ("server busy", true),
+        _ => ("unexpected closure", true),
+    };
+    // Format only a numeric code and trusted labels. Close reasons can contain
+    // credentials, speech, or other request data and must never reach diagnostics.
+    let message = match code {
+        Some(code) => {
+            format!("Gemini WebSocket closed during {stage} (code {code}: {category})")
         }
-        _ => Failure::retry("Gemini WebSocket closed unexpectedly"),
+        None => format!("Gemini WebSocket closed during {stage} (no close code)"),
+    };
+    Failure {
+        message: Cow::Owned(message),
+        retryable,
     }
 }
 
@@ -1005,5 +1044,7 @@ async fn emit(events: &mpsc::Sender<ProviderEvent>, event: ProviderEvent) -> Ses
         .map_err(|_| Failure::fatal("provider event receiver closed"))
 }
 
+#[cfg(test)]
+mod diagnostic_tests;
 #[cfg(test)]
 mod tests;
