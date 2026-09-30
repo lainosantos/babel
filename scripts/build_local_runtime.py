@@ -147,7 +147,9 @@ def verify_patch(directory, patch):
 def cmake(source, build, extra, jobs, targets):
     common = ["-DCMAKE_BUILD_TYPE=Release", "-DCMAKE_POLICY_DEFAULT_CMP0091=NEW", "-DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded", "-DCMAKE_BUILD_WITH_INSTALL_RPATH=ON"]
     if sys.platform == "win32":
-        common += ["-A", "ARM64" if host()[1] == "aarch64" else "x64"]
+        # The ARM runner defaults to NMake, which rejects -A and does not set
+        # up MSVC itself. Both hosted Windows images supply VS 2022.
+        common += ["-G", "Visual Studio 17 2022", "-A", "ARM64" if host()[1] == "aarch64" else "x64"]
         # Existing native engines use narrow argv/filesystem paths. Windows
         # 10 1903+ UTF-8 activation preserves non-ASCII user/model directories.
         common += [f'-DCMAKE_EXE_LINKER_FLAGS=/MANIFEST:EMBED /MANIFESTINPUT:"{ROOT / "scripts/windows_utf8.manifest"}"']
@@ -269,6 +271,19 @@ def write_manifest(destination, system, arch, services):
     return manifest
 
 
+def smoke_command(command, timeout=20):
+    """Keep bounded failure context without filling RAM or hiding native errors."""
+    with tempfile.TemporaryFile() as output:
+        try:
+            run(*command, stdout=output, stderr=subprocess.STDOUT, timeout=timeout)
+        except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as error:
+            output.seek(0, os.SEEK_END)
+            output.seek(max(0, output.tell() - 8192))
+            tail = output.read(8192).decode("utf-8", errors="replace").strip()
+            reason = f"timed out after {timeout}s" if isinstance(error, subprocess.TimeoutExpired) else f"exited with code {error.returncode}"
+            raise RuntimeError(f"Executable smoke {Path(command[0]).name} {reason}. Output tail:\n{tail or '(no output)'}") from None
+
+
 def build(args):
     system, arch = host()
     for command in ("cmake", "git"):
@@ -314,7 +329,7 @@ def build(args):
         write_manifest(payload, system, arch, services)
         # Executable smoke never loads a model or starts a listener.
         for name, service in services.items():
-            run(payload / service["executable"], "--help", stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=20)
+            smoke_command([payload / service["executable"], "--help"])
         shutil.move(str(payload), output)
     with tarfile.open(output.parent / (output.name + ".tar.gz"), "w:gz") as archive:
         archive.add(output, arcname=output.name)

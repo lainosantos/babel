@@ -30,6 +30,7 @@ ROOT = Path(__file__).resolve().parents[1]
 CATALOG = ROOT / "src/local_runtime/models.json"
 MAX_LINE = 8192
 MAX_RESPONSE = 1024 * 1024
+MAX_STDERR = 16 * 1024
 
 
 def checked_model(asset, cache):
@@ -75,15 +76,56 @@ class Child:
 
     def __init__(self, args, timeout):
         self.timeout = timeout
+        self.name = Path(args[0]).name
         self.lines = queue.Queue(maxsize=32)
         self.stop_reader = threading.Event()
+        self.stderr_tail = bytearray()
+        self.stderr_lock = threading.Lock()
         self.process = subprocess.Popen(
             [str(item) for item in args], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
             creationflags=subprocess.CREATE_NO_WINDOW if host()[0] == "windows" else 0,
         )
         self.reader = threading.Thread(target=self.read_lines, daemon=True)
+        self.stderr_reader = threading.Thread(target=self.read_stderr, daemon=True)
         self.reader.start()
+        self.stderr_reader.start()
+
+    def read_stderr(self):
+        # These are pinned CI helpers receiving only synthetic input, not user
+        # providers. Drain continuously so native logging cannot block startup,
+        # but retain only a bounded tail for a failed smoke test.
+        try:
+            while not self.stop_reader.is_set():
+                chunk = self.process.stderr.read1(4096)
+                if not chunk:
+                    break
+                with self.stderr_lock:
+                    self.stderr_tail.extend(chunk)
+                    del self.stderr_tail[:-MAX_STDERR]
+        except (OSError, ValueError):
+            pass
+
+    def failure(self, message, ended=False):
+        if ended:
+            # stdout EOF can precede the OS publishing the exit code. Bound the
+            # wait and let the stderr reader collect the final native diagnostic.
+            try:
+                self.process.wait(timeout=0.2)
+            except subprocess.TimeoutExpired:
+                pass
+            if self.process.poll() is not None:
+                self.stderr_reader.join(timeout=0.2)
+        code = self.process.poll()
+        state = "still running" if code is None else f"exit code {code}"
+        if code is not None and host()[0] == "windows":
+            state += f" (0x{code & 0xFFFFFFFF:08X})"
+        with self.stderr_lock:
+            diagnostic = bytes(self.stderr_tail).decode("utf-8", errors="replace").strip()
+        detail = f"{self.name}: {message} ({state})"
+        if diagnostic:
+            detail += f"\nNative stderr tail (at most {MAX_STDERR} bytes):\n{diagnostic}"
+        return detail
 
     def read_lines(self):
         try:
@@ -113,11 +155,13 @@ class Child:
     def line(self, deadline):
         remaining = deadline - time.monotonic()
         if remaining <= 0:
-            raise TimeoutError("Native service response timed out")
+            raise TimeoutError(self.failure("Native service response timed out"))
         try:
             line = self.lines.get(timeout=remaining)
         except queue.Empty as error:
-            raise TimeoutError("Native service response timed out") from error
+            raise TimeoutError(self.failure("Native service response timed out")) from error
+        if isinstance(line, EOFError):
+            raise EOFError(self.failure(str(line), ended=True)) from line
         if isinstance(line, Exception):
             raise line
         return line
@@ -133,7 +177,7 @@ class Child:
             if line.startswith(prefix):
                 body = json.loads(line[len(prefix):])
                 if self.process.poll() is not None:
-                    raise RuntimeError("Native service exited after announcing readiness")
+                    raise RuntimeError(self.failure("Native service exited after announcing readiness", ended=True))
                 return body
 
     def write_json(self, value):
@@ -150,10 +194,11 @@ class Child:
         try:
             self.process.wait(timeout=10)
         finally:
-            for stream in (self.process.stdin, self.process.stdout):
+            for stream in (self.process.stdin, self.process.stdout, self.process.stderr):
                 if stream:
                     stream.close()
             self.reader.join(timeout=2)
+            self.stderr_reader.join(timeout=2)
 
     def __enter__(self):
         return self

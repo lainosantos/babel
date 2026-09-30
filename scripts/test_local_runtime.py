@@ -8,6 +8,7 @@ import sys
 import tarfile
 import tempfile
 import unittest
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import build_local_runtime as build
@@ -33,6 +34,30 @@ def fixture(root, system="linux", arch="x86_64"):
 
 
 class RuntimeTests(unittest.TestCase):
+    def test_windows_cmake_explicitly_selects_a_generator_supporting_architecture(self):
+        for architecture, platform in [("aarch64", "ARM64"), ("x86_64", "x64")]:
+            with self.subTest(architecture=architecture), mock.patch.object(build.sys, "platform", "win32"), mock.patch.object(build, "host", return_value=("windows", architecture)), mock.patch.object(build, "run") as run:
+                build.cmake(Path("source"), Path("build"), [], 2, ["whisper-server"])
+                args = run.call_args_list[0].args
+                self.assertEqual(args[args.index("-G") + 1], "Visual Studio 17 2022")
+                self.assertEqual(args[args.index("-A") + 1], platform)
+
+    def test_executable_smoke_reports_bounded_native_failure_output(self):
+        command = [sys.executable, "-c", "import sys; sys.stderr.write('x'*20000+'native failure sentinel'); sys.exit(7)"]
+        with self.assertRaises(RuntimeError) as failure:
+            build.smoke_command(command)
+        message = str(failure.exception)
+        self.assertIn("exited with code 7", message)
+        self.assertIn("native failure sentinel", message)
+        self.assertLess(len(message), 8400)
+
+    def test_executable_smoke_timeout_keeps_failure_context(self):
+        command = [sys.executable, "-c", "import sys,time; print('startup sentinel',flush=True); time.sleep(10)"]
+        with self.assertRaises(RuntimeError) as failure:
+            build.smoke_command(command, timeout=1)
+        self.assertIn("timed out after 1s", str(failure.exception))
+        self.assertIn("startup sentinel", str(failure.exception))
+
     def test_git_format_patch_is_applied_inside_an_outer_checkout_and_idempotent(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

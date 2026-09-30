@@ -4,6 +4,7 @@ from pathlib import Path
 import struct
 import sys
 import tempfile
+import time
 import unittest
 
 import test_bundled_inference as smoke
@@ -64,6 +65,42 @@ class InferenceContracts(unittest.TestCase):
                 return {"service": "babel-whisper", "endpoint": "http://remote.invalid:123/inference", "port": 123}
         with self.assertRaisesRegex(ValueError, "endpoint"):
             smoke.ready_http(FakeChild(), "babel-whisper", "/inference")
+
+    def test_startup_failure_reports_native_diagnostic_and_exit_code(self):
+        command = [sys.executable, "-u", "-c",
+                   'import sys; print("synthetic model load failure", file=sys.stderr); sys.exit(7)']
+        with smoke.Child(command, 5) as child:
+            with self.assertRaises(EOFError) as failed:
+                child.readiness(b"BABEL_SERVICE_READY ")
+            self.assertIn(Path(sys.executable).name, str(failed.exception))
+            self.assertIn("exit code 7", str(failed.exception))
+            self.assertIn("synthetic model load failure", str(failed.exception))
+        self.assertFalse(child.stderr_reader.is_alive())
+
+    def test_stderr_flood_is_drained_without_unbounded_failure_output(self):
+        command = [sys.executable, "-u", "-c",
+                   'import sys; sys.stderr.write("discard this prefix\\n" + "x" * 262144 + "\\nfinal native error\\n"); sys.exit(9)']
+        with smoke.Child(command, 5) as child:
+            with self.assertRaises(EOFError) as failed:
+                child.readiness(b"BABEL_SERVICE_READY ")
+            message = str(failed.exception)
+            self.assertIn("exit code 9", message)
+            self.assertIn("final native error", message)
+            self.assertNotIn("discard this prefix", message)
+            self.assertLessEqual(len(child.stderr_tail), smoke.MAX_STDERR)
+            self.assertLess(len(message), smoke.MAX_STDERR + 512)
+        self.assertFalse(child.stderr_reader.is_alive())
+
+    def test_timed_out_helper_reports_its_identity_and_is_stopped(self):
+        command = [sys.executable, "-u", "-c",
+                   'import time; print("fixture is running", flush=True); time.sleep(30)']
+        with smoke.Child(command, 5) as child:
+            self.assertEqual(child.line(time.monotonic() + 5), b"fixture is running")
+            with self.assertRaises(TimeoutError) as failed:
+                child.line(time.monotonic() + 0.05)
+            self.assertIn(Path(sys.executable).name, str(failed.exception))
+            self.assertIn("still running", str(failed.exception))
+        self.assertIsNotNone(child.process.poll())
 
 
 if __name__ == "__main__":

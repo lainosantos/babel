@@ -48,3 +48,4 @@ jobs:
           python3 -m unittest discover -s packaging/macos -p 'test_*.py' -v
           python3 -m unittest discover -s packaging/linux -p 'test_*.py' -v
           python3 -m unittest discover -s scripts -p test_local_runtime.py -v
+          python3 -m unittest discover -s scripts -p test_bundled_inference_contracts.py -v
