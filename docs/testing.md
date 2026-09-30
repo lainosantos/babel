@@ -109,6 +109,35 @@ CPUs, `cargo test --locked --all-targets -- --test-threads=4` avoids hundreds of
 mock servers and deadline tests competing simultaneously for the application's
 bounded executors.
 
+## Local translation overload and recovery
+
+Portable Rust regressions cover a slow local inference request, replacement of
+old pending segments, expiration during silence, bounded synthesis backpressure,
+and speech resuming after overload. Other tests verify that provider task errors
+survive audio-channel closure, cancellation remains prompt, and live recognition
+warnings produce transcript gap markers without interrupting original transport.
+
+The native pipeline smoke uses the packaged Whisper, Qwen and Piper engines with
+synthetic Portuguese and English speech. It exercises two simultaneous routes,
+idle-to-speech transitions, accelerated continuous input, fresh speech after
+overload and cancellation. It never opens physical or virtual audio devices,
+reads user settings, or saves microphone/system audio:
+
+```sh
+cargo run --locked --example local_translation_smoke
+```
+
+Run it on the bundle's matching OS/architecture with the local runtime installed
+in Babel's discovery path. It reuses verified cached models and downloads missing
+assets from the pinned catalog. This is a functional regression, not a latency
+benchmark or a translation-quality evaluation.
+
+On September 30, 2026, this smoke passed on Linux with two concurrent local
+routes, including recovery after 64 seconds of accelerated input per route.
+No microphone or desktop output was captured. The portable regression tests
+also run in the Linux, macOS and Windows CI matrix; native inference on other
+platforms must be verified using their matching bundles.
+
 ## Voice-command service diagnostics
 
 After separating configuration failures from command failures, **225 Rust tests

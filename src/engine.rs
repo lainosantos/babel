@@ -1289,6 +1289,10 @@ fn record_recognition_event_at(
             )
         }
         ProviderEvent::TurnComplete => record(transcript, TranscriptRecord::TurnComplete),
+        ProviderEvent::Warning { message } => {
+            metrics.report_processing_error(&message);
+            record(transcript, TranscriptRecord::Gap)
+        }
         ProviderEvent::Reconnecting { .. } | ProviderEvent::Interrupted => {
             record(transcript, TranscriptRecord::Gap)
         }

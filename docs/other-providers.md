@@ -278,9 +278,14 @@ reduces clipped word beginnings. Offsets refer to segments, not word alignment.
 
 Capture and inference progress in independent tasks, with at most two segments
 waiting for inference and two audio segments waiting for playback per pipeline.
-Two routes plus independent transcription increase CPU/memory load. If a service
-cannot keep up, its processing path reports an error rather than expanding
-queues indefinitely; original audio routing is isolated from STT/file failures.
+Two routes plus independent transcription increase CPU/memory load. During live
+overload, the pipeline discards old pending input in favor of recent speech and
+reports a processing warning. Translation continues instead of closing the
+session. Synthesized speech waits in a bounded playback queue, preserving its
+order. Skipped recognition segments are marked as gaps in the transcript;
+finite transcription of retained history still waits for every segment.
+Original audio routing remains isolated from this processing. Service or
+request failures still stop translation and report their underlying cause.
 Calls have timeouts and byte limits and do not follow redirects. Segments are
 not automatically repeated, avoiding duplicate speech.
 

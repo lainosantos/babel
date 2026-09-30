@@ -20,6 +20,29 @@ impl Synthesizer for FakeSynthesizer {
     }
 }
 struct ScriptProvider(Mutex<Option<mpsc::Receiver<ProviderEvent>>>);
+struct ClosingProvider(Mutex<Option<tokio::sync::oneshot::Receiver<Result<()>>>>);
+#[async_trait]
+impl SpeechProvider for ClosingProvider {
+    fn id(&self) -> &'static str {
+        "closing-test"
+    }
+    async fn run(
+        &self,
+        _: SessionConfig,
+        _: mpsc::Receiver<Vec<i16>>,
+        events: mpsc::Sender<ProviderEvent>,
+        cancel: CancellationToken,
+    ) -> Result<()> {
+        events.send(ProviderEvent::Connected).await?;
+        drop(events);
+        let finished = self.0.lock().await.take().unwrap();
+        tokio::select! {
+            biased;
+            _ = cancel.cancelled() => Ok(()),
+            result = finished => result?,
+        }
+    }
+}
 #[async_trait]
 impl SpeechProvider for ScriptProvider {
     fn id(&self) -> &'static str {
@@ -222,6 +245,79 @@ async fn request_error_after_pcm_eof_is_observed() {
 }
 
 #[tokio::test(start_paused = true)]
+async fn provider_error_after_event_eof_is_observed_by_revoice_supervisor() {
+    let (finish, finished) = tokio::sync::oneshot::channel();
+    let (_audio, input) = mpsc::channel(1);
+    let (events, mut received) = mpsc::channel(2);
+    let cancel = CancellationToken::new();
+    let worker = tokio::spawn(run_with_synthesizer(
+        Arc::new(ClosingProvider(Mutex::new(Some(finished)))),
+        session_config(),
+        synthesis_config(),
+        100,
+        1000,
+        input,
+        events,
+        cancel,
+        Arc::new(FakeSynthesizer(Arc::new(|_, _| {
+            async { anyhow::bail!("synthesis must not be requested") }.boxed()
+        }))),
+    ));
+    assert_eq!(received.recv().await, Some(ProviderEvent::Connected));
+    tokio::task::yield_now().await;
+    assert!(
+        !worker.is_finished(),
+        "EOF must not replace the pending provider result"
+    );
+    finish
+        .send(Err(anyhow!("synthetic translation completion failure")))
+        .unwrap();
+    let error = worker.await.unwrap().unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("synthetic translation completion failure")
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn revoice_eof_wait_is_bounded_and_cancellable() {
+    for stopping in [false, true] {
+        let (_finish, finished) = tokio::sync::oneshot::channel();
+        let (_audio, input) = mpsc::channel(1);
+        let (events, mut received) = mpsc::channel(2);
+        let cancel = CancellationToken::new();
+        let worker = tokio::spawn(run_with_synthesizer(
+            Arc::new(ClosingProvider(Mutex::new(Some(finished)))),
+            session_config(),
+            synthesis_config(),
+            100,
+            1000,
+            input,
+            events,
+            cancel.clone(),
+            Arc::new(FakeSynthesizer(Arc::new(|_, _| async { Ok(()) }.boxed()))),
+        ));
+        assert_eq!(received.recv().await, Some(ProviderEvent::Connected));
+        tokio::task::yield_now().await;
+        let started = Instant::now();
+        if stopping {
+            cancel.cancel();
+            worker.await.unwrap().unwrap();
+            assert_eq!(started.elapsed(), Duration::ZERO);
+        } else {
+            let error = worker.await.unwrap().unwrap_err();
+            assert!(
+                error
+                    .to_string()
+                    .contains("did not finish within 2 seconds")
+            );
+            assert!(started.elapsed() <= Duration::from_secs(2));
+        }
+    }
+}
+
+#[tokio::test(start_paused = true)]
 async fn completed_request_drains_pcm_and_paces_partial_frames_across_segments() {
     let synthesizer = Arc::new(FakeSynthesizer(Arc::new(move |text, pcm| {
         async move {
@@ -333,6 +429,16 @@ async fn continuous_fragments_flush_on_oldest_text_and_only_original_transcripts
     ));
     script_tx.send(ProviderEvent::Connected).await.unwrap();
     assert_eq!(event_rx.recv().await.unwrap(), ProviderEvent::Connected);
+    let warning = ProviderEvent::Warning {
+        message: "Synthetic overload recovery".into(),
+    };
+    script_tx.send(warning).await.unwrap();
+    assert_eq!(
+        event_rx.recv().await.unwrap(),
+        ProviderEvent::Warning {
+            message: "Synthetic overload recovery".into()
+        }
+    );
     script_tx
         .send(ProviderEvent::Transcript {
             input: true,

@@ -122,7 +122,10 @@ async fn run_with_synthesizer(
                 done = jobs.join_next() => { break match done { _ if cancel.is_cancelled() => Ok(()), Some(Ok(Err(e))) => Err(e), _ => Err(anyhow!("A voice synthesis stage ended unexpectedly")) }; }
                 event = provider_rx.recv() => {
                     if cancel.is_cancelled() { break Ok(()); }
-                    match event.context("Translation channel closed")? {
+                    let Some(event) = event else {
+                        break stage_result_after_eof(&mut jobs, &cancel, "Translation channel closed").await;
+                    };
+                    match event {
                         ProviderEvent::Audio { .. } => {} // The selected synthesizer supplies the final voice.
                         ProviderEvent::Transcript { input: false, text, .. } => {
                             ensure!(pending.len() + text.len() <= 8192, "Translated text exceeded the synthesis limit");
@@ -144,7 +147,9 @@ async fn run_with_synthesizer(
                 }
                 packet = synth_rx.recv() => {
                     if cancel.is_cancelled() { break Ok(()); }
-                    let packet = packet.context("Synthesized voice channel closed")?;
+                    let Some(packet) = packet else {
+                        break stage_result_after_eof(&mut jobs, &cancel, "Synthesized voice channel closed").await;
+                    };
                     if packet.generation == generation { forward(&events, ProviderEvent::Audio { samples: packet.samples, sample_rate: 24_000 }, &cancel).await?; }
                 }
                 _ = tick.tick() => {
@@ -164,6 +169,28 @@ async fn run_with_synthesizer(
     .await;
     jobs.shutdown().await;
     result
+}
+
+async fn stage_result_after_eof(
+    jobs: &mut JoinSet<Result<()>>,
+    cancel: &CancellationToken,
+    channel: &'static str,
+) -> Result<()> {
+    // A stage can drop its sender before returning its error. Keep cancellation
+    // and a deadline while retrieving the task result; EOF alone loses its cause.
+    tokio::select! {
+        biased;
+        _ = cancel.cancelled() => Ok(()),
+        result = tokio::time::timeout(Duration::from_secs(2), jobs.join_next()) => {
+            match result.with_context(|| format!("{channel}; stage did not finish within 2 seconds"))? {
+                Some(result) => {
+                    result.context("Voice synthesis task ended unexpectedly")??;
+                    Err(anyhow!("A voice synthesis stage ended unexpectedly"))
+                }
+                None => Err(anyhow!("{channel}; no completion result is available")),
+            }
+        }
+    }
 }
 
 fn enqueue_pending(

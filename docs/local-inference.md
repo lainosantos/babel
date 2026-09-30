@@ -231,6 +231,12 @@ start with one direction, a smaller model and a thread count that leaves CPU
 capacity for audio. The dashboard retains preparation errors, and queue limits
 prevent unbounded lag.
 
+Live inference overload keeps the session active: old pending speech is skipped
+with a visible processing warning so recent speech can continue. This can leave
+gaps in translation or live transcription on slower hardware; transcription
+marks those gaps. Retained-history transcription waits for all segments instead.
+Service failures remain errors and include the failed processing stage.
+
 Whisper transcription saves original text without diarization or word timestamps.
 Timing refers to captured segments. See [transcription](transcription.md) and
 [provider guidance](other-providers.md) for protocol-specific limits.

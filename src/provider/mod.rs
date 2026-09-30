@@ -38,6 +38,11 @@ pub enum ProviderEvent {
     Reconnecting {
         attempt: u32,
     },
+    /// A recoverable processing limitation. Diagnostics must not contain speech
+    /// or credentials; the provider continues and keeps its queues bounded.
+    Warning {
+        message: String,
+    },
     Audio {
         samples: Vec<i16>,
         sample_rate: u32,

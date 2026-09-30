@@ -303,8 +303,11 @@ pub(super) async fn run_route(
                 }
                 event = events_rx.recv(), if translating => {
                     if cancel.is_cancelled() { break Ok(()); }
-                    let Some(event) = event else { bail!("Provider closed the audio channel"); };
+                    let Some(event) = event else {
+                        break translation_result_after_eof(&mut processing_jobs, &cancel, &metrics).await;
+                    };
                     match event {
+                        ProviderEvent::Warning { message } => metrics.report_processing_error(&message),
                         ProviderEvent::Connected => { connected = true; metrics.state("running"); }
                         ProviderEvent::Reconnecting { .. } => {
                             connected = false;
@@ -457,6 +460,33 @@ enum Processor {
     Recognition,
 }
 
+/// Dropping a provider's sender can wake the receiver before its task result is
+/// available. Preserve that result instead of reporting EOF as the root cause.
+/// This runs on the processing executor; device workers keep their own runtime.
+async fn translation_result_after_eof(
+    jobs: &mut JoinSet<(Processor, Result<()>)>,
+    cancel: &CancellationToken,
+    metrics: &RouteMetrics,
+) -> Result<()> {
+    tokio::select! {
+        biased;
+        _ = cancel.cancelled() => Ok(()),
+        result = tokio::time::timeout(Duration::from_secs(2), async {
+            while let Some(completed) = jobs.join_next().await {
+                match completed.context("Processing task ended unexpectedly")? {
+                    (Processor::Translation, Err(error)) => return Err(error),
+                    (Processor::Translation, Ok(())) => bail!("The translator ended unexpectedly"),
+                    (Processor::Recognition, Err(error)) => {
+                        metrics.report_processing_error(&format!("Transcription interrupted: {error:#}"));
+                    }
+                    (Processor::Recognition, Ok(())) => {}
+                }
+            }
+            bail!("Provider closed the audio channel without a completion result")
+        }) => result.context("Provider closed the audio channel but did not finish within 2 seconds")?,
+    }
+}
+
 fn spawn_processor<F>(
     jobs: &mut JoinSet<(Processor, Result<()>)>,
     handle: &tokio::runtime::Handle,
@@ -502,6 +532,68 @@ async fn forward_processing(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test(start_paused = true)]
+    async fn provider_eof_preserves_delayed_task_error_and_buffered_events() {
+        let mut jobs = JoinSet::new();
+        let (events, mut received) = mpsc::channel(2);
+        let (finish, finished) = tokio::sync::oneshot::channel();
+        spawn_processor(
+            &mut jobs,
+            &tokio::runtime::Handle::current(),
+            Processor::Translation,
+            async move {
+                events.send(ProviderEvent::Connected).await?;
+                events.send(ProviderEvent::TurnComplete).await?;
+                drop(events);
+                finished.await?;
+                bail!("synthetic translator HTTP 503")
+            },
+        );
+        assert_eq!(received.recv().await, Some(ProviderEvent::Connected));
+        assert_eq!(received.recv().await, Some(ProviderEvent::TurnComplete));
+        assert_eq!(received.recv().await, None);
+        let cancel = CancellationToken::new();
+        let metrics = RouteMetrics::default();
+        let completion = translation_result_after_eof(&mut jobs, &cancel, &metrics);
+        tokio::pin!(completion);
+        assert!(completion.as_mut().now_or_never().is_none());
+        finish.send(()).unwrap();
+        let error = completion.await.unwrap_err();
+        assert!(error.to_string().contains("synthetic translator HTTP 503"));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn provider_eof_wait_is_bounded_and_cancellable() {
+        for stopping in [false, true] {
+            let mut jobs = JoinSet::new();
+            spawn_processor(
+                &mut jobs,
+                &tokio::runtime::Handle::current(),
+                Processor::Translation,
+                std::future::pending(),
+            );
+            let cancel = CancellationToken::new();
+            let metrics = RouteMetrics::default();
+            let started = tokio::time::Instant::now();
+            let completion = translation_result_after_eof(&mut jobs, &cancel, &metrics);
+            tokio::pin!(completion);
+            assert!(completion.as_mut().now_or_never().is_none());
+            if stopping {
+                cancel.cancel();
+                completion.await.unwrap();
+                assert_eq!(started.elapsed(), Duration::ZERO);
+            } else {
+                let error = completion.await.unwrap_err();
+                assert!(
+                    error
+                        .to_string()
+                        .contains("did not finish within 2 seconds")
+                );
+                assert_eq!(started.elapsed(), Duration::from_secs(2));
+            }
+        }
+    }
 
     #[tokio::test]
     async fn panicking_recognizer_remains_a_processing_failure() {

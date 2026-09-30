@@ -243,6 +243,9 @@ async fn replay(
                         ProviderEvent::Reconnecting { .. } | ProviderEvent::Interrupted => {
                             bail!("The history transcription connection was interrupted")
                         }
+                        ProviderEvent::Warning { message } => {
+                            bail!("History transcription was incomplete: {message}")
+                        }
                         _ => continue,
                     };
                     record_size(&record)?;

@@ -4,6 +4,44 @@ use axum::{Json, Router, routing::post};
 use serde_json::json;
 
 #[tokio::test]
+async fn recoverable_recognition_warning_records_a_gap_without_interrupting_audio() {
+    let metrics = RouteMetrics::default();
+    metrics.state("transcribing");
+    let (tx, mut rx) = mpsc::channel(8);
+    let transcript = Some(TranscriptSink {
+        sender: tx,
+        origin: TranscriptOrigin::Microphone,
+    });
+    record_recognition_event(
+        ProviderEvent::Warning {
+            message: "Local transcription skipped old audio to keep up".into(),
+        },
+        &transcript,
+        &metrics,
+    )
+    .unwrap();
+    assert!(matches!(rx.recv().await,
+        Some(TranscriptRecord::Routed { origin: TranscriptOrigin::Microphone, record })
+        if matches!(*record, TranscriptRecord::Gap)));
+    assert_eq!(metrics.snapshot().state, "transcribing");
+    assert!(metrics.snapshot().processing_error.is_some());
+    assert_eq!(metrics.audio.playback_generation.load(Ordering::Relaxed), 0);
+    record_recognition_event(
+        ProviderEvent::Transcript {
+            input: true,
+            text: "The next original segment".into(),
+            metadata: TranscriptMetadata::default(),
+        },
+        &transcript,
+        &metrics,
+    )
+    .unwrap();
+    assert!(matches!(rx.recv().await,
+        Some(TranscriptRecord::Routed { record, .. })
+        if matches!(*record, TranscriptRecord::Text { input: true, .. })));
+}
+
+#[tokio::test]
 async fn full_or_disconnected_stt_queue_does_not_block_translation_and_vice_versa() {
     let metrics = RouteMetrics::default();
     let (translation, mut translated) = mpsc::channel(1);
