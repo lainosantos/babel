@@ -590,3 +590,18 @@ dialog::backdrop { background: #152c4866; }
   .stt-settings .section-heading { flex-wrap: wrap; }
 }
 @media (max-width: 440px) { .stt-route-fields { grid-template-columns: 1fr; } }
+
+/* Local inference follows each provider's configuration and shares one runtime. */
+.local-runtime-settings { padding: 28px 30px; margin-bottom: 20px; border: 1px solid var(--line); border-radius: 12px; background: var(--panel); }
+.local-service-control { display: grid; align-content: start; gap: 14px; }
+.local-runtime-status { margin: 20px 0; padding: 18px 20px; border-left: 3px solid var(--teal, #158688); background: var(--surface, #f4f7fb); border-radius: 0 7px 7px 0; }
+.local-runtime-status[data-phase="error"] { border-left-color: var(--danger, #ce3b4e); }
+.local-runtime-heading { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 10px 24px; align-items: baseline; }
+.local-runtime-heading strong { font-size: 14px; }
+.local-runtime-heading a { font-size: 12px; }
+.local-runtime-status p { margin: 8px 0 0; max-width: 78ch; font-size: 12px; color: var(--muted); line-height: 1.7; }
+.local-runtime-status .file-path-error { color: var(--danger, #ce3b4e); overflow-wrap: anywhere; }
+.local-runtime-status [data-local-runtime-download] { margin-top: 14px; }
+.local-runtime-status [data-local-runtime-download] label { font-size: 12px; overflow-wrap: anywhere; }
+.local-runtime-status progress { display: block; width: 100%; height: 8px; margin-top: 8px; accent-color: var(--teal, #158688); }
+@media (max-width: 650px) { .local-runtime-settings { padding: 20px 17px; } .local-runtime-status { padding: 14px; } }

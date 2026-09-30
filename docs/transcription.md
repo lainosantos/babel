@@ -16,7 +16,8 @@ traduzir. O microfone e a saída recebida podem usar reconhecedores diferentes.
    modelo, referência da chave de API, endpoint e opções disponíveis.
 5. Para um serviço em nuvem, adicione a chave no próprio perfil STT ou forneça a
    variável de ambiente correspondente ao iniciar o Babel. Para whisper.cpp,
-   informe o endereço real do servidor; o Babel não presume uma porta.
+   mantenha **Integrado ao Babel** e escolha Tiny, Base ou Small; salvar prepara
+   o modelo automaticamente. Um servidor externo é opcional.
 6. Configure a pasta base **absoluta**, a pasta de destino, o padrão do nome e,
    opcionalmente, os tempos dos segmentos. Salve e inicie a sessão com um nome.
 
@@ -40,7 +41,7 @@ perfil de tradução ou voz.
 | Gemini Live Transcribe | WebSocket; `gemini-3.5-transcribe-live` | Sem diarização confirmada no streaming atual | Recebimento; metadados reais quando presentes | Chave Google com acesso ao modelo |
 | OpenAI Realtime Transcription | WebSocket; `gpt-live-transcribe` por padrão | Sem diarização neste adaptador | Recebimento | Chave OpenAI com acesso ao modelo |
 | Deepgram Listen | WebSocket v1; `nova-3` por padrão, também Nova-2 | Opcional; IDs enviados pela API | Intervalos dos segmentos, derivados das palavras retornadas | Chave Deepgram e modelo/idioma compatíveis |
-| whisper.cpp | HTTP multipart para `/inference`; modelo carregado no servidor | Sem diarização neste adaptador | Limites dos segmentos enviados ao reconhecedor | Servidor whisper.cpp e modelo multilíngue local |
+| whisper.cpp | Motor integrado; Tiny/Base/Small multilíngues. Servidor HTTP externo opcional | Sem diarização neste adaptador | Limites dos segmentos enviados ao reconhecedor | Instalador com runtimes; internet apenas para preparar pesos ausentes |
 
 Suporte implementado não garante disponibilidade do modelo para toda conta,
 região ou idioma. Testes automatizados usam servidores simulados locais e não
@@ -117,29 +118,59 @@ e [keepalive](https://developers.deepgram.com/docs/audio-keep-alive).
 
 ### whisper.cpp local
 
-Inicie um servidor whisper.cpp com um modelo multilíngue apropriado, obtenha o
-endereço e a porta efetivamente usados e informe a URL completa de inferência no
-perfil STT. Nenhuma conexão é tentada em uma porta presumida. Um processo que
-tenha escolhido outra porta exige atualizar esse endereço. O campo começa vazio.
+Selecione `whisper.cpp` no reconhecimento da origem e mantenha **Integrado ao
+Babel** no perfil. Ao salvar, o Babel prepara o motor incluído no instalador e
+baixa o modelo multilíngue escolhido, quando ainda não estiver no cache. Não é
+necessário instalar Python, CMake, Ollama ou iniciar um servidor separado. O
+painel mostra preparação, progresso de download, disponibilidade e falhas.
 
-Esse perfil usa apenas o servidor de reconhecimento: não chama Ollama, Piper,
-Gemini ou um serviço de voz. O modelo é escolhido ao iniciar o servidor
-whisper.cpp, não pelo painel do Babel. `auto` pede detecção ao Whisper e códigos
-como `pt-BR` são reduzidos ao idioma `pt`. O parâmetro `translate` é sempre falso.
+Escolha `tiny`, `base` (padrão) ou `small`. Os modelos maiores precisam de mais
+memória e processamento; o tamanho adequado depende do hardware e dos idiomas.
+A pasta de modelos e as threads de CPU ficam em **Ajustes → Modelos locais**.
+Depois da preparação, esse reconhecimento funciona sem internet. O motor usa
+uma porta local dinâmica: nenhuma porta padrão é presumida ou salva no perfil.
+
+```toml
+[transcription.microphone_recognition]
+provider = "whisper"
+language = "pt-BR"
+
+[transcription.providers.whisper]
+endpoint = "auto"
+model = "base"
+api_key_env = ""
+segment_ms = 2000
+silence_ms = 300
+vad_threshold = 0.01
+request_timeout_secs = 30
+
+[local_runtime]
+directory = "" # Cache da conta, ou caminho absoluto escolhido pelo usuário.
+threads = 4
+```
+
+Esse perfil reconhece somente o áudio original. Não chama o modelo tradutor,
+Piper ou um serviço de voz. `auto` no **idioma** pede detecção ao Whisper e códigos
+como `pt-BR` são reduzidos a `pt`; `translate` é sempre falso. `endpoint = "auto"`
+seleciona o processo gerenciado, não o idioma.
 
 O áudio é segmentado por VAD de energia, com duração máxima, silêncio, limiar RMS
-e timeout configuráveis. Segmentos menores reduzem o tempo de espera, mas podem
-reduzir o contexto linguístico. Um modelo lento ou um computador sem capacidade
-suficiente aumenta a latência; não se trata de streaming neural contínuo. Os
-tempos gravados correspondem aos limites do áudio enviado, sem alinhamento de
-palavras nem identificação de falantes.
+e timeout configuráveis. Segmentos menores reduzem espera, mas podem reduzir
+contexto. Modelos lentos aumentam latência; não se trata de streaming neural
+contínuo. Os tempos correspondem aos limites do áudio enviado, sem alinhamento
+de palavras nem identificação de falantes.
 
-Autenticação Bearer é opcional: informe uma referência de chave apenas se seu
-servidor/proxy a exigir. Conexões HTTP sem TLS são aceitas somente em loopback;
-endereços remotos exigem HTTPS. Redirecionamentos e URLs com credenciais,
-query ou fragmento não são aceitos. Não use um endpoint de tradução como STT.
+**Servidor externo (avançado)** continua disponível para uma instalação própria.
+Informe a URL completa de inferência com a porta real. Nesse modo, o modelo é
+carregado pelo seu servidor, e a escolha Tiny/Base/Small do Babel não o altera.
+Autenticação Bearer é opcional somente no modo externo: informe uma referência
+de chave quando o servidor/proxy exigir. HTTP sem TLS é aceito apenas em
+loopback; endereços remotos exigem HTTPS. Redirecionamentos e URLs com
+credenciais, query ou fragmento não são aceitos.
 
-Referência: [servidor whisper.cpp](https://github.com/ggml-org/whisper.cpp/tree/master/examples/server).
+Leia [Modelos locais integrados](local-inference.md) para armazenamento,
+preparação, instalação e limites. Referência do protocolo externo:
+[servidor whisper.cpp](https://github.com/ggml-org/whisper.cpp/tree/master/examples/server).
 
 ## Exemplo TOML independente
 
@@ -222,6 +253,7 @@ que estavam desligadas. A partir daí, alterações de tradução não alteram S
 O endpoint oficial OpenAI `/realtime/translations` é convertido para
 `/realtime` dentro do novo perfil de reconhecimento. Um endpoint personalizado
 de tradução exige configuração STT explícita, evitando adivinhar outro destino.
-Um endereço Whisper só é migrado se estava escrito no TOML; defaults antigos
-implícitos de porta não são recriados. Não existe provider de diagnóstico
+Endereços Whisper personalizados são preservados. Perfis locais vazios ou
+com os defaults antigos reconhecidos migram para preparação integrada;
+portas fixas antigas não são reaproveitadas automaticamente. Não existe provider de diagnóstico
 `loopback`: para passagem original, basta desligar a tradução.

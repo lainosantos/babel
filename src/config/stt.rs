@@ -90,6 +90,7 @@ impl Default for DeepgramSttConfig {
 #[serde(default, deny_unknown_fields)]
 pub struct WhisperSttConfig {
     pub endpoint: String,
+    pub model: String,
     pub api_key_env: String,
     pub segment_ms: u32,
     pub silence_ms: u32,
@@ -99,7 +100,8 @@ pub struct WhisperSttConfig {
 impl Default for WhisperSttConfig {
     fn default() -> Self {
         Self {
-            endpoint: String::new(),
+            endpoint: "auto".into(),
+            model: "base".into(),
             api_key_env: String::new(),
             segment_ms: 2000,
             silence_ms: 300,
@@ -168,7 +170,11 @@ impl SttProviderProfiles {
             "gemini" => Some(&self.gemini.api_key_env),
             "openai" => Some(&self.openai.api_key_env),
             "deepgram" => Some(&self.deepgram.api_key_env),
-            "whisper" if !self.whisper.api_key_env.is_empty() => Some(&self.whisper.api_key_env),
+            "whisper"
+                if self.whisper.endpoint != "auto" && !self.whisper.api_key_env.is_empty() =>
+            {
+                Some(&self.whisper.api_key_env)
+            }
             _ => None,
         }
     }
@@ -213,11 +219,14 @@ impl SttProviderProfiles {
             }
             "whisper" => {
                 let profile = &self.whisper;
-                ensure!(
-                    !profile.endpoint.is_empty(),
-                    "Configure o endpoint do Whisper para transcrição"
-                );
-                validate_endpoint(&profile.endpoint, false)?;
+                if profile.endpoint == "auto" {
+                    ensure!(
+                        matches!(profile.model.as_str(), "tiny" | "base" | "small"),
+                        "Unknown managed Whisper model"
+                    );
+                } else {
+                    validate_endpoint(&profile.endpoint, false)?;
+                }
                 if !profile.api_key_env.is_empty() {
                     validate_key_name(&profile.api_key_env)?;
                 }
@@ -376,7 +385,7 @@ pub(super) fn migrate(config: &mut AppConfig, document: &toml::Value) -> Result<
             {
                 local.whisper_endpoint.clone()
             } else {
-                String::new()
+                "auto".into()
             },
             segment_ms: local.segment_ms,
             silence_ms: local.silence_ms,
@@ -424,7 +433,7 @@ mod tests {
                 .unwrap();
         assert_eq!(api.transcription.microphone_recognition.provider, "gemini");
         assert_eq!(api.transcription.microphone_recognition.language, "auto");
-        assert!(api.transcription.providers.whisper.endpoint.is_empty());
+        assert_eq!(api.transcription.providers.whisper.endpoint, "auto");
         let partial: AppConfig =
             toml::from_str("[transcription.providers.openai]\napi_key_env = 'MY_ASR_KEY'\n")
                 .unwrap();
@@ -578,7 +587,7 @@ mod tests {
             loaded.transcription.microphone_recognition.provider,
             "whisper"
         );
-        assert!(loaded.transcription.providers.whisper.endpoint.is_empty());
+        assert_eq!(loaded.transcription.providers.whisper.endpoint, "auto");
         assert!(!loaded.transcription.enabled);
     }
 
@@ -590,13 +599,9 @@ mod tests {
         config.transcription.enabled = true;
         config.transcription.speaker = false;
         assert!(config.microphone.enabled);
-        assert!(
-            config
-                .validate()
-                .unwrap_err()
-                .to_string()
-                .contains("endpoint do Whisper")
-        );
+        config.validate().unwrap();
+        config.transcription.providers.whisper.endpoint.clear();
+        assert!(config.validate().is_err());
         config.transcription.providers.whisper.endpoint = "http://127.0.0.1:54321/inference".into();
         config.validate().unwrap();
         config.transcription.microphone_recognition.provider = "openai".into();
@@ -634,5 +639,30 @@ mod tests {
         config.transcription.enabled = false;
         config.recording.enabled = true;
         config.validate_for_start().unwrap();
+    }
+
+    #[test]
+    fn managed_whisper_preserves_an_external_credential_draft_without_requiring_it() {
+        let mut config = super::super::tests::configured_routes();
+        config.microphone.enabled = false;
+        config.speaker.enabled = false;
+        config.transcription.enabled = true;
+        config.transcription.speaker = false;
+        config.transcription.microphone_recognition.provider = "whisper".into();
+        let draft = format!("BABEL_EXTERNAL_STT_DRAFT_{}", rand::random::<u64>());
+        config.transcription.providers.whisper.api_key_env = draft.clone();
+        config.validate_for_start().unwrap();
+        let session = crate::provider::stt::session_config(
+            &config.transcription.microphone_recognition,
+            &config.transcription.providers,
+        )
+        .unwrap();
+        assert!(session.api_key_env.is_empty());
+        assert_eq!(config.transcription.providers.whisper.api_key_env, draft);
+        config.transcription.providers.whisper.endpoint = "http://127.0.0.1:49251/inference".into();
+        assert!(
+            config.validate_for_start().is_err(),
+            "external mode must require its chosen credential"
+        );
     }
 }

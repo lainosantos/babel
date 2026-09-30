@@ -36,15 +36,23 @@ connect_timeout_secs = 15
 max_reconnect_attempts = 5
 
 [providers.local]
-whisper_endpoint = "http://127.0.0.1:8080/inference"
-ollama_endpoint = "http://127.0.0.1:11434/api/chat"
-translation_model = "qwen3:4b"
-piper_endpoint = "http://127.0.0.1:5000/synthesize"
-piper_voice = ""
+# Integrated engines start automatically; model weights download on first selection.
+whisper_endpoint = "auto"
+whisper_model = "base"
+ollama_endpoint = "auto"
+translation_api = "ollama" # Only used for an explicitly configured external endpoint.
+translation_model = "qwen3-0.6b"
+piper_endpoint = "auto"
+piper_voice = "auto"
 segment_ms = 2000
 silence_ms = 300
 vad_threshold = 0.01
 request_timeout_secs = 30
+
+[local_runtime]
+# Empty uses the current account's application cache; explicit paths must be absolute.
+directory = ""
+threads = 4
 
 [audio]
 quality = "balanced"
@@ -125,8 +133,9 @@ diarize = true
 punctuate = true
 
 [transcription.providers.whisper]
-endpoint = "" # Required when selected: use the actual installed server URL.
-api_key_env = "" # Optional bearer credential; never put a secret in this file.
+endpoint = "auto" # Built-in engine with a dynamically assigned local port.
+model = "base" # tiny, base or small; multilingual weights.
+api_key_env = "" # Optional only for an external endpoint; never store a secret here.
 segment_ms = 2000
 silence_ms = 300
 vad_threshold = 0.01

@@ -22,6 +22,9 @@ import xml.etree.ElementTree as ET
 
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parent.parent
+sys.path.insert(0, str(ROOT / "scripts"))
+import local_runtime_packaging as runtime_package
+
 BUNDLE_ID = "org.babel.audio"
 APP_PACKAGE_ID = BUNDLE_ID + ".app.pkg"
 DRIVER_ID = BUNDLE_ID + ".driver"
@@ -119,7 +122,7 @@ def copy_file(source, destination, executable=False):
     destination.chmod(0o755 if executable else 0o644)
 
 
-def stage_bundle(destination, binaries, driver_directory, version):
+def stage_bundle(destination, binaries, driver_directory, version, runtime_dir=None, arches=None):
     contents = destination / "Contents"
     resources = contents / "Resources"
     resources.mkdir(parents=True)
@@ -147,6 +150,8 @@ def stage_bundle(destination, binaries, driver_directory, version):
     # directory before explicitly installing helpers; the signed bundle is immutable.
     for relative in ["setup_whisper.py", "needle_bridge.py", "patches/whisper-dynamic-port.patch"]:
         copy_file(ROOT / "scripts" / relative, resources / "Support" / "scripts" / relative)
+    if runtime_dir is not None:
+        runtime_package.stage(runtime_dir, resources / "local-runtime", "macos", ["aarch64" if arch == "arm64" else arch for arch in sorted(arches)])
     return destination
 
 
@@ -242,6 +247,7 @@ def check_output_destination(destination, bundle=False):
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--runtime-dir", type=Path, required=True)
     parser.add_argument("--bin-dir", type=Path, required=True, help="prebuilt executable babel and babel-tray")
     parser.add_argument("--driver-dir", type=Path, default=ROOT / "native/macos/dist")
     parser.add_argument("--output", type=Path, default=HERE / "dist")
@@ -296,13 +302,24 @@ def main(argv=None):
         packaged_driver = validate_payload(expanded_driver, DRIVER_PATH, DRIVER_PACKAGE_ID)
         verify_matching_files(driver, packaged_driver, ["Contents/Info.plist", "Contents/MacOS/BabelAudio"])
         payload = stage / "payload"
-        app = stage_bundle(payload / APP_PATH, binaries, driver_directory, args.version)
+        app = stage_bundle(payload / APP_PATH, binaries, driver_directory, args.version, args.runtime_dir, arches)
         entitlements = stage / "entitlements.plist"
         with entitlements.open("wb") as handle:
             plistlib.dump({"com.apple.security.device.audio-input": True}, handle)
         sign = ["codesign", "--force", "--sign", "-" if args.unsigned else args.sign_identity]
         if not args.unsigned:
             sign += ["--options", "runtime", "--timestamp"]
+        # Each platform payload is thin; keep Intel and ARM providers separate.
+        # Re-sign nested executables/dylibs before the immutable app signature.
+        for runtime in sorted((app / "Contents/Resources/local-runtime").iterdir()):
+            for binary in sorted(runtime.rglob("*")):
+                if not binary.is_file():
+                    continue
+                with binary.open("rb") as stream:
+                    macho = stream.read(4) == b"\xcf\xfa\xed\xfe"
+                if macho:
+                    run([*sign, binary])
+            runtime_package.rehash(runtime)
         run([*sign, "--entitlements", entitlements, app / "Contents/MacOS/babel"])
         run([*sign, "--entitlements", entitlements, app])
         run(["codesign", "--verify", "--deep", "--strict", "--verbose=2", app])
@@ -339,6 +356,9 @@ def main(argv=None):
         verify_matching_files(app, installed_app, ["Contents/Info.plist", "Contents/MacOS/babel",
             "Contents/MacOS/babel-tray", "Contents/Resources/drivers/macos/BabelAudio.pkg",
             "Contents/Resources/drivers/macos/uninstall.sh"])
+        for runtime in (installed_app / "Contents/Resources/local-runtime").iterdir():
+            arch = runtime.name.removeprefix("macos-")
+            runtime_package.validate(runtime, "macos", arch)
         verify_matching_files(driver, installed_driver, ["Contents/Info.plist", "Contents/MacOS/BabelAudio"])
         verify_matching_files(expanded_driver, packages[DRIVER_PACKAGE_ID], ["Scripts/preinstall", "Scripts/postinstall"])
         if args.installer_identity:

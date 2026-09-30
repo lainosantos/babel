@@ -15,7 +15,8 @@ instala dependências nem executa os binários recebidos. No runner Ubuntu 22.04
 ```sh
 sudo apt install dpkg binutils rpm rpm2cpio cpio
 cargo build --release --locked --bins
-python3 packaging/linux/build.py --bin-dir target/release --output artifacts
+python3 scripts/build_local_runtime.py --output artifacts/local-runtime
+python3 packaging/linux/build.py --bin-dir target/release --runtime-dir artifacts/local-runtime --output artifacts
 python3 -m unittest discover -s packaging/linux -p 'test_*.py' -v
 ```
 
@@ -54,11 +55,13 @@ sudo apt install ./babel-audio_0.1.0_amd64.deb
 
 O pacote instala `babel`, `babel-tray` e `babel-launch` em `/usr/bin`, uma entrada
 **Babel** no menu de aplicativos e o ícone. Documentos e o manifesto do conteúdo
-ficam em `/usr/share/doc/babel-audio`; o helper opcional Needle fica em
+ficam em `/usr/share/doc/babel-audio`; os motores Whisper, llama.cpp e Piper ficam em
+`/usr/share/babel/local-runtime/linux-x86_64`, junto das bibliotecas, dados e licenças.
+O helper opcional Needle fica em
 `/usr/share/babel/scripts/needle_bridge.py`.
 
 Dependências declaradas: glibc compatível com o build, `libgcc-s1` quando usado
-pelos binários, `pulseaudio-utils`, `xdg-utils` e um provedor de D-Bus de sessão.
+pelos binários, `libstdc++6` para os motores nativos, `pulseaudio-utils`, `xdg-utils` e um provedor de D-Bus de sessão.
 O servidor `pipewire-pulse` ou `pulseaudio` aparece somente como **Suggests**:
 o pacote Babel não deve escolher, substituir ou iniciar seu servidor de áudio.
 Use o servidor já configurado no desktop. A bandeja precisa de suporte
@@ -166,10 +169,13 @@ de criação dos virtuais no painel. Originalmente não há uma sessão de tradu
 transcrição ou gravação em execução. O encaminhamento dos originais segue a
 configuração e o uso dos dispositivos virtuais; fechar o aplicativo encerra-o.
 
-Modelos, ambientes Python, whisper.cpp e chaves de nuvem não acompanham estes
-pacotes. Os comandos de voz e os providers locais têm preparação opcional própria,
-descrita em `docs/voice-commands.md` e `docs/other-providers.md` dentro da pasta de
-documentação. O pacote não baixa modelos nem inicia serviços de IA na instalação.
+Os motores de transcrição/tradução locais acompanham os pacotes: Whisper,
+llama.cpp e Piper com ONNX Runtime e dados eSpeak. Não exigem Python, Ollama,
+compilador ou serviços de IA instalados separadamente no computador do usuário.
+Os modelos são preparados pelo aplicativo na primeira seleção; a instalação
+do pacote não baixa modelos nem inicia inferência. Needle para comandos de voz
+tem configuração própria descrita em `docs/voice-commands.md`. Chaves de nuvem,
+configurações e gravações pessoais nunca entram no pacote.
 
 ## Remover
 
@@ -192,7 +198,10 @@ o aplicativo e remova a pasta extraída e os atalhos que criou manualmente.
 
 O código do aplicativo e os arquivos de integração deste pacote têm licença MIT,
 incluída em `copyright` na pasta de documentação. As dependências Rust conservam
-suas licenças; `Cargo.lock` identifica suas versões. A fonte Manrope da interface
+suas licenças; `Cargo.lock` identifica suas versões. O processo separado Piper/eSpeak
+é GPLv3: suas fontes completas, modificações e instruções de compilação estão em
+`local-runtime/linux-x86_64/sources/`; licenças dos motores e bibliotecas ficam
+em `licenses/` nesse runtime. O manifesto declara as licenças agregadas do pacote. A fonte Manrope da interface
 conserva sua licença SIL Open Font License, incluída em
 `licenses/Manrope-OFL.txt` nessa mesma pasta. O contato de mantenedor do
 pacote é um endereço `.invalid` deliberadamente não entregável, até que o projeto

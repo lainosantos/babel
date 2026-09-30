@@ -47,7 +47,9 @@ pub fn create(
             let profile = &profiles.whisper;
             let provider = local::LocalProvider::transcription(LocalProviderConfig {
                 whisper_endpoint: profile.endpoint.clone(),
+                whisper_model: profile.model.clone(),
                 ollama_endpoint: String::new(),
+                translation_api: "ollama".into(),
                 piper_endpoint: String::new(),
                 translation_model: String::new(),
                 piper_voice: String::new(),
@@ -56,7 +58,11 @@ pub fn create(
                 vad_threshold: profile.vad_threshold,
                 request_timeout_secs: profile.request_timeout_secs,
             })?
-            .with_whisper_auth(profile.api_key_env.clone());
+            .with_whisper_auth(if profile.endpoint == "auto" {
+                String::new()
+            } else {
+                profile.api_key_env.clone()
+            });
             Ok(Arc::new(provider))
         }
         _ => bail!("unknown STT provider"),

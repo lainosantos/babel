@@ -21,6 +21,8 @@ import zipfile
 
 ROOT = Path(__file__).resolve().parents[2]
 HERE = Path(__file__).resolve().parent
+sys.path.insert(0, str(ROOT / "scripts"))
+import local_runtime_packaging as runtime_package
 MACHINES = {"x64": 0x8664, "ARM64": 0xAA64}
 DRIVER_FILES = ("BabelAudio.inf", "BabelAudio.sys", "BabelAudio.cat",
                 "babel-driver-installer.exe", "install.ps1", "uninstall.ps1",
@@ -56,7 +58,7 @@ def pe_machine(path):
         return struct.unpack_from('<H', signature, 4)[0]
 
 
-def stage(binary, driver, destination, architecture, release):
+def stage(binary, driver, destination, architecture, release, runtime_dir=None):
     for name in ('babel.exe', 'babel-tray.exe'):
         if pe_machine(binary / name) != MACHINES[architecture]:
             raise ValueError(f"Wrong {architecture} app architecture: {name}")
@@ -92,6 +94,8 @@ def stage(binary, driver, destination, architecture, release):
     fonts = destination / 'licenses'
     fonts.mkdir()
     shutil.copy2(ROOT / 'ui/fonts/OFL.txt', fonts / 'Manrope-OFL.txt')
+    if runtime_dir is not None:
+        runtime_package.stage(runtime_dir, destination / "local-runtime", "windows", ["x86_64" if architecture == "x64" else "aarch64"])
     manifest = {"version": release, "architecture": architecture, "driver_signature": "not-verified-development",
                 "files": {p.relative_to(destination).as_posix(): hashlib.sha256(p.read_bytes()).hexdigest()
                           for p in sorted(destination.rglob('*')) if p.is_file()}}
@@ -121,7 +125,7 @@ def build(args):
         raise RuntimeError('Package output already exists; use an empty output directory')
     with tempfile.TemporaryDirectory(prefix='babel-installer-') as temp:
         payload = Path(temp) / 'payload'
-        manifest = stage(args.bin_dir.resolve(), args.driver_dir.resolve(), payload, args.architecture, release)
+        manifest = stage(args.bin_dir.resolve(), args.driver_dir.resolve(), payload, args.architecture, release, args.runtime_dir)
         subprocess.run([str(compiler), f'/DBabelVersion={release}', f'/DTargetArch={args.architecture}',
                         f'/DPayloadDir={payload}', f'/DOutputFolder={output}', str(HERE / 'Babel.iss')], check=True)
         require_file(installer)
@@ -144,6 +148,7 @@ def build(args):
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--runtime-dir', type=Path, required=True)
     parser.add_argument('--bin-dir', type=Path, required=True)
     parser.add_argument('--driver-dir', type=Path, required=True)
     parser.add_argument('--architecture', choices=list(MACHINES), required=True)

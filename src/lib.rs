@@ -11,6 +11,7 @@ pub mod dashboard;
 pub mod engine;
 pub mod i18n;
 pub mod interface_messages;
+pub mod local_runtime;
 pub mod logging;
 pub mod mcp_client;
 pub mod platform;

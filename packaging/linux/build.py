@@ -13,12 +13,16 @@ import shutil
 import stat
 import struct
 import subprocess
+import sys
 import tarfile
 import tempfile
 import tomllib
 
 HERE = Path(__file__).resolve().parent
 PROJECT = HERE.parent.parent
+sys.path.insert(0, str(PROJECT / "scripts"))
+import local_runtime_packaging as runtime_package
+
 PACKAGE = "babel-audio"
 BINARIES = ("babel", "babel-tray")
 VERSION = re.compile(r"[0-9]+\.[0-9]+\.[0-9]+(?:-[A-Za-z0-9][A-Za-z0-9.-]*)?(?:\+[A-Za-z0-9][A-Za-z0-9.-]*)?")
@@ -58,7 +62,7 @@ def rpm_version(version: str) -> str:
     return version.replace("-", "~")
 
 
-def elf_runtime(path: Path) -> tuple[set[str], set[tuple[int, ...]]]:
+def elf_runtime(path: Path, bundled: set[str] | None = None) -> tuple[set[str], set[tuple[int, ...]]]:
     with path.open("rb") as stream:
         header = stream.read(64)
     if len(header) != 64 or header[:6] != b"\x7fELF\x02\x01" or struct.unpack_from("<H", header, 18)[0] != 62:
@@ -66,7 +70,7 @@ def elf_runtime(path: Path) -> tuple[set[str], set[tuple[int, ...]]]:
     if struct.unpack_from("<H", header, 16)[0] not in (2, 3):
         raise ValueError(f"{path}: not an ELF executable or PIE")
     needed = set(re.findall(r"Shared library: \[([^]]+)\]", run("readelf", "--wide", "--dynamic", path).stdout))
-    unknown = needed - LIBC_SONAMES - {"libgcc_s.so.1"}
+    unknown = needed - LIBC_SONAMES - {"libgcc_s.so.1", "libstdc++.so.6"} - (bundled or set())
     if unknown:
         raise ValueError(f"{path}: runtime libraries need explicit package mappings: {sorted(unknown)}")
     versions = {
@@ -88,7 +92,7 @@ def files(root: Path) -> list[Path]:
     return sorted(path for path in root.rglob("*") if path.is_file())
 
 
-def stage_payload(bin_dir: Path, payload: Path, version: str) -> dict:
+def stage_payload(bin_dir: Path, payload: Path, version: str, runtime_dir: Path | None = None) -> dict:
     needed: set[str] = set()
     versions: set[tuple[int, ...]] = set()
     for name in BINARIES:
@@ -98,10 +102,26 @@ def stage_payload(bin_dir: Path, payload: Path, version: str) -> dict:
         libraries, glibc = elf_runtime(copied)
         needed.update(libraries)
         versions.update(glibc)
+    if runtime_dir is not None:
+        runtime_root = payload / "share/babel/local-runtime"
+        runtime_package.stage(runtime_dir, runtime_root, "linux", ["x86_64"])
+        runtime_files = list((runtime_root / "linux-x86_64").rglob("*"))
+        bundled = {p.name for p in runtime_files if p.is_file() and ".so" in p.name}
+        for path in runtime_files:
+            if not path.is_file():
+                continue
+            with path.open("rb") as stream:
+                is_elf = stream.read(4) == b"\x7fELF"
+            if is_elf:
+                libraries, glibc = elf_runtime(path, bundled)
+                needed.update(libraries)
+                versions.update(glibc)
     minimum = ".".join(map(str, max(versions)))
     dependencies = [f"libc6 (>= {minimum})"]
     if "libgcc_s.so.1" in needed:
         dependencies.append("libgcc-s1")
+    if "libstdc++.so.6" in needed:
+        dependencies.append("libstdc++6 (>= 11)")
     dependencies.extend(["pulseaudio-utils", "xdg-utils", "dbus-user-session | dbus-x11"])
     copy_file(HERE / "babel-launch", payload / "bin/babel-launch", 0o755)
     copy_file(HERE / "org.babel.audio.desktop", payload / "share/applications/org.babel.audio.desktop")
@@ -110,6 +130,8 @@ def stage_payload(bin_dir: Path, payload: Path, version: str) -> dict:
     rpm_requires = [f"glibc >= {minimum}", "/bin/sh", "/usr/bin/pactl", "/usr/bin/parec", "/usr/bin/pacat", "/usr/bin/xdg-open", "dbus"]
     if "libgcc_s.so.1" in needed:
         rpm_requires.append("libgcc_s.so.1()(64bit)")
+    if "libstdc++.so.6" in needed:
+        rpm_requires.append("libstdc++.so.6()(64bit)")
     docs = payload / "share/doc" / PACKAGE
     for source, destination in [
         (HERE / "LICENSE", "copyright"), (HERE / "README.md", "INSTALL.md"),
@@ -125,7 +147,7 @@ def stage_payload(bin_dir: Path, payload: Path, version: str) -> dict:
     copy_file(PROJECT / "scripts/needle_bridge.py", payload / "share/babel/scripts/needle_bridge.py")
     manifest = {
         "package": PACKAGE, "version": version, "architecture": "amd64",
-        "license": "MIT", "glibc_minimum": minimum,
+        "license": "MIT AND GPL-3.0-or-later" if runtime_dir else "MIT", "glibc_minimum": minimum,
         "depends": dependencies, "needed_libraries": sorted(needed),
         "rpm_requires": rpm_requires,
         "files": {
@@ -331,7 +353,7 @@ def write_rpm(payload: Path, destination: Path, manifest: dict, epoch: int) -> N
         spec.write_text(
             f"Name: {PACKAGE}\nVersion: {rpm_version(manifest['version'])}\nRelease: 1\n"
             "Summary: Virtual audio routing and bidirectional speech translation\n"
-            "License: MIT\nBuildArch: x86_64\nAutoReqProv: no\n"
+            f"License: {manifest['license']}\nBuildArch: x86_64\nAutoReqProv: no\n"
             + "".join(f"Requires: {dependency}\n" for dependency in manifest["rpm_requires"])
             + "\n%description\nBabel provides a per-user tray and local settings dashboard.\n"
             "Requires an existing PulseAudio or PipeWire-pulse user session.\n"
@@ -354,7 +376,7 @@ def write_rpm(payload: Path, destination: Path, manifest: dict, epoch: int) -> N
             raise ValueError("Expected exactly one binary RPM")
         shutil.copyfile(packages[0], destination)
     metadata = run("rpm", "-qp", "--qf", "%{NAME}\n%{VERSION}\n%{RELEASE}\n%{ARCH}\n%{LICENSE}\n%{BUILDTIME}\n", destination).stdout.splitlines()
-    if metadata != [PACKAGE, rpm_version(manifest["version"]), "1", "x86_64", "MIT", str(epoch)]:
+    if metadata != [PACKAGE, rpm_version(manifest["version"]), "1", "x86_64", manifest["license"], str(epoch)]:
         raise ValueError(f"Unexpected RPM metadata: {metadata}")
     requirements = set(run("rpm", "-qp", "--requires", destination).stdout.splitlines())
     actual = {value for value in requirements if not value.startswith("rpmlib(")}
@@ -378,7 +400,7 @@ def write_rpm(payload: Path, destination: Path, manifest: dict, epoch: int) -> N
             raise ValueError("rpm2cpio failed while validating its payload")
 
 
-def build(bin_dir: Path, output: Path, version: str) -> dict:
+def build(bin_dir: Path, output: Path, version: str, runtime_dir: Path | None = None) -> dict:
     version = package_version(version)
     for command in ("readelf", "dpkg-deb", "rpmbuild", "rpm", "rpm2cpio"):
         if not shutil.which(command):
@@ -391,7 +413,7 @@ def build(bin_dir: Path, output: Path, version: str) -> dict:
     with tempfile.TemporaryDirectory(prefix=".babel-linux-", dir=output) as temporary:
         work = Path(temporary)
         payload = work / "payload"
-        manifest = stage_payload(bin_dir.resolve(), payload, version)
+        manifest = stage_payload(bin_dir.resolve(), payload, version, runtime_dir)
         base = f"{PACKAGE}-{version}-linux-amd64"
         deb_name = f"{PACKAGE}_{deb_version(version)}_amd64.deb"
         tar_name = f"{base}.tar.gz"
@@ -418,12 +440,13 @@ def build(bin_dir: Path, output: Path, version: str) -> dict:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--runtime-dir", type=Path, required=True, help="prebuilt and hashed local-runtime payloads")
     parser.add_argument("--bin-dir", type=Path, default=PROJECT / "target/release")
     parser.add_argument("--output", type=Path, default=PROJECT / "artifacts")
     parser.add_argument("--version")
     args = parser.parse_args()
     try:
-        report = build(args.bin_dir, args.output, package_version(args.version))
+        report = build(args.bin_dir, args.output, package_version(args.version), args.runtime_dir)
     except (OSError, ValueError, subprocess.CalledProcessError) as error:
         parser.exit(1, f"Linux packaging failed: {error}\n")
     print(json.dumps(report, indent=2))

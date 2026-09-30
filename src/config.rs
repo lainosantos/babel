@@ -17,12 +17,41 @@ pub struct AppConfig {
     pub interface: InterfaceConfig,
     pub agent: crate::commands::AgentConfig,
     pub providers: ProviderProfiles,
+    pub local_runtime: LocalRuntimeConfig,
     pub audio: AudioConfig,
     pub microphone: RouteConfig,
     pub speaker: RouteConfig,
     pub transcription: TranscriptionConfig,
     pub recording: RecordingConfig,
     pub files: FileConfig,
+}
+
+/// Managed inference assets live in an OS cache unless an absolute directory is chosen.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct LocalRuntimeConfig {
+    pub directory: String,
+    pub threads: u32,
+}
+impl Default for LocalRuntimeConfig {
+    fn default() -> Self {
+        Self {
+            directory: String::new(),
+            threads: 4,
+        }
+    }
+}
+impl LocalRuntimeConfig {
+    pub fn validate(&self) -> Result<()> {
+        if !self.directory.is_empty() {
+            crate::storage::resolve_base(&self.directory)?;
+        }
+        ensure!(
+            (1..=64).contains(&self.threads),
+            "Local inference threads must be 1..64"
+        );
+        Ok(())
+    }
 }
 
 /// Display language only; independent of translation and transcription languages.
@@ -146,7 +175,9 @@ impl Default for ProviderProfiles {
 #[serde(default, deny_unknown_fields)]
 pub struct LocalProviderConfig {
     pub whisper_endpoint: String,
+    pub whisper_model: String,
     pub ollama_endpoint: String,
+    pub translation_api: String,
     pub translation_model: String,
     pub piper_endpoint: String,
     pub piper_voice: String,
@@ -158,11 +189,13 @@ pub struct LocalProviderConfig {
 impl Default for LocalProviderConfig {
     fn default() -> Self {
         Self {
-            whisper_endpoint: "http://127.0.0.1:8080/inference".into(),
-            ollama_endpoint: "http://127.0.0.1:11434/api/chat".into(),
-            translation_model: "qwen3:4b".into(),
-            piper_endpoint: "http://127.0.0.1:5000/synthesize".into(),
-            piper_voice: String::new(),
+            whisper_endpoint: "auto".into(),
+            whisper_model: "base".into(),
+            ollama_endpoint: "auto".into(),
+            translation_api: "ollama".into(),
+            translation_model: "qwen3-0.6b".into(),
+            piper_endpoint: "auto".into(),
+            piper_voice: "auto".into(),
             segment_ms: 2000,
             silence_ms: 300,
             vad_threshold: 0.01,
@@ -299,6 +332,7 @@ impl Default for AppConfig {
             interface: InterfaceConfig::default(),
             agent: crate::commands::AgentConfig::default(),
             providers: ProviderProfiles::default(),
+            local_runtime: LocalRuntimeConfig::default(),
             audio: AudioConfig::default(),
             microphone: RouteConfig {
                 playback_device: if cfg!(target_os = "linux") {
@@ -323,6 +357,44 @@ impl Default for AppConfig {
             files: FileConfig::default(),
         }
     }
+}
+
+/// Upgrade only the legacy addresses that Babel itself generated as defaults.
+/// Custom endpoints, models and explicit new configurations remain external.
+fn migrate_managed_runtime(config: &mut AppConfig, document: &toml::Value) -> bool {
+    let mut changed = false;
+    let stored_local = document
+        .get("providers")
+        .and_then(|value| value.get("local"));
+    let local = &mut config.providers.local;
+    if stored_local.is_some_and(|value| value.get("whisper_model").is_none())
+        && local.whisper_endpoint == "http://127.0.0.1:8080/inference"
+        && local.ollama_endpoint == "http://127.0.0.1:11434/api/chat"
+        && local.piper_endpoint == "http://127.0.0.1:5000/synthesize"
+        && local.translation_model == "qwen3:4b"
+        && local.piper_voice.is_empty()
+    {
+        local.whisper_endpoint = "auto".into();
+        local.ollama_endpoint = "auto".into();
+        local.piper_endpoint = "auto".into();
+        local.translation_model = "qwen3-0.6b".into();
+        local.piper_voice = "auto".into();
+        changed = true;
+    }
+    let whisper = &mut config.transcription.providers.whisper;
+    let stored_whisper = document
+        .get("transcription")
+        .and_then(|value| value.get("providers"))
+        .and_then(|value| value.get("whisper"));
+    if whisper.endpoint.is_empty()
+        || (stored_whisper.is_none_or(|value| value.get("model").is_none())
+            && whisper.endpoint == "http://127.0.0.1:8080/inference"
+            && whisper.api_key_env.is_empty())
+    {
+        whisper.endpoint = "auto".into();
+        changed = true;
+    }
+    changed
 }
 
 impl AppConfig {
@@ -404,8 +476,9 @@ impl AppConfig {
             cfg.transcription.enabled = false;
         }
         let migrate_stt = stt::migrate(&mut cfg, &document)?;
+        let migrate_runtime = migrate_managed_runtime(&mut cfg, &document);
         cfg.validate()?;
-        if migrate_base || migrate_provider || migrate_stt {
+        if migrate_base || migrate_provider || migrate_stt || migrate_runtime {
             cfg.save(path)
                 .context("Não foi possível persistir a migração da configuração")?;
         }
@@ -436,6 +509,7 @@ impl AppConfig {
     pub fn validate(&self) -> Result<()> {
         self.interface.validate()?;
         self.agent.validate()?;
+        self.local_runtime.validate()?;
         ensure!(self.version == 1, "Versão de configuração não suportada");
         crate::storage::resolve_base(&self.files.base_path)?;
         crate::session::validate_pattern(&self.files.name_pattern)?;
@@ -739,6 +813,109 @@ fn canonical_device(id: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn managed_local_defaults_validate_without_an_external_installation() {
+        let mut config = configured_routes();
+        config.microphone.provider = "local".into();
+        config.speaker.enabled = false;
+        config.transcription.enabled = true;
+        config.transcription.speaker = false;
+        config.transcription.microphone_recognition.provider = "whisper".into();
+        config.validate_for_start().unwrap();
+        assert_eq!(config.providers.local.whisper_endpoint, "auto");
+        assert_eq!(config.providers.local.ollama_endpoint, "auto");
+        assert_eq!(config.providers.local.piper_endpoint, "auto");
+        assert_eq!(config.transcription.providers.whisper.endpoint, "auto");
+        config.providers.local.whisper_model = "unknown".into();
+        assert!(config.validate().is_err());
+        config.providers.local.whisper_model = "small".into();
+        config.validate().unwrap();
+        config.local_runtime.threads = 0;
+        assert!(config.validate().is_err());
+        config.local_runtime.threads = 64;
+        config.local_runtime.directory = "relative-models".into();
+        assert!(config.validate().is_err());
+        config.local_runtime.directory = tempfile::tempdir()
+            .unwrap()
+            .path()
+            .to_string_lossy()
+            .into_owned();
+        config.validate().unwrap();
+    }
+
+    #[test]
+    fn legacy_generated_ports_migrate_but_custom_endpoints_and_explicit_models_remain() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("config.toml");
+        let mut config = AppConfig::default();
+        config.providers.local.whisper_endpoint = "http://127.0.0.1:8080/inference".into();
+        config.providers.local.ollama_endpoint = "http://127.0.0.1:11434/api/chat".into();
+        config.providers.local.piper_endpoint = "http://127.0.0.1:5000/synthesize".into();
+        config.providers.local.translation_model = "qwen3:4b".into();
+        config.providers.local.piper_voice.clear();
+        config.transcription.providers.whisper.endpoint =
+            config.providers.local.whisper_endpoint.clone();
+        let mut legacy = toml::Value::try_from(&config).unwrap();
+        legacy["providers"]["local"]
+            .as_table_mut()
+            .unwrap()
+            .remove("whisper_model");
+        legacy["transcription"]["providers"]["whisper"]
+            .as_table_mut()
+            .unwrap()
+            .remove("model");
+        fs::write(&path, toml::to_string(&legacy).unwrap()).unwrap();
+        let migrated = AppConfig::load(&path).unwrap();
+        assert_eq!(migrated.providers.local.whisper_endpoint, "auto");
+        assert_eq!(migrated.providers.local.translation_model, "qwen3-0.6b");
+        assert_eq!(migrated.transcription.providers.whisper.endpoint, "auto");
+        let persisted = fs::read_to_string(&path).unwrap();
+        AppConfig::load(&path).unwrap();
+        assert_eq!(fs::read_to_string(&path).unwrap(), persisted);
+
+        legacy["providers"]["local"]["whisper_endpoint"] =
+            "http://127.0.0.1:49152/inference".into();
+        legacy["transcription"]["providers"]["whisper"]["endpoint"] =
+            "https://example.test/recognize".into();
+        fs::write(&path, toml::to_string(&legacy).unwrap()).unwrap();
+        let external = AppConfig::load(&path).unwrap();
+        assert_eq!(
+            external.providers.local.whisper_endpoint,
+            "http://127.0.0.1:49152/inference"
+        );
+        assert_eq!(
+            external.providers.local.ollama_endpoint,
+            "http://127.0.0.1:11434/api/chat"
+        );
+        assert_eq!(
+            external.transcription.providers.whisper.endpoint,
+            "https://example.test/recognize"
+        );
+        config.save(&path).unwrap();
+        let explicit = AppConfig::load(&path).unwrap();
+        assert_eq!(
+            explicit.providers.local.whisper_endpoint,
+            config.providers.local.whisper_endpoint
+        );
+        assert_eq!(
+            explicit.transcription.providers.whisper.endpoint,
+            config.transcription.providers.whisper.endpoint
+        );
+    }
+
+    #[test]
+    fn local_translation_with_external_voice_needs_no_piper_configuration() {
+        let mut config = configured_routes();
+        config.microphone.provider = "local".into();
+        config.microphone.voice.engine = "gemini".into();
+        config.microphone.voice.voice_id = "Kore".into();
+        config.speaker.enabled = false;
+        config.providers.local.piper_endpoint.clear();
+        config.validate().unwrap();
+        config.microphone.voice.engine = "native".into();
+        assert!(config.validate().is_err());
+    }
 
     pub(super) fn configured_routes() -> AppConfig {
         // Device discovery is deliberately not involved in configuration tests.

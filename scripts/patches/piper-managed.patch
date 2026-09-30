@@ -1,0 +1,120 @@
+--- a/libpiper/src/main/main.cpp
++++ b/libpiper/src/main/main.cpp
+@@ -103,6 +103,12 @@
+                            espeak_path_str.c_str());
+     }
+ 
++    if (!piper || piper->sample_rate < 8000 || piper->sample_rate > 192000) {
++      throw std::runtime_error("Piper model could not be loaded");
++    }
++    std::cout << "BABEL_PIPER_READY {\"sample_rate\":" << piper->sample_rate
++              << "}" << std::endl;
++
+     piper_synthesize_options options;
+     options.speaker_id = 0;
+     options.length_scale = DEFAULT_LENGTH_SCALE;
+--- a/libpiper/src/main/utils/process.cpp
++++ b/libpiper/src/main/utils/process.cpp
+@@ -16,7 +16,19 @@
+                         piper_synthesize_options *options) {
+ 
+   std::string line;
+-  while (getline(std::cin, line)) {
++  // stdin is controlled by Babel, but keep the native boundary bounded too.
++  while (true) {
++    line.clear();
++    char character;
++    while (std::cin.get(character) && character != '\n') {
++      if (line.size() >= 65536) {
++        throw std::runtime_error("Piper request exceeds the size limit");
++      }
++      line.push_back(character);
++    }
++    if (line.empty() && !std::cin) {
++      break;
++    }
+     if (line.empty()) {
+       continue;
+     }
+@@ -31,6 +43,9 @@
+ 
+       // Text is required
+       line = lineRoot["text"].get<std::string>();
++      if (line.empty() || line.size() > 16384 || line.find('\0') != std::string::npos) {
++        throw std::runtime_error("Piper text exceeds the size limit");
++      }
+ 
+       if (lineRoot.contains("output_file")) {
+         // Override output WAV file path
+@@ -62,7 +77,7 @@
+         std::ofstream audioFile(outputPath.string(), std::ios::binary);
+         textToWavFile(piper, &local_options, line.c_str(), audioFile);
+       } // audioFile is closed
+-      std::cout << outputPath.string() << '\n';
++      std::cout << outputPath.string() << std::endl;
+     } else if (outputType == piper::OUTPUT_FILE) {
+       if (!maybeOutputPath || maybeOutputPath->empty()) {
+         throw std::runtime_error("No output path provided");
+@@ -74,7 +89,19 @@
+         // Otherwise, we would overwrite the output file for each line.
+         std::stringstream text;
+         text << line;
+-        while (getline(std::cin, line)) {
++        // stdin is controlled by Babel, but keep the native boundary bounded too.
++  while (true) {
++    line.clear();
++    char character;
++    while (std::cin.get(character) && character != '\n') {
++      if (line.size() >= 65536) {
++        throw std::runtime_error("Piper request exceeds the size limit");
++      }
++      line.push_back(character);
++    }
++    if (line.empty() && !std::cin) {
++      break;
++    }
+           text << " " << line;
+         }
+ 
+@@ -85,7 +112,7 @@
+         std::ofstream audioFile(outputPath.string(), std::ios::binary);
+         textToWavFile(piper, &local_options, line.c_str(), audioFile);
+       } // audioFile is closed
+-      std::cout << outputPath.string() << '\n';
++      std::cout << outputPath.string() << std::endl;
+     } else if (outputType == piper::OUTPUT_STDOUT) {
+       // Output WAV to stdout
+       textToWavFile(piper, &local_options, line.c_str(), std::cout);
+--- a/libpiper/CMakeLists.txt
++++ b/libpiper/CMakeLists.txt
+@@ -36,12 +36,19 @@
+ endif()
+ 
+ ExternalProject_Add(espeak_ng_external
+-    GIT_REPOSITORY https://github.com/espeak-ng/espeak-ng.git
+-    GIT_TAG 212928b394a96e8fd2096616bfd54e17845c48f6  # 2025-Mar-22
++    SOURCE_DIR ${BABEL_ESPEAK_SOURCE}
++    DOWNLOAD_COMMAND ""
++    UPDATE_COMMAND ""
+     PREFIX ${ESPEAKNG_BUILD_DIR}
+     CMAKE_ARGS
+         -DCMAKE_INSTALL_PREFIX=${ESPEAKNG_INSTALL_DIR}
+         -DCMAKE_BUILD_TYPE=${CMAKE_BUILD_TYPE}
++        -DCMAKE_POLICY_DEFAULT_CMP0091=NEW
++        -DCMAKE_MSVC_RUNTIME_LIBRARY=${CMAKE_MSVC_RUNTIME_LIBRARY}
++        -DENABLE_TESTS=OFF
++        -DCMAKE_OSX_DEPLOYMENT_TARGET=${CMAKE_OSX_DEPLOYMENT_TARGET}
++        -DCMAKE_INSTALL_LIBDIR=lib
++        -DCMAKE_INSTALL_DATAROOTDIR=share
+         -DBUILD_SHARED_LIBS:BOOL=OFF
+         -DCMAKE_POSITION_INDEPENDENT_CODE:BOOL=ON
+         -DUSE_ASYNC:BOOL=OFF
+@@ -129,7 +136,7 @@
+ endif()
+ 
+ if(DEFINED ONNXRUNTIME_DIR)
+-    find_library(ONNXRUNTIME_LIB NAMES onnxruntime PATHS ${ONNXRUNTIME_DIR}/lib REQUIRED)
++    find_library(ONNXRUNTIME_LIB NAMES onnxruntime PATHS ${ONNXRUNTIME_DIR}/lib NO_DEFAULT_PATH REQUIRED)
+     add_library(onnxruntime::onnxruntime UNKNOWN IMPORTED)
+     set_target_properties(onnxruntime::onnxruntime PROPERTIES
+         IMPORTED_LOCATION ${ONNXRUNTIME_LIB}

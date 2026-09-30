@@ -176,166 +176,36 @@ o [contrato Listen v1](https://developers.deepgram.com/reference/speech-to-text/
 [diarização](https://developers.deepgram.com/docs/diarization) e
 [modo multilíngue](https://developers.deepgram.com/docs/multilingual-code-switching).
 
-## Provider local: whisper.cpp → Ollama → Piper
+## Provider local integrado: Whisper → Qwen → Piper
 
-O provider `local` é uma implementação funcional de três chamadas HTTP locais:
+Escolha **Local** na rota de tradução e mantenha **Integrado ao Babel** nos
+componentes de reconhecimento, tradução e voz. Ao salvar, o Babel inicia os
+motores incluídos no instalador e baixa os modelos ausentes. Isso funciona com
+o mesmo fluxo no Linux, macOS e Windows, sem instalar Python, CMake, Ollama ou
+Piper separadamente. O painel acompanha preparação e download.
 
-1. A captura contínua detecta atividade por energia e produz segmentos curtos.
-2. whisper.cpp reconhece o áudio original a partir de WAV mono PCM16/16 kHz.
-3. Ollama traduz o texto por mensagens com instruções de tradução.
-4. Piper sintetiza a tradução em uma voz instalada; Babel converte seu WAV
-   para 24 kHz e o entrega em frames de 20 ms.
-
-Essa cadeia tem latência de segmentação, reconhecimento, tradução e síntese.
-Ela não preserva automaticamente a voz original, não clona vozes e não faz
-diarização. Os segmentos podem cortar uma frase longa no limite configurado.
-Os offsets do reconhecimento interno dessa cadeia correspondem aos segmentos
-capturados, não a palavras. Esse texto intermediário não alimenta o TXT; para
-gravar uma transcrição, configure o reconhecedor STT independente. A tradução tem um ponto de
-alinhamento ao segmento de origem, sem duração inventada de fala sintetizada.
-
-Os serviços e pesos são instalados separadamente. O Babel não baixa modelos
-silenciosamente. Após baixar os arquivos necessários, os endpoints de loopback
-não precisam de chave de nuvem. Se você mudar um endpoint para um servidor
-HTTPS remoto, áudio/texto passam a ser enviados a esse servidor.
-
-### Whisper: transcrição independente
-
-Escolha `whisper` na página **Transcrição** e configure
-`transcription.providers.whisper`, incluindo seu endpoint HTTP explícito.
-O adaptador envia `translate=false` e reconhece os originais sem Ollama, Piper,
-modelo de tradução ou perfil `providers.local`. O idioma de cada origem pertence
-a `transcription.microphone_recognition.language` ou
-`transcription.speaker_recognition.language`.
-
-O STT funciona com qualquer tradutor ou com tradução desligada. Mesmo quando
-Whisper participa da cadeia local de tradução, o STT é uma tarefa independente;
-apontar ambos para o mesmo servidor aumenta a carga de inferência. A segmentação
-do STT tem seus próprios limites, e seus tempos representam segmentos capturados,
-não palavras ou falantes. Encerrar a sessão cancela segmentos ainda em
-reconhecimento; resultados finais já entregues são gravados. Veja os campos,
-a autenticação opcional e os exemplos no [guia de transcrição](transcription.md).
-
-### Pré-requisitos por sistema
-
-| Sistema | Compilação whisper.cpp | Python/Piper | Ollama |
-|---|---|---|---|
-| Linux | Git, CMake e compilador C/C++ | Python 3 com `venv` e pip | instalador oficial Linux |
-| macOS | Xcode Command Line Tools, Git e CMake | Python 3 com `venv` e pip | aplicativo oficial macOS |
-| Windows | Git, CMake e Visual Studio Build Tools com C++ | Python 3 e launcher `py` | instalador oficial Windows |
-
-Exemplos de dependências de desenvolvimento:
-
-```sh
-# Debian/Ubuntu
-sudo apt install build-essential cmake git python3-venv python3-pip
-
-# macOS, após instalar Homebrew
-xcode-select --install
-brew install cmake git python
-```
-
-No Windows, instale CMake/Git/Python e a carga de trabalho C++ do Visual Studio
-Build Tools. Use o Developer PowerShell para os comandos CMake abaixo. Esses
-comandos são instruções de instalação; não foram executados automaticamente
-pelo Babel.
-
-### 1. whisper.cpp
-
-Linux/macOS, em uma pasta de ferramentas fora do projeto:
-
-```sh
-git clone https://github.com/ggml-org/whisper.cpp.git
-cd whisper.cpp
-sh models/download-ggml-model.sh base
-cmake -B build -DWHISPER_BUILD_SERVER=ON -DCMAKE_BUILD_TYPE=Release
-cmake --build build --config Release --parallel
-./build/bin/whisper-server -m models/ggml-base.bin --host 127.0.0.1 --port 8080 -l auto
-```
-
-Windows, Developer PowerShell:
-
-```powershell
-git clone https://github.com/ggml-org/whisper.cpp.git
-Set-Location whisper.cpp
-.\models\download-ggml-model.cmd base
-cmake -B build -DWHISPER_BUILD_SERVER=ON
-cmake --build build --config Release --parallel
-.\build\bin\Release\whisper-server.exe -m models\ggml-base.bin --host 127.0.0.1 --port 8080 -l auto
-```
-
-Use um modelo multilíngue como `base` ou `small`, sem o sufixo `.en`, para
-reconhecer português e outros idiomas. O servidor precisa permanecer executando;
-o endpoint padrão é `http://127.0.0.1:8080/inference`. O Babel já envia WAV
-compatível e não precisa ativar conversão via ffmpeg. Build e opções de aceleração
-estão no [projeto whisper.cpp](https://github.com/ggml-org/whisper.cpp);
-o contrato multipart é descrito no [servidor HTTP](https://github.com/ggml-org/whisper.cpp/tree/master/examples/server).
-
-### 2. Ollama
-
-Instale o [Ollama para seu sistema](https://ollama.com/download). Em qualquer um
-dos três sistemas, baixe o modelo configurado e deixe o serviço ativo:
-
-```sh
-ollama pull qwen3:4b
-# Só execute serve se o aplicativo/serviço ainda não estiver escutando na porta.
-ollama serve
-```
-
-O modelo padrão é [qwen3:4b](https://ollama.com/library/qwen3:4b), escolhido aqui
-como uma opção local configurável. Isso não representa benchmark de qualidade
-ou garantia de desempenho no seu hardware. O adaptador usa `/api/chat`,
-`stream=false`, `think=false`, temperatura zero e limite de tokens para segmentos
-curtos. Um modelo alternativo deve aceitar esses parâmetros. A resposta deve
-terminar normalmente; truncamento não é enviado à síntese. Consulte a
-[API de chat](https://docs.ollama.com/api/chat).
-
-Ao selecionar uma voz externa (por exemplo ElevenLabs ou Gemini TTS), a cascata
-local envia diretamente o texto traduzido a esse sintetizador: não chama Piper
-nem produz um WAV intermediário. Nesse modo, Piper não precisa estar em execução.
-
-### 3. Piper
-
-Crie um ambiente Python. Linux/macOS:
-
-```sh
-python3 -m venv .venv-piper
-. .venv-piper/bin/activate
-python -m pip install 'piper-tts[http]'
-python -m piper.download_voices en_US-lessac-medium pt_BR-faber-medium
-python -m piper.http_server -m en_US-lessac-medium --host 127.0.0.1 --port 5000
-```
-
-Windows, PowerShell, sem depender da ativação do ambiente:
-
-```powershell
-py -3 -m venv .venv-piper
-.\.venv-piper\Scripts\python.exe -m pip install "piper-tts[http]"
-.\.venv-piper\Scripts\python.exe -m piper.download_voices en_US-lessac-medium pt_BR-faber-medium
-.\.venv-piper\Scripts\python.exe -m piper.http_server -m en_US-lessac-medium --host 127.0.0.1 --port 5000
-```
-
-Baixe as vozes e execute o servidor no mesmo diretório, ou configure `--data-dir`.
-Confira os nomes disponíveis em `http://127.0.0.1:5000/voices`. Babel envia
-`{"text":"...","voice":"..."}` a `/synthesize`; uma voz vazia usa o padrão
-do servidor. Documentação do [Piper HTTP](https://github.com/OHF-Voice/piper1-gpl/blob/main/docs/API_HTTP.md).
-A voz brasileira de exemplo está no [catálogo Faber](https://huggingface.co/rhasspy/piper-voices/tree/main/pt/pt_BR/faber/medium).
-
-### 4. Configuração no Babel
-
-Mescle estes campos na configuração existente, preservando os dispositivos:
+A cadeia reconhece WAV mono PCM16/16 kHz com Whisper, traduz o texto com Qwen
+via llama.cpp e sintetiza com Piper. O Babel converte o WAV resultante para
+24 kHz e o entrega em frames de 20 ms. A implementação mantém os nomes dos
+campos antigos de endpoint para compatibilidade; `ollama_endpoint = "auto"`
+inicia llama.cpp, não exige um serviço Ollama.
 
 ```toml
 [providers.local]
-whisper_endpoint = "http://127.0.0.1:8080/inference"
-ollama_endpoint = "http://127.0.0.1:11434/api/chat"
-translation_model = "qwen3:4b"
-piper_endpoint = "http://127.0.0.1:5000/synthesize"
-piper_voice = ""
+whisper_endpoint = "auto"
+whisper_model = "base"
+ollama_endpoint = "auto"
+translation_model = "qwen3-0.6b"
+piper_endpoint = "auto"
+piper_voice = "auto"
 segment_ms = 2000
 silence_ms = 300
 vad_threshold = 0.01
 request_timeout_secs = 30
+
+[local_runtime]
+directory = ""
+threads = 4
 
 [microphone]
 provider = "local"
@@ -345,62 +215,69 @@ prompt = "Preserve nomes próprios e termos técnicos."
 
 [microphone.voice]
 engine = "native"
-voice_id = "en_US-lessac-medium"
-style = ""
-chunk_ms = 400
-
-[speaker]
-provider = "local"
-source_language = "en-US"
-target_language = "pt-BR"
-prompt = ""
-
-[speaker.voice]
-engine = "native"
-voice_id = "pt_BR-faber-medium"
+voice_id = ""
 style = ""
 chunk_ms = 400
 ```
 
-A voz escolhida deve falar o idioma de destino. `piper_voice` é o fallback para
-rotas sem `voice_id`; ambos vazios usam o padrão do servidor. `segment_ms` aceita
-500–10000 ms, `silence_ms` aceita 100–2000 ms e precisa ser menor que o segmento.
-`vad_threshold` é RMS normalizado entre 0.0001 e 0.5: aumentá-lo rejeita mais
-ruído e também pode perder fala baixa. Há 100 ms de áudio anterior à detecção
-para reduzir o corte do começo das palavras. Esses limites descrevem o código
-do Babel, não garantias de reconhecimento do Whisper.
+Preserve os dispositivos e outros campos existentes ao mesclar esse exemplo.
+`piper_voice = "auto"` seleciona a voz do catálogo para o idioma de destino;
+um `voice_id` explícito na rota tem prioridade. A cadeia não preserva
+identidade vocal, não clona vozes e não diariza. O texto intermediário de
+reconhecimento não alimenta o TXT: selecione um STT independente na página
+**Transcrição**. Whisper STT e Whisper da tradução têm configuração própria.
 
-### Desempenho, erros e controle
+O reconhecimento é segmentado e a latência acumula reconhecimento, tradução
+e síntese. Um modelo pequeno pode errar mais em frases ambíguas, idiomas pouco
+representados ou contexto técnico. Filas são limitadas, e a máquina precisa
+acompanhar o ritmo do áudio; não há promessa universal de tempo real em CPU.
 
-Capture e inferência progridem em tarefas independentes. Há no máximo dois
-segmentos esperando inferência e dois áudios esperando reprodução. A reprodução
-é cadenciada; não despeja um WAV inteiro na fila do dispositivo. Se a máquina
-não acompanhar a entrada, a rota encerra com erro explícito em vez de aumentar
-a fila indefinidamente. Duas rotas simultâneas dividem CPU/GPU e serviços; teste
-primeiro uma rota.
+### Armazenamento, vozes e servidores externos
 
-CPU funciona para os componentes que suportarem seu sistema, mas uma GPU pode
-ser necessária para acompanhar fala contínua. O tempo de carregar os modelos
-também afeta o primeiro segmento. Modelos menores e segmentos maiores podem
-reduzir pressão de processamento com trocas de qualidade/latência. Verifique
-as opções oficiais do [whisper.cpp](https://github.com/ggml-org/whisper.cpp) e o
-[suporte de hardware Ollama](https://docs.ollama.com/gpu); o projeto não afirma
-números de latência, uso de RAM ou requisitos mínimos universais.
+O [guia de modelos locais](local-inference.md) descreve o catálogo, diretório
+absoluto opcional, threads, primeira preparação e uso offline. A primeira
+seleção precisa de internet para obter os pesos. Os executáveis dos motores
+fazem parte do instalador; uma compilação de desenvolvimento precisa gerar o
+pacote de runtimes antes de usar o modo integrado.
 
-Cada chamada HTTP tem timeout, não segue redirecionamentos e tem teto de bytes.
-Falhas de serviço, resposta malformada, WAV excessivo e filas cheias aparecem
-como erro da rota. Não há repetição automática de segmentos, que poderia
-reproduzir fala duplicada. Endpoints HTTP são aceitos apenas no loopback; outros
-hosts precisam de HTTPS. Credenciais, query e fragmentos em URLs são rejeitados.
-O cliente se conecta diretamente, sem usar proxies HTTP do ambiente.
+Os componentes podem usar **Servidor externo (avançado)** individualmente.
+Informe o endpoint real de cada serviço; o Babel não descobre servidores por
+portas padrão. O Whisper aceita multipart WAV em `/inference`. Para tradução,
+`translation_api = "ollama"` usa a API de chat Ollama e `"openai"` usa chat
+completions compatível. O Piper externo deve aceitar texto/voz e retornar WAV.
+Endpoints remotos HTTPS recebem o áudio ou texto da etapa correspondente.
 
-O núcleo Babel proíbe `unsafe` no próprio código. whisper.cpp, runtimes de
-modelos, servidores Python, bibliotecas nativas e drivers são componentes
-separados com suas próprias propriedades de segurança e memória. O motor atual
-[Piper](https://github.com/OHF-Voice/piper1-gpl) é GPLv3; pesos de voz/modelos
-podem ter licenças diferentes. A instalação separada aqui não redistribui esses
-componentes dentro do executável Babel. Consulte as licenças dos arquivos que
-você efetivamente selecionar para distribuir um produto.
+A API Ollama recebe mensagens de tradução, `stream=false`, `think=false`,
+temperatura zero e limite de tokens. O modelo do servidor precisa aceitar esse
+contrato; truncamento não é enviado à síntese. Consulte a
+[API Ollama](https://docs.ollama.com/api/chat), o
+[servidor Whisper](https://github.com/ggml-org/whisper.cpp/tree/master/examples/server)
+e o [Piper HTTP](https://github.com/OHF-Voice/piper1-gpl/blob/main/docs/API_HTTP.md)
+para manter servidores próprios.
+
+Com uma voz TTS externa selecionada na rota, o tradutor local envia o texto
+traduzido diretamente a esse sintetizador e não precisa produzir áudio com
+Piper. Esse arranjo envia o texto ao provider de voz escolhido e exige sua chave.
+
+### Desempenho e limites
+
+`segment_ms` aceita 500–10000 ms; `silence_ms` aceita 100–2000 ms e precisa ser
+menor que o segmento. O limiar RMS `vad_threshold` vai de 0.0001 a 0.5.
+Aumentá-lo pode rejeitar ruído e também perder fala baixa. Há 100 ms anteriores
+à detecção para reduzir o corte do começo das palavras. Os offsets referem-se
+a segmentos, não a alinhamento de palavras.
+
+Captura e inferência progridem em tarefas independentes, com no máximo dois
+segmentos esperando inferência e dois áudios esperando reprodução por pipeline.
+Duas rotas e uma transcrição independente aumentam carga de CPU e memória.
+Se o serviço não acompanhar, a rota apresenta erro em vez de ampliar filas
+indefinidamente. As chamadas têm timeout, teto de bytes e não seguem redirects.
+Não há repetição automática de segmentos que possa duplicar fala.
+
+O código Rust do Babel proíbe `unsafe` próprio. Os motores de inferência usam
+bibliotecas nativas separadas, com suas próprias propriedades de segurança;
+a integração não torna essas bibliotecas memory-safe. Licenças dos motores e
+dos pesos são independentes e acompanham a distribuição/documentação do pacote.
 
 ### Validação disponível
 
@@ -417,4 +294,4 @@ saturação. Deepgram também tem mocks para autenticação, frames PCM, finais,
 diarização, timestamps, keepalive, descarte da fila antiga e reconexão. Esses
 testes não medem qualidade de modelos. Os testes não enviam voz para
 nuvem e não usam chaves reais. Faça uma avaliação com áudio e idiomas de seu uso
-após configurar credenciais ou instalar e iniciar os serviços locais.
+após configurar credenciais ou concluir a preparação dos modelos locais.

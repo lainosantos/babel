@@ -10,8 +10,8 @@ function defaults() {
   const cloud = (values = {}) => ({ api_key_env: 'GEMINI_API_KEY', endpoint: 'wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent', model: 'gemini-3.5-live-translate-preview', voice: 'Kore', tts_model: 'gemini-3.8-flash-tts', transcription_model: '', connect_timeout_secs: 15, max_reconnect_attempts: 5, ...values });
   const route = (values = {}) => ({ enabled: true, provider: 'gemini', capture_device: 'physical-mic', playback_device: 'babel_mic_bus', source_language: 'pt-BR', target_language: 'en-US', prompt: '', gain: 1, voice: { engine: 'native', voice_id: '', style: '', chunk_ms: 400 }, ...values });
   return {
-    version: 1, interface: { language: 'system' },
-    providers: { gemini: cloud(), openai: cloud({ api_key_env: 'OPENAI_API_KEY', endpoint: '', model: 'gpt-realtime-translate', voice: 'marin', tts_model: '' }), elevenlabs: cloud({ api_key_env: 'ELEVENLABS_API_KEY', endpoint: 'https://api.elevenlabs.io/v1', model: 'eleven_flash_v2_5', voice: '', tts_model: 'eleven_flash_v2_5' }), local: { whisper_endpoint: 'http://127.0.0.1:8080/inference', ollama_endpoint: 'http://127.0.0.1:11434/api/chat', translation_model: 'qwen3:4b', piper_endpoint: 'http://127.0.0.1:5000/synthesize', piper_voice: '', segment_ms: 2000, silence_ms: 300, vad_threshold: 0.01, request_timeout_secs: 30 } },
+    version: 1, interface: { language: 'system' }, local_runtime: { directory: '', threads: 4 },
+    providers: { gemini: cloud(), openai: cloud({ api_key_env: 'OPENAI_API_KEY', endpoint: '', model: 'gpt-realtime-translate', voice: 'marin', tts_model: '' }), elevenlabs: cloud({ api_key_env: 'ELEVENLABS_API_KEY', endpoint: 'https://api.elevenlabs.io/v1', model: 'eleven_flash_v2_5', voice: '', tts_model: 'eleven_flash_v2_5' }), local: { whisper_endpoint: 'auto', whisper_model: 'base', ollama_endpoint: 'auto', translation_api: 'ollama', translation_model: 'qwen3-0.6b', piper_endpoint: 'auto', piper_voice: 'auto', segment_ms: 2000, silence_ms: 300, vad_threshold: 0.01, request_timeout_secs: 30 } },
     audio: { quality: 'balanced', capture_queue_ms: 200, playback_queue_ms: 2000, max_capture_age_ms: 200, device_latency_ms: 30 },
     microphone: route(), speaker: route({ capture_device: 'babel_speaker.monitor', playback_device: 'physical-speaker', source_language: 'en-US', target_language: 'pt-BR' }),
     transcription: { enabled: false, microphone: true, speaker: true, timestamps: true, directory: 'transcripts',
@@ -20,7 +20,7 @@ function defaults() {
         gemini: { api_key_env: 'GEMINI_API_KEY', endpoint: cloud().endpoint, model: 'gemini-3.5-transcribe-live', connect_timeout_secs: 15, max_reconnect_attempts: 5 },
         openai: { api_key_env: 'OPENAI_API_KEY', endpoint: '', model: 'gpt-live-transcribe', connect_timeout_secs: 15, max_reconnect_attempts: 5 },
         deepgram: { api_key_env: 'DEEPGRAM_API_KEY', endpoint: 'wss://api.deepgram.com/v1/listen', model: 'nova-3', connect_timeout_secs: 15, max_reconnect_attempts: 3, diarize: true, punctuate: true },
-        whisper: { endpoint: '', api_key_env: '', segment_ms: 2000, silence_ms: 300, vad_threshold: 0.01, request_timeout_secs: 30 },
+        whisper: { endpoint: 'auto', model: 'base', api_key_env: '', segment_ms: 2000, silence_ms: 300, vad_threshold: 0.01, request_timeout_secs: 30 },
       } },
     files: { base_path: '/home/test/Babel', name_pattern: '{date}-{time}-{session}-{id}' },
     recording: { enabled: false, microphone: true, speaker: true, directory: 'recordings' },
@@ -60,6 +60,7 @@ async function page(t, options = {}) {
   let interval;
   let firstStatus = true;
   let running = false;
+  let localRuntime = { phase: 'idle', message: null, download: null, services: [] };
   let routingActive = true;
   let routingError = null;
   let sessionName = null;
@@ -75,6 +76,7 @@ async function page(t, options = {}) {
   window.HTMLDialogElement.prototype.showModal = function () { this.open = true; };
   window.HTMLDialogElement.prototype.close = function () { this.open = false; };
   const initialChange = options.initialChange;
+  const startRequest = options.startRequest;
   window.fetch = async (url, options) => {
     const parsed = new URL(url, window.location.origin);
     if (parsed.pathname.startsWith('/locales/')) {
@@ -102,9 +104,9 @@ async function page(t, options = {}) {
       if (firstStatus && initialChange) { initialChange(config); revision++; }
       firstStatus = false;
       const route = name => ({ ...metrics, state: running && config[name].enabled ? 'streaming' : routingActive || running ? 'passthrough' : 'stopped', ...routeStatuses[name] });
-      value = { running, routing_active: routingActive, routing_error: routingError, config_revision: revision, session_name: sessionName, session_id: sessionId, microphone: route('microphone'), speaker: route('speaker'), last_error: null };
+      value = { local_runtime: localRuntime, running, routing_active: routingActive, routing_error: routingError, config_revision: revision, session_name: sessionName, session_id: sessionId, microphone: route('microphone'), speaker: route('speaker'), last_error: null };
     }
-    else if (parsed.pathname === '/api/start') { running = true; sessionName = body?.name || 'Sessão automática'; sessionId = 'fixture-session-id'; }
+    else if (parsed.pathname === '/api/start') { if (startRequest) { const response = await startRequest(); if (response instanceof Response) return response; } running = true; sessionName = body?.name || 'Sessão automática'; sessionId = 'fixture-session-id'; }
     else if (parsed.pathname === '/api/stop') running = false;
     else if (parsed.pathname === '/api/autostart') { if (options.method === 'POST') autostart = body.enabled; value = { ...autostartMetadata, enabled: autostart, supported: true, description: autostart ? 'Início automático ativado; tradução parada.' : 'Início automático desativado.' }; }
     else if (parsed.pathname === '/api/credentials' && options.method === 'GET') value = { configured: credentials.has(parsed.searchParams.get('api_key_env')) };
@@ -119,7 +121,7 @@ async function page(t, options = {}) {
   window.eval(fs.readFileSync(path.join(__dirname, 'workspace.js'), 'utf8'));
   await settle(() => !byId('start').disabled && calls.some(call => call.path === '/api/platform'), 'dashboard did not initialize');
   const set = (id, value) => { const input = byId(id); if (input.type === 'checkbox') input.checked = value; else input.value = value; input.dispatchEvent(new window.Event('input', { bubbles: true })); };
-  return { window, doc, byId, calls, set, config: () => config, poll: () => interval(), externalChange: callback => { callback(config); revision++; }, filePaths: handler => { filePathsHandler = handler; }, platformFailure: failure => { platformFailure = failure; }, routing: (active, error = null) => { routingActive = active; routingError = error; }, routeStatus: (route, status) => { routeStatuses[route] = status; } };
+  return { window, doc, byId, calls, set, runtime: status => { localRuntime = status; }, config: () => config, poll: () => interval(), externalChange: callback => { callback(config); revision++; }, filePaths: handler => { filePathsHandler = handler; }, platformFailure: failure => { platformFailure = failure; }, routing: (active, error = null) => { routingActive = active; routingError = error; }, routeStatus: (route, status) => { routeStatuses[route] = status; } };
 }
 
 test('the real dashboard separates routing, translation, transcription and recording into six workspace destinations', async t => {
@@ -1246,38 +1248,53 @@ test('STT validation reveals the correct profile without changing the translatio
   await settle(() => p.calls.some(c => c.path === '/api/config' && c.options.method === 'PUT'));
 });
 
-test('Whisper transcription has no assumed port and requires an endpoint only when a selected source uses it', async t => {
+test('built-in Whisper transcription needs no external endpoint or credentials and preserves STS settings', async t => {
   const p = await page(t);
   p.set('microphone-enabled', false);
   p.set('speaker-enabled', false);
-  p.set('recording-enabled', true);
   p.set('stt-microphone-provider', 'whisper');
-  assert.equal(p.byId('stt-profile-whisper-endpoint').value, '');
-  assert.equal(p.byId('stt-profile-whisper-endpoint').required, false);
-  assert.equal(p.byId('stt-microphone-language').disabled, false);
-  p.byId('save').click();
-  await settle(() => p.calls.some(c => c.path === '/api/config' && c.options.method === 'PUT'));
-  await settle(() => !p.byId('settings').disabled);
   p.set('transcription-enabled', true);
   p.set('transcription-speaker', false);
+  assert.equal(p.byId('stt-profile-whisper-endpoint').value, 'auto');
+  assert.equal(p.byId('stt-profile-whisper-endpoint').required, false);
+  assert.equal(p.byId('stt-profile-whisper-endpoint').disabled, true);
+  assert.equal(p.byId('stt-credential-whisper').disabled, true);
+  p.set('stt-profile-whisper-model', 'small');
   p.byId('start').click();
-  assert.equal(p.window.BabelWorkspace.current, 'transcription');
-  assert.equal(p.byId('stt-profile-selector').value, 'whisper');
+  await settle(() => !p.byId('stop').hidden);
+  assert.equal(p.config().transcription.providers.whisper.endpoint, 'auto');
+  assert.equal(p.config().transcription.providers.whisper.model, 'small');
+  assert.equal(p.config().providers.local.whisper_model, 'base');
+  assert.equal(p.config().providers.local.whisper_endpoint, 'auto');
+});
+
+test('external Whisper requires an explicit endpoint and mode changes preserve endpoint drafts', async t => {
+  const p = await page(t);
+  p.set('stt-microphone-provider', 'whisper');
+  p.set('transcription-enabled', true);
+  p.set('transcription-speaker', false);
+  p.set('stt-profile-whisper-endpoint-mode', 'external');
+  assert.equal(p.byId('stt-profile-whisper-endpoint').value, '');
+  assert.equal(p.byId('stt-profile-whisper-endpoint').required, true);
+  p.byId('start').click();
   assert.equal(p.doc.activeElement, p.byId('stt-profile-whisper-endpoint'));
   assert.equal(p.calls.some(c => c.path === '/api/start'), false);
   p.set('stt-profile-whisper-endpoint', 'http://127.0.0.1:41921/inference');
+  p.set('stt-profile-whisper-endpoint-mode', 'auto');
+  assert.equal(p.byId('stt-profile-whisper-endpoint').value, 'auto');
+  p.set('stt-profile-whisper-endpoint-mode', 'external');
+  assert.equal(p.byId('stt-profile-whisper-endpoint').value, 'http://127.0.0.1:41921/inference');
+  assert.equal(p.byId('stt-profile-whisper-model').disabled, true);
   p.byId('start').click();
   await settle(() => !p.byId('stop').hidden);
-  assert.equal(p.config().transcription.microphone_recognition.provider, 'whisper');
   assert.equal(p.config().transcription.providers.whisper.endpoint, 'http://127.0.0.1:41921/inference');
-  assert.equal(p.config().providers.local.whisper_endpoint, defaults().providers.local.whisper_endpoint);
-  assert.equal(p.byId('stt-microphone-provider').matches(':disabled'), true);
 });
 
 test('STT validation accepts exact segment values and reveals language and timing errors in source order', async t => {
   const p = await page(t);
   p.set('transcription-enabled', true); p.set('transcription-speaker', false);
   p.set('stt-microphone-provider', 'whisper');
+  p.set('stt-profile-whisper-endpoint-mode', 'external');
   p.set('stt-profile-whisper-endpoint', 'http://127.0.0.1:49213/inference');
   p.set('stt-profile-whisper-segment_ms', 1234);
   p.set('stt-profile-whisper-silence_ms', 1234);
@@ -1300,7 +1317,7 @@ test('STT validation accepts exact segment values and reveals language and timin
   p.set('stt-profile-whisper-request_timeout_secs', 25);
   p.byId('save').click();
   await settle(() => p.calls.some(c => c.path === '/api/config' && c.options.method === 'PUT'));
-  assert.deepEqual(p.config().transcription.providers.whisper, { endpoint: 'http://127.0.0.1:49213/inference', api_key_env: '', segment_ms: 1234, silence_ms: 321, vad_threshold: 0.01234, request_timeout_secs: 25 });
+  assert.deepEqual(p.config().transcription.providers.whisper, { endpoint: 'http://127.0.0.1:49213/inference', model: 'base', api_key_env: '', segment_ms: 1234, silence_ms: 321, vad_threshold: 0.01234, request_timeout_secs: 25 });
 });
 
 test('processing summary uses the independent STT selection and ignores disabled translator profiles', async t => {
@@ -1340,4 +1357,102 @@ test('STT shortcuts, languages and unsaved secrets survive workspace and interfa
   assert.equal(p.byId('stt-provider-title').textContent, 'Transcription providers');
   assert.equal(p.byId('stt-profile-selector').value, 'deepgram');
   assert.equal(p.calls.some(c => c.options.method === 'PUT' || ['/api/start','/api/stop'].includes(c.path)), false);
+});
+
+test('local model preparation reports bounded download progress, failures and recovery in both feature pages', async t => {
+  const p = await page(t);
+  p.set('microphone-provider', 'local');
+  p.set('stt-microphone-provider', 'whisper');
+  p.runtime({ phase: 'preparing', download: { name: '<img src=x onerror=alert(1)>', received: 1048576, total: 2097152 }, services: [] });
+  await p.poll();
+  const boxes = [...p.doc.querySelectorAll('[data-local-runtime]')];
+  for (const box of boxes) {
+    assert.equal(box.hidden, false);
+    assert.equal(box.dataset.phase, 'preparing');
+    assert.equal(box.querySelector('progress').value, 0.5);
+    assert.match(box.querySelector('[data-local-runtime-download-label]').textContent, /50%/);
+    assert.equal(box.querySelector('img'), null);
+  }
+  p.runtime({ phase: 'preparing', download: { name: 'Whisper Base', received: 1024, total: null }, services: [] });
+  await p.poll();
+  assert.equal(boxes[0].querySelector('progress').hasAttribute('value'), false);
+  p.runtime({ phase: 'error', message: 'Model checksum did not match', download: null, services: [] });
+  await p.poll();
+  assert.equal(boxes[0].querySelector('[data-local-runtime-error]').textContent, 'Model checksum did not match');
+  assert.equal(boxes[0].querySelector('[data-local-runtime-download]').hidden, true);
+  p.runtime({ phase: 'ready', download: null, message: null, services: ['whisper'] });
+  await p.poll();
+  assert.equal(boxes[0].querySelector('[data-local-runtime-error]').hidden, true);
+  assert.equal(boxes[0].dataset.phase, 'ready');
+});
+
+test('local runtime folder is either OS-specific absolute or automatic and settings survive saving', async t => {
+  for (const [os, good, bad] of [['linux', '/srv/babel-models', 'models'], ['macos', '/Users/me/Babel/models', 'models'], ['windows', 'D:\\Babel\\models', '\\models']]) {
+    const p = await page(t, { platform: os });
+    p.set('local-runtime-directory', bad);
+    assert.equal(p.byId('local-runtime-directory').checkValidity(), false, `${os}: reject relative path`);
+    p.byId('save').click();
+    assert.equal(p.window.BabelWorkspace.current, 'settings');
+    p.set('local-runtime-directory', good);
+    assert.equal(p.byId('local-runtime-directory').checkValidity(), true, `${os}: absolute path`);
+    p.set('local-runtime-threads', 3);
+    p.byId('save').click();
+    await settle(() => p.calls.some(c => c.path === '/api/config' && c.options.method === 'PUT'));
+    assert.equal(p.config().local_runtime.directory, good);
+    assert.equal(p.config().local_runtime.threads, 3);
+    p.set('local-runtime-directory', '');
+    assert.equal(p.byId('local-runtime-directory').checkValidity(), true, `${os}: automatic cache`);
+  }
+});
+
+test('local translation independently switches managed components and retains external model drafts', async t => {
+  const p = await page(t);
+  p.set('microphone-provider', 'local');
+  p.set('profile-local-ollama_endpoint-mode', 'external');
+  p.set('profile-local-ollama_endpoint', 'http://127.0.0.1:43518/api/chat');
+  p.set('profile-local-translation_model', 'custom-model');
+  p.set('profile-local-translation_api', 'ollama');
+  p.set('profile-local-ollama_endpoint-mode', 'auto');
+  assert.equal(p.byId('profile-local-translation_model').value, 'qwen3-0.6b');
+  assert.equal(p.byId('profile-local-translation_model').readOnly, true);
+  p.set('profile-local-ollama_endpoint-mode', 'external');
+  assert.equal(p.byId('profile-local-translation_model').value, 'custom-model');
+  assert.equal(p.byId('profile-local-ollama_endpoint').value, 'http://127.0.0.1:43518/api/chat');
+  assert.equal(p.byId('profile-local-whisper_endpoint').value, 'auto');
+  assert.equal(p.byId('profile-local-piper_endpoint').value, 'auto');
+  p.set('profile-local-piper_endpoint-mode', 'external');
+  assert.equal(p.byId('profile-local-piper_voice').value, '', 'external Piper uses its default voice instead of a managed auto ID');
+  p.set('profile-local-piper_endpoint', 'http://127.0.0.1:49111/synthesize');
+  p.set('profile-local-piper_voice', 'custom-piper');
+  p.set('profile-local-piper_endpoint-mode', 'auto');
+  assert.equal(p.byId('profile-local-piper_voice').value, 'auto');
+  p.set('profile-local-piper_endpoint-mode', 'external');
+  assert.equal(p.byId('profile-local-piper_voice').value, 'custom-piper');
+  p.byId('save').click();
+  await settle(() => p.calls.some(c => c.path === '/api/config' && c.options.method === 'PUT'));
+  assert.equal(p.config().providers.local.translation_api, 'ollama');
+  assert.equal(p.config().providers.local.translation_model, 'custom-model');
+  assert.equal(p.config().providers.local.whisper_model, 'base');
+});
+
+test('model preparation keeps status polling available and session start can be cancelled', async t => {
+  let finishStart;
+  const pendingStart = new Promise(resolve => { finishStart = resolve; });
+  const p = await page(t, { startRequest: () => pendingStart });
+  p.runtime({ phase: 'preparing', download: { name: 'Whisper Base', received: 100, total: 200 }, services: [] });
+  p.byId('start').click();
+  await settle(() => p.calls.some(c => c.path === '/api/start'));
+  assert.equal(p.byId('cancel-start').hidden, false);
+  assert.equal(p.byId('cancel-start').disabled, false);
+  const pollsBefore = p.calls.filter(c => c.path === '/api/status').length;
+  await p.poll();
+  assert.equal(p.calls.filter(c => c.path === '/api/status').length, pollsBefore + 1);
+  assert.equal(p.doc.querySelector('[data-local-runtime="settings"]').dataset.phase, 'preparing');
+  p.byId('cancel-start').click();
+  await settle(() => p.calls.some(c => c.path === '/api/stop'));
+  finishStart(new Response(JSON.stringify({ error: 'Session preparation cancelled' }), { status: 409, headers: { 'Content-Type': 'application/json' } }));
+  await settle(() => !p.byId('start').disabled);
+  assert.equal(p.byId('cancel-start').hidden, true);
+  assert.equal(p.byId('error').hidden, true);
+  assert.equal(p.byId('stop').hidden, true);
 });

@@ -114,6 +114,39 @@ class PolicyTests(unittest.TestCase):
 
 @unittest.skipUnless(all(shutil.which(tool) for tool in ("dpkg-deb", "readelf", "rpm", "rpm2cpio", "rpmbuild")) and Path("/bin/true").is_file(), "Linux ELF/dpkg/RPM tools required")
 class ArchiveTests(unittest.TestCase):
+    def test_installers_include_verified_native_providers_and_corresponding_sources(self):
+        import build_local_runtime as runtime_build
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            binaries = root / "bin"
+            binaries.mkdir()
+            for name in build.BINARIES:
+                shutil.copyfile("/bin/true", binaries / name)
+            runtime_root = root / "runtime/linux-x86_64"
+            services = {}
+            for name in ("whisper", "llama", "piper"):
+                executable = runtime_root / name / "bin" / name
+                executable.parent.mkdir(parents=True)
+                shutil.copyfile("/bin/true", executable)
+                executable.chmod(0o755)
+                services[name] = {"executable": executable.relative_to(runtime_root).as_posix()}
+            data = runtime_root / "piper/share/espeak-ng-data"
+            data.mkdir(parents=True)
+            (data / "phondata").write_bytes(b"data fixture")
+            services["piper"]["data"] = data.relative_to(runtime_root).as_posix()
+            sources = runtime_root / "sources"
+            sources.mkdir()
+            (sources / "COPYING").write_text("source fixture")
+            runtime_build.write_manifest(runtime_root, "linux", "x86_64", services)
+            build.build(binaries, root / "out", "0.0.0", root / "runtime")
+            with tarfile.open(root / "out/babel-audio-0.0.0-linux-amd64.tar.gz") as archive:
+                prefix = "babel-audio-0.0.0-linux-amd64/share/babel/local-runtime/linux-x86_64"
+                self.assertEqual(archive.extractfile(prefix + "/sources/COPYING").read(), b"source fixture")
+                for service in services.values():
+                    self.assertTrue(archive.getmember(prefix + "/" + service["executable"]).mode & 0o111)
+            license_value = build.run("rpm", "-qp", "--qf", "%{LICENSE}", root / "out/babel-audio-0.0.0-1.x86_64.rpm").stdout
+            self.assertEqual(license_value, "MIT AND GPL-3.0-or-later")
+
     def test_three_formats_contain_exact_binaries_modes_and_no_install_hooks(self):
         with tempfile.TemporaryDirectory(prefix="Babel packages é % ") as directory:
             root = Path(directory); binaries = root / "bin"; binaries.mkdir()

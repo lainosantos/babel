@@ -67,6 +67,7 @@ pub struct EngineStatus {
     pub microphone: RouteStatus,
     pub speaker: RouteStatus,
     pub last_error: Option<String>,
+    pub local_runtime: crate::local_runtime::RuntimeStatus,
 }
 
 #[derive(Default)]
@@ -165,6 +166,7 @@ impl Running {
             microphone,
             speaker,
             last_error: (!errors.is_empty()).then(|| format!("{}. Escolha outro dispositivo físico pela bandeja para continuar na mesma sessão.", errors.join("; "))),
+            local_runtime: Default::default(),
         }
     }
 }
@@ -181,6 +183,8 @@ struct State {
     routing: Option<Routing>,
     routing_error: Option<String>,
     routing_retry_at: Instant,
+    pending_start: Option<(u64, CancellationToken)>,
+    next_start_id: u64,
 }
 
 /// Serializes lifecycle transitions; only non-real-time control paths use this lock.
@@ -192,6 +196,7 @@ pub struct Controller {
     mcp: Arc<crate::mcp_client::McpClient>,
     command_tools: Arc<command_tools::AgentTools>,
     notifications_started: std::sync::atomic::AtomicBool,
+    local_runtime: Arc<crate::local_runtime::RuntimeManager>,
 }
 impl Drop for Controller {
     fn drop(&mut self) {
@@ -211,6 +216,8 @@ impl Controller {
         crate::storage::resolve(base_path, transcription_directory, recording_directory)
     }
     pub fn new(config: AppConfig, path: PathBuf) -> Result<Self> {
+        let local_runtime = crate::local_runtime::RuntimeManager::new();
+        local_runtime.reconcile(&config);
         let mcp = Arc::new(crate::mcp_client::McpClient::new());
         let command_tools = Arc::new(command_tools::AgentTools::new(
             mcp.clone(),
@@ -228,6 +235,7 @@ impl Controller {
             mcp,
             command_tools,
             notifications_started: std::sync::atomic::AtomicBool::new(false),
+            local_runtime,
             monitor_cancel: CancellationToken::new(),
             state: Arc::new(Mutex::new(State {
                 config,
@@ -241,6 +249,8 @@ impl Controller {
                 routing: None,
                 routing_error: None,
                 routing_retry_at: Instant::now(),
+                pending_start: None,
+                next_start_id: 0,
             })),
         })
     }
@@ -250,6 +260,7 @@ impl Controller {
         self.start_command_notifications();
         let mut state = self.state.lock().await;
         state.config.validate_routing()?;
+        self.local_runtime.reconcile(&state.config);
         state.routing_enabled = true;
         if !state.routing_monitor_started {
             state.routing_monitor_started = true;
@@ -267,6 +278,7 @@ impl Controller {
         let session = self.stop().await;
         let routing = stop_routing(&mut *self.state.lock().await).await;
         self.commands.shutdown().await;
+        self.local_runtime.shutdown().await;
         session.and(routing)
     }
     pub async fn install_virtual_devices(&self) -> Result<String> {
@@ -329,6 +341,7 @@ impl Controller {
             status.routing_error = state.routing_error.clone();
         }
         status.config_revision = state.config_revision;
+        status.local_runtime = self.local_runtime.status();
         if status.running && status.last_error.is_none() {
             status.last_error = state.last.last_error.clone();
         }
@@ -355,6 +368,7 @@ impl Controller {
             config.interface = interface.clone();
             config.save(&self.path)?;
             state.config = config;
+            cancel_pending_start(&mut state);
             state.config_revision = state.config_revision.wrapping_add(1);
         }
         Ok((interface, state.config_revision))
@@ -383,6 +397,8 @@ impl Controller {
             return Err(error);
         }
         state.config = config;
+        cancel_pending_start(&mut state);
+        self.local_runtime.reconcile(&state.config);
         state.config_revision = state.config_revision.wrapping_add(1);
         state.last.last_error = None;
         state.routing_retry_at = Instant::now();
@@ -406,6 +422,7 @@ impl Controller {
         select_physical(&mut config, direction, &id, &devices)?;
         config.save(&self.path)?;
         state.config = config;
+        cancel_pending_start(&mut state);
         state.config_revision = state.config_revision.wrapping_add(1);
         state.last.last_error = None;
         if let Some(running) = &state.running {
@@ -456,8 +473,47 @@ impl Controller {
             return Err(ConfigurationChanged.into());
         }
         ensure!(state.running.is_none(), "Uma sessão já está em execução");
+        if state
+            .pending_start
+            .as_ref()
+            .is_some_and(|(_, token)| token.is_cancelled())
+        {
+            state.pending_start = None;
+        }
+        ensure!(
+            state.pending_start.is_none(),
+            "Uma sessão está sendo preparada"
+        );
         state.config.validate_for_start()?;
-        let cfg = state.config.clone();
+        let configured = state.config.clone();
+        let config_revision = state.config_revision;
+        let preparing = self.monitor_cancel.child_token();
+        let prepare_guard = preparing.clone().drop_guard();
+        state.next_start_id = state.next_start_id.wrapping_add(1);
+        let start_id = state.next_start_id;
+        state.pending_start = Some((start_id, preparing.clone()));
+        // Model installation/loading must not block settings, Stop, status, or
+        // original routing. No files or audio workers exist for this session yet.
+        drop(state);
+        let resolved = self
+            .local_runtime
+            .resolve(&configured, preparing.clone())
+            .await;
+        let mut state = self.state.lock().await;
+        if state
+            .pending_start
+            .as_ref()
+            .is_some_and(|(id, _)| *id == start_id)
+        {
+            state.pending_start = None;
+        }
+        ensure!(!preparing.is_cancelled(), "Preparação da sessão cancelada");
+        if state.config_revision != config_revision {
+            return Err(ConfigurationChanged.into());
+        }
+        ensure!(state.running.is_none(), "Uma sessão já está em execução");
+        let cfg = resolved?;
+        drop(prepare_guard);
         let devices = audio::devices().await?;
         for (name, route, transcribe, record) in [
             (
@@ -535,6 +591,7 @@ impl Controller {
     }
     pub async fn stop(&self) -> Result<()> {
         let mut state = self.state.lock().await;
+        cancel_pending_start(&mut state);
         if let Some(mut running) = state.running.take() {
             running.cancel.cancel();
             let result = tokio::time::timeout(Duration::from_secs(5), &mut running.task).await;
@@ -561,6 +618,12 @@ impl Controller {
         }
         maintain_routing(&mut state).await;
         Ok(())
+    }
+}
+
+fn cancel_pending_start(state: &mut State) {
+    if let Some((_, token)) = state.pending_start.take() {
+        token.cancel();
     }
 }
 
@@ -1285,6 +1348,35 @@ mod stt_tests;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn stop_and_saved_configuration_cancel_preparation_without_starting_a_session() {
+        let directory = tempfile::tempdir().unwrap();
+        let controller =
+            Controller::new(AppConfig::default(), directory.path().join("config.toml")).unwrap();
+        let stop_token = CancellationToken::new();
+        controller.state.lock().await.pending_start = Some((1, stop_token.clone()));
+        controller.stop().await.unwrap();
+        assert!(stop_token.is_cancelled());
+        assert!(!controller.status().await.running);
+        assert!(controller.state.lock().await.pending_start.is_none());
+
+        let change_token = CancellationToken::new();
+        controller.state.lock().await.pending_start = Some((2, change_token.clone()));
+        let mut config = controller.config().await;
+        config.local_runtime.threads = 2;
+        controller.set_config(config).await.unwrap();
+        assert!(change_token.is_cancelled());
+        assert_eq!(controller.config().await.local_runtime.threads, 2);
+        assert!(controller.state.lock().await.running.is_none());
+        assert_eq!(
+            directory.path().read_dir().unwrap().count(),
+            1,
+            "preparation must not open recording/transcript files"
+        );
+        controller.shutdown().await.unwrap();
+    }
+
     #[test]
     fn file_preview_uses_only_an_explicit_absolute_base() {
         let base = tempfile::tempdir().unwrap();

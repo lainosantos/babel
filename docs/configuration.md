@@ -178,12 +178,30 @@ recebe o áudio original, inclusive quando a tradução está ativa. Os padrões
 pede detecção automática quando o adaptador/modelo permite; códigos como `pt-BR`
 selecionam um idioma específico. O idioma de tradução não substitui esse valor.
 
-Whisper requer somente seu serviço de reconhecimento; Ollama, Piper e o modelo
-de tradução podem ficar sem configuração quando não há tradução local ativa.
-`transcription.providers.whisper.endpoint` começa vazio: informe a URL real do
-servidor, sem presumir uma porta. Apenas a configuração e as credenciais dos
-reconhecedores ativos são exigidas para iniciar. A passagem original e a gravação
-sem transcrição nem tradução não usam provedores nem exigem chave.
+Whisper integrado usa `transcription.providers.whisper.endpoint = "auto"` e
+`model = "base"` por padrão. Selecionar o provider e salvar prepara automaticamente
+o motor incluído e baixa o modelo ausente. Não requer Ollama, Piper nem serviços
+iniciados manualmente. O endpoint externo é uma opção avançada com URL real,
+sem presumir porta; uma chave Bearer opcional pertence somente ao servidor externo.
+A passagem original e a gravação sem transcrição nem tradução não enviam áudio
+para reconhecedores nem exigem chave.
+
+`[local_runtime]` configura `directory` e `threads`. A pasta vazia usa o cache do
+aplicativo para a conta do sistema; um valor explícito precisa ser absoluto no
+Linux, macOS ou Windows. Não há resolução relativa ao diretório de inicialização.
+`threads` aceita de 1 a 64, com padrão 4, para reconhecimento e tradução de
+texto; não controla as threads internas da síntese Piper. A pasta dos modelos é independente da
+base dos arquivos TXT/WAV. Trocar a pasta não move os modelos existentes.
+
+Na tradução local, `whisper_endpoint`, `ollama_endpoint` e `piper_endpoint`
+aceitam `"auto"` individualmente. Os modelos gerenciados são Whisper
+(`whisper_model`: `tiny`, `base` ou `small`), Qwen (`translation_model`:
+`qwen3-0.6b`) e Piper (`piper_voice = "auto"` segue o idioma de destino).
+O nome legado `ollama_endpoint` permanece compatível, mas no modo integrado o
+motor é llama.cpp incluído no instalador. `translation_api = "ollama"` ou
+`"openai"` define o protocolo somente de um endpoint externo. Veja
+[Modelos locais integrados](local-inference.md) para o catálogo, downloads,
+requisitos e funcionamento offline.
 
 `providers.*.transcription_model` permanece um campo de compatibilidade do
 tradutor, usado onde seu protocolo precisa de reconhecimento interno. Ele não

@@ -1,0 +1,59 @@
+{
+  "version": 1,
+  "sources": {
+    "whisper": {
+      "url": "https://codeload.github.com/ggml-org/whisper.cpp/tar.gz/927cfce34f31707e17f2bff35c349632fb9e2c3a",
+      "size": 9357755,
+      "sha256": "41b664fee09e79176ac277b5237debec34f8d74af3c7d71f333f1ec67989ecde",
+      "archive": "whisper.tar.gz"
+    },
+    "llama": {
+      "url": "https://codeload.github.com/ggml-org/llama.cpp/tar.gz/d2e54583c7452353eb35d40431281f6ee984332f",
+      "size": 37571996,
+      "sha256": "8aeb94872f97ddc9c80bca3824d95aba00bdb17d1d28813db22150fb6caf6d15",
+      "archive": "llama.tar.gz"
+    },
+    "piper": {
+      "url": "https://codeload.github.com/OHF-Voice/piper1-gpl/tar.gz/efffbfb226bfb511ebbcf55d0cecd8b35a89743d",
+      "size": 25382507,
+      "sha256": "51f11b943d166c39423a7fc1ffb1fa5f287ea14983e8f418fb94521aab87c1db",
+      "archive": "piper.tar.gz"
+    },
+    "espeak": {
+      "url": "https://codeload.github.com/espeak-ng/espeak-ng/tar.gz/212928b394a96e8fd2096616bfd54e17845c48f6",
+      "size": 17815706,
+      "sha256": "1f201cabc73e569a7cb434d40d3b30980f923010f8ecd4d1c4ae94691ac2888a",
+      "archive": "espeak.tar.gz"
+    },
+    "onnx-linux-x64": {
+      "url": "https://github.com/microsoft/onnxruntime/releases/download/v1.22.0/onnxruntime-linux-x64-1.22.0.tgz",
+      "size": 7798730,
+      "sha256": "8344d55f93d5bc5021ce342db50f62079daf39aaafb5d311a451846228be49b3",
+      "archive": "onnx-linux-x64.tar.gz"
+    },
+    "onnx-osx-arm64": {
+      "url": "https://github.com/microsoft/onnxruntime/releases/download/v1.22.0/onnxruntime-osx-arm64-1.22.0.tgz",
+      "size": 25943843,
+      "sha256": "cab6dcbd77e7ec775390e7b73a8939d45fec3379b017c7cb74f5b204c1a1cc07",
+      "archive": "onnx-osx-arm64.tar.gz"
+    },
+    "onnx-osx-x86_64": {
+      "url": "https://github.com/microsoft/onnxruntime/releases/download/v1.22.0/onnxruntime-osx-x86_64-1.22.0.tgz",
+      "size": 27889590,
+      "sha256": "e4ec94a7696de74fb1b12846569aa94e499958af6ffa186022cfde16c9d617f0",
+      "archive": "onnx-osx-x86_64.tar.gz"
+    },
+    "onnx-win-x64": {
+      "url": "https://github.com/microsoft/onnxruntime/releases/download/v1.22.0/onnxruntime-win-x64-1.22.0.zip",
+      "size": 72368545,
+      "sha256": "174c616efc0271194488642a72f1a514e01487da4dfe84c49296d66e40ebe0da",
+      "archive": "onnx-win-x64.zip"
+    },
+    "onnx-win-arm64": {
+      "url": "https://github.com/microsoft/onnxruntime/releases/download/v1.22.0/onnxruntime-win-arm64-1.22.0.zip",
+      "size": 73055483,
+      "sha256": "7008f7ff82f8e7de563a22f2b590e08e706a1289eba606b93de2b56edfb1e04b",
+      "archive": "onnx-win-arm64.zip"
+    }
+  }
+}

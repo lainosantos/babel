@@ -6,6 +6,7 @@ Inno Setup 6.3+ (incluído na imagem) e os binários já compilados. O setup do 
 
 ```powershell
 python packaging/windows/build.py --architecture x64 `
+  --runtime-dir artifacts/local-runtime `
   --bin-dir target/x86_64-pc-windows-msvc/release `
   --driver-dir native/windows/dist/x64 --output artifacts/installers
 ```
@@ -33,6 +34,21 @@ consulta `check-absent` do helper (somente leitura) antes de prosseguir: se o dr
 foi instalado, é preciso removê-lo com `uninstall.ps1` primeiro. Assim não remove
 um driver antes da confirmação do desinstalador nem apaga o helper necessário.
 
+Os motores locais acompanham `local-runtime/windows-x86_64` ou
+`local-runtime/windows-aarch64`: Whisper, llama.cpp, Piper, ONNX Runtime,
+dados eSpeak e DLLs de runtime C++ privadas. O usuário não instala Python,
+Ollama, Piper ou redistribuível VC++ separadamente. A primeira seleção pode
+baixar os pesos verificados pelo Babel; os binários já estão no instalador.
+O manifesto valida todos os hashes, executáveis e DLLs da arquitetura correta.
+Fontes correspondentes do processo GPL Piper/eSpeak e seus patches acompanham
+`sources/`, com licenças em `licenses/`.
+
+O CI compila esses motores em runners nativos Windows x64 e ARM64 antes de
+montar os instaladores. Para reproduzir, execute
+`python scripts/build_local_runtime.py --output artifacts/local-runtime`
+num host da arquitetura desejada com Python 3.11+, Git, CMake 3.26+ e MSVC.
+São requisitos de desenvolvimento; o aplicativo instalado não precisa deles.
+
 Testes portáveis de montagem/validação:
 
 ```sh
@@ -42,4 +58,5 @@ python3 -m unittest discover -s packaging/windows -p 'test_*.py' -v
 O CI x64 usa `.github/scripts/test-windows-package.ps1` para instalar/remover o
 **aplicativo** em um runner descartável, comparar hashes do payload e executar
 `--version`. O script recusa execução fora do ambiente GitHub Actions e não
-instala o driver. ARM64 é inspecionado/compilado sem execução no host x64.
+instala o driver. O driver e o app ARM64 são inspecionados/compilados no host x64; os motores
+ARM64 são compilados e executam `--help` num runner Windows ARM64 nativo.

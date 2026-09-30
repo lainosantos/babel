@@ -46,8 +46,48 @@ jobs:
           python3 -m unittest discover -s packaging/windows -p 'test_*.py' -v
           python3 -m unittest discover -s packaging/macos -p 'test_*.py' -v
           python3 -m unittest discover -s packaging/linux -p 'test_*.py' -v
-  linux:
+          python3 -m unittest discover -s scripts -p test_local_runtime.py -v
+  local-runtime:
     needs: portable
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-22.04
+            name: linux-x86_64
+          - os: macos-15
+            name: macos-aarch64
+          - os: macos-15-intel
+            name: macos-x86_64
+          - os: windows-2022
+            name: windows-x86_64
+          - os: windows-11-arm
+            name: windows-aarch64
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 70
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install build-only CMake
+        run: python -m pip install cmake==3.31.10
+      - name: Build pinned native inference engines without installed AI services
+        run: python scripts/build_local_runtime.py --output artifacts/local-runtime --jobs 3
+      - uses: actions/cache@v4
+        with:
+          path: .tools/inference-test-models
+          key: inference-smoke-models-${{ hashFiles('src/local_runtime/models.json') }}
+      - name: Verify dynamic listeners and actual local inference with synthetic audio
+        run: python scripts/test_bundled_inference.py --runtime-dir artifacts/local-runtime/${{ matrix.name }} --model-cache .tools/inference-test-models
+      - uses: actions/upload-artifact@v4
+        with:
+          name: babel-local-runtime-${{ matrix.name }}
+          path: artifacts/local-runtime/${{ matrix.name }}.tar.gz
+          if-no-files-found: error
+          retention-days: 30
+  linux:
+    needs: [portable, local-runtime]
     runs-on: ubuntu-22.04
     timeout-minutes: 35
     steps:
@@ -66,8 +106,15 @@ jobs:
       - run: cargo build --locked --release --bins
       - name: Check release CLI without audio or user configuration
         run: python3 scripts/test_cli_smoke.py --output-dir artifacts/cli-smoke
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: babel-local-runtime-linux-*
+          merge-multiple: true
+          path: artifacts/runtime-archives
+      - name: Extract and verify bundled inference runtimes
+        run: python scripts/build_local_runtime.py --extract-artifacts artifacts/runtime-archives --output artifacts/local-runtime
       - name: Build and inspect DEB, RPM and portable archive
-        run: python3 packaging/linux/build.py --bin-dir target/release --output artifacts/installers
+        run: python3 packaging/linux/build.py --bin-dir target/release --runtime-dir artifacts/local-runtime --output artifacts/installers
       - uses: actions/upload-artifact@v4
         with:
           name: babel-installers-linux-amd64
@@ -75,7 +122,7 @@ jobs:
           if-no-files-found: error
           retention-days: 30
   macos:
-    needs: portable
+    needs: [portable, local-runtime]
     runs-on: macos-15
     timeout-minutes: 50
     env:
@@ -106,8 +153,15 @@ jobs:
           python3 scripts/test_cli_smoke.py --babel artifacts/universal/babel --output-dir artifacts/cli-smoke
       - name: Build and test universal HAL driver with Apple SDK
         run: python3 native/macos/build.py --unsigned --arch universal --test --pkg
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: babel-local-runtime-macos-*
+          merge-multiple: true
+          path: artifacts/runtime-archives
+      - name: Extract and verify bundled inference runtimes
+        run: python scripts/build_local_runtime.py --extract-artifacts artifacts/runtime-archives --output artifacts/local-runtime
       - name: Build and expand complete application and driver PKG
-        run: python3 packaging/macos/build.py --unsigned --arch universal --bin-dir artifacts/universal --driver-dir native/macos/dist --output artifacts/installers
+        run: python3 packaging/macos/build.py --unsigned --arch universal --runtime-dir artifacts/local-runtime --bin-dir artifacts/universal --driver-dir native/macos/dist --output artifacts/installers
       - name: Publish development installer (no distribution signature)
         uses: actions/upload-artifact@v4
         with:
@@ -119,7 +173,7 @@ jobs:
           if-no-files-found: error
           retention-days: 30
   windows:
-    needs: portable
+    needs: [portable, local-runtime]
     strategy:
       fail-fast: false
       matrix:
@@ -156,8 +210,15 @@ jobs:
       - name: Check x64 release CLI without installing or loading a driver
         if: matrix.architecture == 'x64'
         run: python scripts/test_cli_smoke.py --babel target/${{ matrix.target }}/release/babel.exe --output-dir artifacts/cli-smoke
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: babel-local-runtime-windows-${{ matrix.architecture == 'x64' && 'x86_64' || 'aarch64' }}
+          merge-multiple: true
+          path: artifacts/runtime-archives
+      - name: Extract and verify bundled inference runtimes
+        run: python scripts/build_local_runtime.py --extract-artifacts artifacts/runtime-archives --output artifacts/local-runtime
       - name: Build EXE installer and verify complete portable ZIP
-        run: python packaging/windows/build.py --architecture ${{ matrix.architecture }} --bin-dir target/${{ matrix.target }}/release --driver-dir native/windows/dist/${{ matrix.architecture }} --output artifacts/installers
+        run: python packaging/windows/build.py --runtime-dir artifacts/local-runtime --architecture ${{ matrix.architecture }} --bin-dir target/${{ matrix.target }}/release --driver-dir native/windows/dist/${{ matrix.architecture }} --output artifacts/installers
       - name: Check app and helper runtime dependencies
         shell: pwsh
         run: ./.github/scripts/check-windows-runtime.ps1 -BinaryDirectory target/${{ matrix.target }}/release -DriverDirectory native/windows/dist/${{ matrix.architecture }}

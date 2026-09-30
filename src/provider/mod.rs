@@ -166,9 +166,11 @@ pub fn create_route_provider(
             cloud.endpoint.clone(),
             cloud.transcription_model.clone(),
         )?)),
-        "local" => Ok(Arc::new(
-            local::LocalProvider::new(local.clone())?.with_native_synthesis(native_synthesis),
-        )),
+        "local" => Ok(Arc::new(if native_synthesis {
+            local::LocalProvider::new(local.clone())?
+        } else {
+            local::LocalProvider::translation(local.clone(), false)?
+        })),
         _ => create_provider(kind),
     }
 }

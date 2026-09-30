@@ -320,6 +320,15 @@ fn router(state: DashboardState) -> Router {
             }),
         )
         .route(
+            "/help/local-inference",
+            get(|| async {
+                (
+                    [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
+                    include_str!("../docs/local-inference.md"),
+                )
+            }),
+        )
+        .route(
             "/help/recording",
             get(|| async {
                 (
@@ -611,6 +620,7 @@ async fn status(State(state): State<DashboardState>) -> impl IntoResponse {
         &mut status.routing_error,
         &mut status.microphone.device_error,
         &mut status.speaker.device_error,
+        &mut status.local_runtime.message,
     ]
     .into_iter()
     .flatten()
@@ -666,7 +676,9 @@ async fn start(State(state): State<DashboardState>, headers: HeaderMap, body: By
         Ok(name) => name,
         Err((status, message)) => return api_error(status, message),
     };
-    let _guard = state.mutations.lock().await;
+    // The controller checks the configuration revision again after preparation.
+    // Holding the dashboard mutation lock here would prevent Stop and settings
+    // from cancelling a model download/loading wait.
     operation_result(
         state
             .controller

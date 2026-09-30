@@ -1,0 +1,18 @@
+--- a/tools/server/server.cpp
++++ b/tools/server/server.cpp
+@@ -481,6 +481,15 @@
+ 
+         routes.update_meta(ctx_server);
+         ctx_http.is_ready.store(true);
++        // Babel discovers only the socket already owned by this process.
++        if (ctx_http.listening_addresses.size() == 1 &&
++            ctx_http.listening_addresses[0].rfind("http://127.0.0.1:", 0) == 0) {
++            const json ready = {{"service", "babel-llama"},
++                {"endpoint", ctx_http.listening_addresses[0] + "/v1/chat/completions"},
++                {"port", ctx_http.port}};
++            printf("BABEL_SERVICE_READY %s\n", ready.dump().c_str());
++            fflush(stdout);
++        }
+ 
+         SRV_INF("%s", "model loaded\n");
+ 

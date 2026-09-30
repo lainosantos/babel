@@ -6,7 +6,7 @@ the BabelAudio driver package from `native/macos/build.py`. It creates
 `SHA256SUMS.txt` and `manifest.json`. Both components are mandatory in the
 installer; it retains the driver package's original installation scripts.
 
-Run packaging on macOS with Python 3.9+ and the Xcode command-line tools.
+Run packaging on macOS with Python 3.11+ and the Xcode command-line tools.
 Install Rust and both target standard libraries beforehand when making a
 universal build. The application requires macOS 14.2 or later. Its two Mach-O
 executables must contain exactly the requested architectures and must not
@@ -31,9 +31,16 @@ for binary in babel babel-tray; do
 done
 python3 native/macos/build.py --unsigned --arch universal --test --pkg
 python3 packaging/macos/build.py --unsigned --arch universal \
+  --runtime-dir artifacts/local-runtime \
   --bin-dir packaging/macos/universal-bin \
   --driver-dir native/macos/dist --output packaging/macos/dist --version 0.1.0
 ```
+
+Build `scripts/build_local_runtime.py --output artifacts/local-runtime` on each
+native Mac architecture, or extract the two runtime artifacts produced by CI.
+The universal app contains both `macos-aarch64` and `macos-x86_64` directories;
+they are separate native engines, not binaries requiring Rosetta. The builder
+needs CMake 3.26+, Git and a C++17 compiler; users need none of those tools.
 
 Omit `--version` to read the root Cargo.toml package version. Numeric `X.Y.Z`
 versions are accepted. `--arch arm64` or `--arch x86_64` can package a single
@@ -86,11 +93,20 @@ The bundle includes:
 - `Contents/Resources/drivers/macos/BabelAudio.pkg` and `uninstall.sh`, matching
   the native-device discovery paths used by the application;
 - driver licenses/instructions and the repository's `docs/*.md` guides;
+- `Contents/Resources/local-runtime/macos-{aarch64,x86_64}` with Whisper,
+  llama.cpp, Piper, ONNX Runtime, eSpeak data and their licenses. CPU backends
+  and Metal are included; no Homebrew or separately installed AI daemon is used;
+- complete corresponding Piper/eSpeak source archives, patches and build
+  instructions in each runtime's `sources/` directory;
 - `Contents/Resources/Support/scripts/` with Whisper setup, the Needle bridge
   and the pinned Whisper port-discovery patch.
 
-Support scripts are inert. No Python runtime, model, API key, user TOML or
-recording is included. To prepare voice commands explicitly after installation:
+The translation and transcription engines start through Babel when selected.
+Weights are verified and downloaded by the application on first use, outside
+its immutable signed bundle. Native executables and libraries are signed before
+the outer app, and payload hashes are regenerated after signing. No Python,
+API key, user TOML or recording is included. The separate Needle command agent
+still has its own setup. To prepare those command services explicitly:
 
 ```sh
 mkdir -p "$HOME/Library/Application Support/Babel"
@@ -131,6 +147,7 @@ First rebuild/sign the driver with `native/macos/build.py --sign-identity ...
 
 ```sh
 python3 packaging/macos/build.py --arch universal \
+  --runtime-dir artifacts/local-runtime \
   --bin-dir packaging/macos/universal-bin --driver-dir native/macos/dist \
   --sign-identity 'Developer ID Application: YOUR ORGANIZATION (TEAMID)' \
   --installer-identity 'Developer ID Installer: YOUR ORGANIZATION (TEAMID)' \

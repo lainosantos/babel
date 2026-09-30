@@ -4,7 +4,7 @@
   const byId = (id) => document.getElementById(id);
   const routeNames = ['microphone', 'speaker'];
   const form = byId('configuration');
-  const state = { config: null, configRevision: null, configConflict: false, syncing: false, activity: 0, devices: [], status: null, autostart: null, platform: null, platformError: null, interface: null, busy: false, dirty: false, authenticated: false, polling: false, libraryBusy: false, libraryRoute: null, voices: { gemini: [], elevenlabs: [] } };
+  const state = { config: null, configRevision: null, configConflict: false, syncing: false, activity: 0, devices: [], status: null, autostart: null, platform: null, platformError: null, interface: null, busy: false, dirty: false, authenticated: false, polling: false, libraryBusy: false, starting: false, cancelStarting: false, startCancelled: false, libraryRoute: null, voices: { gemini: [], elevenlabs: [] } };
   const i18n = window.BabelI18n;
   const t = (key, values) => i18n.t(key, values);
   const filePathPreview = { revision: 0, timer: null, controller: null, phase: 'idle', paths: null, error: '' };
@@ -105,6 +105,123 @@
     return config[element.dataset.route || element.dataset.section];
   }
 
+  function managedEndpoint(id) { return byId(id).value === 'auto'; }
+
+  function syncLocalModes() {
+    document.querySelectorAll('[data-managed-mode]').forEach(select => {
+      const endpoint = byId(select.dataset.managedMode);
+      select.value = endpoint.value === 'auto' ? 'auto' : 'external';
+      delete endpoint.dataset.externalDraft;
+    });
+    updateLocalControls();
+  }
+
+  function updateLocalControls() {
+    document.querySelectorAll('[data-managed-mode]').forEach(select => {
+      const endpoint = byId(select.dataset.managedMode);
+      const managed = managedEndpoint(endpoint.id);
+      document.querySelector(`[data-external-endpoint="${endpoint.id}"]`).hidden = managed;
+      endpoint.disabled = managed;
+    });
+    const managedWhisper = managedEndpoint('stt-profile-whisper-endpoint');
+    document.querySelectorAll('[data-whisper-external]').forEach(group => {
+      group.hidden = managedWhisper;
+      group.querySelectorAll('input, button').forEach(control => { control.disabled = managedWhisper; });
+    });
+    byId('stt-profile-whisper-model').disabled = !managedWhisper;
+    byId('profile-local-whisper_model').disabled = !managedEndpoint('profile-local-whisper_endpoint');
+    byId('profile-local-translation_model').readOnly = managedEndpoint('profile-local-ollama_endpoint');
+    byId('profile-local-translation_api').disabled = managedEndpoint('profile-local-ollama_endpoint');
+    byId('profile-local-translation_api').closest('label').hidden = managedEndpoint('profile-local-ollama_endpoint');
+    validateLocalDirectory();
+    renderLocalRuntime();
+  }
+
+  function validateLocalDirectory() {
+    const field = byId('local-runtime-directory');
+    const value = field.value;
+    const os = platformOs();
+    const windowsAbsolute = /^[a-z]:[\\/]/i.test(value)
+      || /^\\\\\?\\[a-z]:\\/i.test(value)
+      || /^\\\\\?\\UNC\\[^\\]+\\[^\\]+(?:\\|$)/i.test(value)
+      || /^[\\/]{2}(?![?.](?:[\\/]|$))[^\\/]+[\\/][^\\/]+(?:[\\/]|$)/.test(value);
+    const absolute = os === 'windows' ? windowsAbsolute : os === 'unknown' ? windowsAbsolute || value.startsWith('/') : value.startsWith('/');
+    const error = value && (!absolute || value.includes('\0'))
+      ? t(os === 'windows' ? 'files.base_absolute_windows' : os === 'unknown' ? 'files.base_absolute_unknown' : 'files.base_absolute_unix') : '';
+    field.setCustomValidity(error);
+    field.setAttribute('aria-invalid', String(Boolean(error)));
+    byId('local-runtime-directory-error').textContent = error;
+    byId('local-runtime-directory-error').hidden = !error;
+  }
+
+  function renderLocalRuntime() {
+    const runtime = state.status?.local_runtime;
+    const phase = ['idle', 'preparing', 'ready', 'error'].includes(runtime?.phase) ? runtime.phase : 'idle';
+    const selected = {
+      translation: routeNames.some(route => routeProvider(route) === 'local') && ['whisper_endpoint', 'ollama_endpoint', 'piper_endpoint'].some(field => managedEndpoint(`profile-local-${field}`)),
+      transcription: routeNames.some(route => sttProvider(route) === 'whisper') && managedEndpoint('stt-profile-whisper-endpoint'),
+      settings: true,
+    };
+    for (const box of document.querySelectorAll('[data-local-runtime]')) {
+      box.hidden = !selected[box.dataset.localRuntime];
+      box.dataset.phase = phase;
+      box.setAttribute('aria-busy', String(phase === 'preparing'));
+      const setText = (selector, content) => { const node = box.querySelector(selector); if (node.textContent !== content) node.textContent = content; };
+      setText('[data-local-runtime-label]', t(`local.${phase}`));
+      setText('[data-local-runtime-summary]', t(`local.${phase}_hint`));
+      const problem = box.querySelector('[data-local-runtime-error]');
+      const detail = phase === 'error' && typeof runtime?.message === 'string' ? runtime.message : '';
+      if (problem.textContent !== detail) problem.textContent = detail;
+      problem.hidden = !detail;
+      const download = runtime?.download;
+      const showDownload = phase === 'preparing' && download && Number.isFinite(download.received) && download.received >= 0;
+      box.querySelector('[data-local-runtime-download]').hidden = !showDownload;
+      const progress = box.querySelector('progress');
+      if (showDownload) {
+        const total = Number.isFinite(download.total) && download.total > 0 ? download.total : null;
+        const received = Math.min(download.received, total || Infinity);
+        const percent = total ? Math.round(received / total * 100) : null;
+        if (total) progress.value = received / total; else progress.removeAttribute('value');
+        setText('[data-local-runtime-download-label]', t(total ? 'local.download_known' : 'local.download_unknown', {
+          name: typeof download.name === 'string' ? download.name : 'Model',
+          received: i18n.number(received / 1048576, { maximumFractionDigits: 1 }),
+          total: total ? i18n.number(total / 1048576, { maximumFractionDigits: 1 }) : '',
+          percent: percent == null ? '' : i18n.number(percent),
+        }));
+      }
+    }
+  }
+
+  document.querySelectorAll('[data-managed-mode]').forEach(select => select.addEventListener('input', () => {
+    const endpoint = byId(select.dataset.managedMode);
+    if (select.value === 'auto') {
+      if (endpoint.value !== 'auto') endpoint.dataset.externalDraft = endpoint.value;
+      endpoint.value = 'auto';
+      if (endpoint.id === 'profile-local-ollama_endpoint') {
+        const model = byId('profile-local-translation_model');
+        model.dataset.externalDraft = model.value;
+        model.value = 'qwen3-0.6b';
+      }
+      if (endpoint.id === 'profile-local-piper_endpoint') {
+        const voice = byId('profile-local-piper_voice');
+        voice.dataset.externalDraft = voice.value;
+        voice.value = 'auto';
+      }
+    } else {
+      endpoint.value = endpoint.dataset.externalDraft || '';
+      if (endpoint.id === 'profile-local-ollama_endpoint') {
+        const model = byId('profile-local-translation_model');
+        model.value = model.dataset.externalDraft || model.value;
+      }
+      if (endpoint.id === 'profile-local-piper_endpoint') {
+        const voice = byId('profile-local-piper_voice');
+        voice.value = voice.dataset.externalDraft ?? (voice.value === 'auto' ? '' : voice.value);
+      }
+    }
+    updateLocalControls();
+    endpoint.dispatchEvent(new Event('input', { bubbles: true }));
+  }));
+
   function routeProvider(route) { return byId(`${route}-provider`).value; }
   function profileValue(provider, field) { return byId(`profile-${provider}-${field}`)?.value || ''; }
   function sttProfileValue(provider, field) { return byId(`stt-profile-${provider}-${field}`)?.value || ''; }
@@ -138,15 +255,18 @@
 
   function applyConfig(config) {
     if (!config.providers) throw new Error(t("ui.these_settings_use_an_old_format_restart_the_updated_babel_to_load_provider"));
+    config.local_runtime ??= { directory: '', threads: 4 };
     state.config = config;
     writeValue(byId('files-base_path'), config.files?.base_path ?? '');
     document.querySelectorAll('[data-field]').forEach((element) => {
       const container = fieldContainer(config, element);
       delete element.dataset.savedSource;
       delete element.dataset.savedVoice;
+      delete element.dataset.externalDraft;
       if (container && Object.hasOwn(container, element.dataset.field)) writeValue(element, container[element.dataset.field]);
       if (element.dataset.deviceDirection) delete element.dataset.initialized;
     });
+    syncLocalModes();
     renderDevices();
     updateProviderControls();
     updateGainLabels();
@@ -334,6 +454,7 @@
       platformText('device-external-guide', `platform.${os}_install`);
       byId('device-external-guide').href = '/help/native-drivers';
     }
+    validateLocalDirectory();
     renderNativeDeviceGuide(os);
     renderPlatformEndpoints(); updateControls();
   }
@@ -355,7 +476,7 @@
       options.replaceChildren();
       if (engine !== 'native') for (const voice of state.voices[provider] || []) options.append(new Option(`${voice.name} · ${voiceKind(voice.kind)}`, voice.id));
       if (engine === 'native') {
-        const defaults = provider === 'gemini' ? ['Kore', 'Puck', 'Charon', 'Fenrir', 'Aoede'] : provider === 'openai' ? ['marin', 'cedar', 'alloy', 'ash', 'coral', 'sage', 'verse'] : [];
+        const defaults = provider === 'gemini' ? ['Kore', 'Puck', 'Charon', 'Fenrir', 'Aoede'] : provider === 'openai' ? ['marin', 'cedar', 'alloy', 'ash', 'coral', 'sage', 'verse'] : provider === 'local' && managedEndpoint('profile-local-piper_endpoint') ? ['en_US-lessac-medium', 'pt_BR-faber-medium', 'es_ES-davefx-medium', 'fr_FR-siwis-medium', 'de_DE-thorsten-medium', 'it_IT-paola-medium', 'zh_CN-huayan-medium'] : [];
         for (const name of defaults) options.append(new Option(name, name));
       }
     }
@@ -407,6 +528,7 @@
         && (!transcribesRoute(route) || sttProvider(route) === 'whisper');
     });
     byId('footer-state').textContent = local ? t("ui.session_configured_for_local_processing") : t("ui.session_configured_with_cloud_providers");
+    updateLocalControls();
     updateTranscriptionControls();
     renderVoiceOptions();
     renderSignalPaths();
@@ -416,7 +538,7 @@
     for (const route of routeNames) byId(`stt-${route}-language`).required = transcribesRoute(route);
     for (const provider of ['gemini', 'openai', 'deepgram', 'whisper']) {
       const used = routeNames.some(route => transcribesRoute(route) && sttProvider(route) === provider);
-      byId(`stt-profile-${provider}-endpoint`).required = used && provider !== 'openai';
+      byId(`stt-profile-${provider}-endpoint`).required = used && provider !== 'openai' && !(provider === 'whisper' && managedEndpoint('stt-profile-whisper-endpoint'));
       byId(`stt-profile-${provider}-api_key_env`).required = used && provider !== 'whisper';
       const model = byId(`stt-profile-${provider}-model`);
       if (model) model.required = used;
@@ -475,10 +597,12 @@
     byId('interface-language').disabled = state.busy || state.syncing || !state.authenticated;
     byId('settings').disabled = running || unavailable;
     byId('session-name').disabled = running || unavailable;
-    byId('save').disabled = running || unavailable || !state.dirty || state.configConflict;
+    byId('save').disabled = running || unavailable || (!state.dirty && state.status?.local_runtime?.phase !== 'error') || state.configConflict;
     byId('start').disabled = running || unavailable || state.configConflict || !processingSelected;
     byId('reload-config').disabled = state.busy || state.syncing || !state.authenticated;
-    byId('start').hidden = running;
+    byId('start').hidden = running || state.starting;
+    byId('cancel-start').hidden = !state.starting;
+    byId('cancel-start').disabled = state.cancelStarting || !state.authenticated;
     byId('stop').hidden = !running;
     byId('stop').disabled = state.busy || !state.authenticated;
     byId('install-devices').disabled = running || unavailable || !managesVirtualDevices();
@@ -502,6 +626,8 @@
         ? t("ui.settings_changed_outside_this_dashboard_reload_saved_settings_before_saving")
       : running
         ? t("ui.session_active_end_it_to_change_settings_physical_devices_can_be_switched_f")
+      : state.status?.local_runtime?.phase === 'preparing'
+        ? t('local.preparing_session')
       : !processingSelected
         ? t("ui.original_audio_routing_works_without_a_session_enable_translation_transcrip")
         : state.dirty
@@ -511,6 +637,7 @@
 
   function renderStatus(status) {
     state.status = status;
+    renderLocalRuntime();
     const sessionIdentity = status.session_name || status.session_id;
     const sessionLabel = sessionIdentity ? t(status.running ? 'session.identity' : 'session.previous', { name: sessionIdentity }) : '';
     if (byId('session-identity').textContent !== sessionLabel) byId('session-identity').textContent = sessionLabel;
@@ -548,14 +675,14 @@
   }
 
   async function pollStatus() {
-    if (!state.authenticated || state.polling || state.busy || state.syncing || document.hidden) return;
+    if (!state.authenticated || state.polling || (state.busy && !state.starting) || state.syncing || document.hidden) return;
     state.polling = true;
     const activity = state.activity;
     try {
       const status = await api('/status');
-      if (state.busy || state.activity !== activity) return;
+      if ((state.busy && !state.starting) || state.activity !== activity) return;
       renderStatus(status);
-      await synchronizeConfig(status);
+      if (!state.starting) await synchronizeConfig(status);
     } catch (error) {
       byId('session-state').textContent = t("ui.disconnected");
       byId('status-dot').className = 'status-dot error';
@@ -590,7 +717,8 @@
     if (!event.target.matches('[data-field]')) return;
     state.dirty = true;
     updateGainLabels();
-    if (['provider', 'enabled', 'engine', 'model'].includes(event.target.dataset.field) || event.target.dataset.section === 'transcription' || event.target.dataset.transcriptionProfile) updateProviderControls();
+    if (['provider', 'enabled', 'engine', 'model'].includes(event.target.dataset.field) || event.target.dataset.section === 'transcription' || event.target.dataset.transcriptionProfile || event.target.dataset.profile === 'local') updateProviderControls();
+    if (event.target.dataset.section === 'local_runtime') validateLocalDirectory();
     if (event.target.id === 'audio-quality') updateQualityHint();
     if (['files-base_path', 'transcription-directory', 'recording-directory'].includes(event.target.id)) scheduleFilePathPreview();
     updateControls();
@@ -613,10 +741,28 @@
     const name = byId('session-name').value.trim();
     action(async () => {
       if (state.dirty) await saveConfig();
-      await api('/start', { method: 'POST', revision: state.configRevision, ...(name ? { body: { name } } : {}) });
+      state.starting = true;
+      state.startCancelled = false;
+      updateControls();
+      try { await api('/start', { method: 'POST', revision: state.configRevision, timeout: 1800000, ...(name ? { body: { name } } : {}) }); }
+      catch (error) { if (!state.startCancelled) throw error; }
+      finally { state.starting = false; }
+      if (state.startCancelled) return;
       renderStatus(await api('/status'));
       announce(t("ui.session_started_with_the_selected_features_original_audio_continues_on_rout"));
     });
+  });
+  byId('cancel-start').addEventListener('click', async () => {
+    if (!state.starting || state.cancelStarting) return;
+    state.cancelStarting = true;
+    state.startCancelled = true;
+    updateControls();
+    try {
+      await api('/stop', { method: 'POST' });
+      renderStatus(await api('/status'));
+      announce(t('local.start_cancelled'));
+    } catch (error) { state.startCancelled = false; showError(error.message); }
+    finally { state.cancelStarting = false; updateControls(); }
   });
   byId('stop').addEventListener('click', () => action(async () => {
     await api('/stop', { method: 'POST' });
@@ -670,6 +816,7 @@
 
   async function refreshCredentialStatus(provider, stt = false) {
     if ((!stt && provider === 'local') || !state.authenticated) return;
+    if (stt && provider === 'whisper' && managedEndpoint('stt-profile-whisper-endpoint')) return;
     const value = stt ? sttProfileValue : profileValue;
     const prefix = stt ? 'stt-' : '';
     const environment = value(provider, 'api_key_env');
@@ -701,7 +848,7 @@
     byId(`stt-profile-${provider}-api_key_env`).addEventListener('change', () => refreshCredentialStatus(provider, true));
   }
   document.querySelectorAll('[data-stt-route-profile]').forEach(button => button.addEventListener('click', () => {
-    const field = byId(`stt-profile-${sttProvider(button.dataset.sttRouteProfile)}-${sttProvider(button.dataset.sttRouteProfile) === 'whisper' ? 'endpoint' : 'model'}`);
+    const field = byId(`stt-profile-${sttProvider(button.dataset.sttRouteProfile)}-model`);
     window.BabelWorkspace?.revealField(field);
   }));
   document.querySelectorAll('.credential-apply, .stt-credential-apply').forEach(button => button.addEventListener('click', () => action(async () => {
