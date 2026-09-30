@@ -293,27 +293,41 @@ async fn callback_without_valid_pending_state_is_rejected() {
     );
     assert!(!client.oauth_status("fixture").await);
 }
-#[cfg(unix)]
 #[tokio::test]
 async fn stdio_initializes_lists_and_calls_local_fixture() {
     let dir = tempfile::tempdir().unwrap();
-    let script = dir.path().join("mcp.py");
+    let working_directory = dir.path().join("working directory");
+    std::fs::create_dir(&working_directory).unwrap();
+    let script = dir.path().join("mcp fixture.py");
     std::fs::write(&script, r#"import sys,json,os
 for line in sys.stdin:
     q=json.loads(line)
     method=q.get('method','')
     if method=='initialize': r={'protocolVersion':'2025-11-25','capabilities':{'tools':{}},'serverInfo':{'name':'fixture','version':'1'}}
     elif method=='tools/list': r={'tools':[{'name':'echo','inputSchema':{'type':'object'}}]}
-    elif method=='tools/call': r={'content':[{'type':'text','text':os.environ.get('TEST_SECRET','missing')}],'isError':False}
+    elif method=='tools/call':
+        values={'secret':os.environ.get('TEST_SECRET','missing'),'public':os.environ.get('TEST_PUBLIC','missing'),'empty':os.environ.get('TEST_EMPTY','missing'),'args':sys.argv[1:],'cwd':os.getcwd()}
+        r={'content':[{'type':'text','text':json.dumps(values)}],'isError':False}
     else: continue
     print(json.dumps({'jsonrpc':'2.0','id':q['id'],'result':r}),flush=True)
 "#).unwrap();
     let reference = "BABEL_MCP_TEST_STDIO_SECRET_8439";
     credentials::set(reference, "mapped-secret".into()).unwrap();
+    let literal_argument = "$(echo should-not-expand) ; & %PATH%";
     let config = McpIntegration {
         id: "stdio-test".into(),
-        command: "python3".into(),
-        args: vec![script.display().to_string()],
+        command: if cfg!(windows) { "python" } else { "python3" }.into(),
+        args: vec![
+            script.display().to_string(),
+            "--root".into(),
+            "folder with spaces".into(),
+            literal_argument.into(),
+        ],
+        cwd: working_directory.display().to_string(),
+        env: BTreeMap::from([
+            ("TEST_PUBLIC".into(), "configured value".into()),
+            ("TEST_EMPTY".into(), String::new()),
+        ]),
         secret_env: BTreeMap::from([("TEST_SECRET".into(), reference.into())]),
         ..Default::default()
     };
@@ -321,7 +335,20 @@ for line in sys.stdin:
         .call_tool(&config, "echo", json!({}), &CancellationToken::new())
         .await
         .unwrap();
-    assert_eq!(result.content[0]["text"], "mapped-secret");
+    let values: Value = serde_json::from_str(result.content[0]["text"].as_str().unwrap()).unwrap();
+    assert_eq!(values["secret"], "mapped-secret");
+    assert_eq!(values["public"], "configured value");
+    assert_eq!(values["empty"], "");
+    assert_eq!(
+        values["args"],
+        json!(["--root", "folder with spaces", literal_argument])
+    );
+    assert_eq!(
+        std::path::Path::new(values["cwd"].as_str().unwrap())
+            .canonicalize()
+            .unwrap(),
+        working_directory.canonicalize().unwrap()
+    );
     credentials::clear(reference).unwrap();
 }
 

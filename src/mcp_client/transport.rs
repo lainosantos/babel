@@ -155,6 +155,8 @@ impl ChildTransport {
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
             .kill_on_drop(true);
+        #[cfg(windows)]
+        command.creation_flags(0x0800_0000); // CREATE_NO_WINDOW, via safe Tokio API.
         if !config.cwd.is_empty() {
             command.current_dir(&config.cwd);
         }

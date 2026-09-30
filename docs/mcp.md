@@ -37,6 +37,21 @@ Uma integração mal configurada retorna uma falha visível. Os erros da camada 
 
 ## Exemplo local com stdio
 
+Na interface, abra **Comandos → Integrações MCP → Adicionar integração** e
+selecione **Conexão → Processo local · stdio**. Preencha:
+
+- **Caminho do executável ou comando:** somente o executável do servidor, ou seu
+  runtime, como `node`, `python3` ou o caminho completo de `node.exe` no Windows.
+- **Argumentos:** um argumento por linha. Um caminho com espaços ocupa uma única
+  linha; não adicione aspas de shell ao redor dele.
+- **Diretório de trabalho:** opcional, usado como pasta de execução do processo.
+- **Valores públicos de ambiente:** uma entrada `NOME=valor` por linha. Para
+  chaves e tokens, use o mapa em **Referências secretas de ambiente (NOME=REFERÊNCIA)**.
+
+Salve os ajustes do agente e clique em **Descobrir ferramentas** para testar a conexão e listar as
+ferramentas. O Babel inicia o servidor local automaticamente ao usá-lo; stdio
+não requer URL nem porta. Essa opção está disponível em Linux, macOS e Windows.
+
 Trecho de `babel.toml`; adapte os caminhos para o pacote MCP instalado. Executável e argumentos são campos separados; não escreva uma linha de shell em `command`.
 
 ```toml
