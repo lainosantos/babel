@@ -112,12 +112,43 @@ def collect(source: Path, output: Path, tag: str) -> int:
     return len(manifest["files"])
 
 
+
+def validate_draft(state_path: Path, assets_directory: Path, tag: str) -> None:
+    """Allow resumable uploads, without publishing unrelated existing assets."""
+    state = json.loads(state_path.read_text(encoding="utf-8"))
+    if not isinstance(state, dict) or type(state.get("isDraft")) is not bool:
+        raise ValueError("Invalid remote release state")
+    if not state["isDraft"]:
+        raise ValueError("Release already published; existing assets are immutable to this workflow")
+    if state.get("tagName") != tag or not isinstance(state.get("assets"), list):
+        raise ValueError("Remote draft tag or asset inventory is invalid")
+    expected = set()
+    for path in assets_directory.iterdir():
+        if path.is_symlink() or not path.is_file() or path.stat().st_size == 0:
+            raise ValueError("Prepared release assets must be nonempty regular files")
+        expected.add(path.name)
+    if not RESERVED.issubset(expected):
+        raise ValueError("Prepared release assets are missing the manifest or checksums")
+    remote = []
+    for asset in state["assets"]:
+        if not isinstance(asset, dict) or not isinstance(asset.get("name"), str):
+            raise ValueError("Invalid remote draft asset name")
+        remote.append(asset["name"])
+    unexpected = set(remote).difference(expected)
+    if unexpected:
+        raise ValueError("Draft contains unexpected assets; nothing was changed: " + ", ".join(sorted(unexpected)))
+    if len(remote) != len(set(remote)):
+        raise ValueError("Remote draft contains duplicate asset names")
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--tag", required=True)
     parser.add_argument("--cargo", type=Path, default=Path("Cargo.toml"))
     parser.add_argument("--source", type=Path)
     parser.add_argument("--output", type=Path)
+    parser.add_argument("--draft-state", type=Path, help="gh release view JSON for an existing draft")
+    parser.add_argument("--assets", type=Path, help="prepared release asset directory for draft validation")
     args = parser.parse_args()
     try:
         version, prerelease = validate_tag(args.tag, args.cargo)
@@ -125,6 +156,11 @@ def main() -> int:
             if not (args.source and args.output):
                 raise ValueError("--source and --output are required together")
             print(f"Collected {collect(args.source, args.output, args.tag)} installer/runtime files.")
+        if args.draft_state or args.assets:
+            if not (args.draft_state and args.assets):
+                raise ValueError("--draft-state and --assets are required together")
+            validate_draft(args.draft_state, args.assets, args.tag)
+            print("Existing draft contains only expected assets; upload may resume.")
         if destination := os.environ.get("GITHUB_OUTPUT"):
             with open(destination, "a", encoding="utf-8") as stream:
                 stream.write(f"version={version}\nprerelease={str(prerelease).lower()}\n")

@@ -1,6 +1,8 @@
 from pathlib import Path
 import json
 import tempfile
+import subprocess
+import sys
 import unittest
 
 import release_assets as release
@@ -75,6 +77,61 @@ class ReleaseAssetsTests(unittest.TestCase):
         rpm.unlink()
         with self.assertRaisesRegex(ValueError, "Missing .rpm package"):
             release.collect(source, self.root / "release", "v1.2.3")
+
+
+    def draft_fixture(self):
+        source = self.fixtures()
+        assets = self.root / "release"
+        release.collect(source, assets, "v1.2.3")
+        state_path = self.root / "draft.json"
+        state = {"isDraft": True, "tagName": "v1.2.3", "assets": []}
+        return assets, state_path, state
+
+    def test_empty_partial_and_complete_drafts_are_resumable(self):
+        assets, state_path, state = self.draft_fixture()
+        names = sorted(path.name for path in assets.iterdir())
+        for subset in [[], names[:2], names]:
+            with self.subTest(names=subset):
+                state["assets"] = [{"name": name} for name in subset]
+                state_path.write_text(json.dumps(state))
+                release.validate_draft(state_path, assets, "v1.2.3")
+
+    def test_unexpected_draft_assets_are_rejected_without_changing_any_files(self):
+        assets, state_path, state = self.draft_fixture()
+        state["assets"] = [{"name": "SHA256SUMS.txt"}, {"name": "old-installer.exe"}]
+        state_path.write_text(json.dumps(state))
+        before = {path: path.read_bytes() for path in [state_path, *assets.iterdir()]}
+        with self.assertRaisesRegex(ValueError, "unexpected assets.*old-installer.exe"):
+            release.validate_draft(state_path, assets, "v1.2.3")
+        self.assertEqual(before, {path: path.read_bytes() for path in before})
+        self.assertEqual(set(assets.iterdir()), set(before).difference({state_path}))
+
+    def test_published_release_and_invalid_draft_metadata_are_rejected(self):
+        assets, state_path, state = self.draft_fixture()
+        for update, message in [
+            ({"isDraft": False}, "already published"),
+            ({"isDraft": "true"}, "Invalid remote release state"),
+            ({"tagName": "v1.2.4"}, "tag or asset inventory"),
+            ({"assets": None}, "tag or asset inventory"),
+            ({"assets": [{}]}, "Invalid remote draft asset name"),
+        ]:
+            with self.subTest(update=update):
+                state_path.write_text(json.dumps(state | update))
+                with self.assertRaisesRegex(ValueError, message):
+                    release.validate_draft(state_path, assets, "v1.2.3")
+
+    def test_draft_validation_cli_fails_before_upload_on_unexpected_assets(self):
+        assets, state_path, state = self.draft_fixture()
+        command = [sys.executable, str(Path(release.__file__).resolve()),
+                   "--tag", "v1.2.3", "--cargo", str(self.cargo),
+                   "--draft-state", str(state_path), "--assets", str(assets)]
+        state_path.write_text(json.dumps(state))
+        self.assertEqual(subprocess.run(command, capture_output=True).returncode, 0)
+        state["assets"] = [{"name": "unverified.zip"}]
+        state_path.write_text(json.dumps(state))
+        result = subprocess.run(command, capture_output=True, text=True)
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("unexpected assets", result.stdout)
 
 
 if __name__ == "__main__":
