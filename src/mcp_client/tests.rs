@@ -15,6 +15,8 @@ use std::sync::{
 #[derive(Default)]
 struct Fixture {
     calls: AtomicUsize,
+    call_started: tokio::sync::Notify,
+    call_released: tokio::sync::Notify,
     mode: &'static str,
     authenticated: bool,
 }
@@ -42,6 +44,8 @@ async fn rpc(
         },
         "tools/call" => {
             state.calls.fetch_add(1, Ordering::Relaxed);
+            state.call_started.notify_one();
+            if state.mode == "cancel" { state.call_released.notified().await; }
             if state.mode == "expired" { return StatusCode::NOT_FOUND.into_response(); }
             if state.mode == "slow" { tokio::time::sleep(Duration::from_secs(3)).await; }
             json!({"content":[{"type":"text","text":"done"}],"isError":state.mode == "error"})
@@ -263,23 +267,30 @@ async fn expired_session_does_not_repeat_tool_side_effects() {
 }
 #[tokio::test]
 async fn cancelled_call_returns_without_retry() {
-    let (config, state, task) = fixture("slow", false).await;
+    let (config, state, task) = fixture("cancel", false).await;
+    let client = McpClient::new();
     let cancel = CancellationToken::new();
-    let cancel_child = cancel.clone();
-    let canceller = tokio::spawn(async move {
-        tokio::time::sleep(Duration::from_millis(150)).await;
-        cancel_child.cancel();
-    });
+    let call = client.call_tool(&config, "echo", json!({"text":"x"}), &cancel);
+    tokio::pin!(call);
+    // Connection setup (including synchronous TLS roots loading) is not
+    // cancellation latency. Wait until the fixture actually receives the call.
+    tokio::select! {
+        result = &mut call => panic!("call ended before cancellation: {result:?}"),
+        started = tokio::time::timeout(Duration::from_secs(10), state.call_started.notified()) => {
+            started.expect("fixture did not receive the tool call");
+        }
+    }
     let now = Instant::now();
+    cancel.cancel();
     assert!(
-        McpClient::new()
-            .call_tool(&config, "echo", json!({"text":"x"}), &cancel)
+        tokio::time::timeout(Duration::from_secs(1), call)
             .await
+            .expect("cancelled call did not return promptly")
             .is_err()
     );
     assert!(now.elapsed() < Duration::from_secs(1));
     assert_eq!(state.calls.load(Ordering::Relaxed), 1);
-    canceller.await.unwrap();
+    state.call_released.notify_one();
     task.abort();
 }
 #[tokio::test]
