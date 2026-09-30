@@ -33,7 +33,7 @@ python3 native/macos/build.py --unsigned --arch universal --test --pkg
 python3 packaging/macos/build.py --unsigned --arch universal \
   --runtime-dir artifacts/local-runtime \
   --bin-dir packaging/macos/universal-bin \
-  --driver-dir native/macos/dist --output packaging/macos/dist --version 0.1.0
+  --driver-dir native/macos/dist --output packaging/macos/dist --version 1.0.0
 ```
 
 Build `scripts/build_local_runtime.py --output artifacts/local-runtime` on each

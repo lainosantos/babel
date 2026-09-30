@@ -40,6 +40,18 @@ try {
 } finally { $env:RUSTFLAGS=$previousFlags }
 $packages=@(Get-ChildItem $source -Filter BabelAudio.cat -Recurse | Where-Object { (Test-Path (Join-Path $_.DirectoryName 'BabelAudio.inf')) -and (Test-Path (Join-Path $_.DirectoryName 'BabelAudio.sys')) })
 if ($packages.Count -ne 1) { throw "Expected one complete WDK package, found $($packages.Count). Inspect $build" }
+$release=Get-Content (Join-Path $source 'driver-version.json') -Raw | ConvertFrom-Json
+$inf=Get-Content (Join-Path $packages[0].DirectoryName 'BabelAudio.inf') -Raw
+$versionLine=[regex]::Match($inf,'(?mi)^\s*DriverVer\s*=\s*([0-9]{1,2}/[0-9]{1,2}/[0-9]{4})\s*,\s*([0-9]+(?:\.[0-9]+){3})\s*$')
+if (!$versionLine.Success -or [Version]$versionLine.Groups[2].Value -ne [Version]$release.version -or [datetime]::ParseExact($versionLine.Groups[1].Value,'M/d/yyyy',[Globalization.CultureInfo]::InvariantCulture) -ne [datetime]::ParseExact($release.date,'MM/dd/yyyy',[Globalization.CultureInfo]::InvariantCulture)) {
+    throw 'The WDK changed the declared driver date/version; no package will be published.'
+}
+$resource=[Diagnostics.FileVersionInfo]::GetVersionInfo((Join-Path $packages[0].DirectoryName 'BabelAudio.sys'))
+$fileVersion=[Version]::new($resource.FileMajorPart,$resource.FileMinorPart,$resource.FileBuildPart,$resource.FilePrivatePart)
+$productVersion=[Version]::new($resource.ProductMajorPart,$resource.ProductMinorPart,$resource.ProductBuildPart,$resource.ProductPrivatePart)
+if ($fileVersion -ne [Version]$release.version -or $productVersion -ne [Version]$release.version) {
+    throw 'Driver PE file/product versions do not match the declared INX version.'
+}
 $dist=Join-Path $root "dist\$Architecture"
 if (Test-Path $dist) { throw "Package already exists at $dist; archive it before publishing another build." }
 New-Item -ItemType Directory -Path $dist | Out-Null

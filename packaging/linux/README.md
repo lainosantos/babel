@@ -25,12 +25,12 @@ prereleases such as `1.2.3-rc.1` become `1.2.3~rc.1` in DEB and RPM packages,
 sorting before the final version. This local packager capability is broader than
 the automated cross-platform release workflow, which accepts stable `vX.Y.Z`
 tags. `SOURCE_DATE_EPOCH` controls file timestamps; without it, timestamps are
-zero. For version `0.1.0`, outputs are:
+zero. For version `1.0.0`, outputs are:
 
-- `babel-audio_0.1.0_amd64.deb`;
-- `babel-audio-0.1.0-1.x86_64.rpm`;
-- `babel-audio-0.1.0-linux-amd64.tar.gz`;
-- `babel-audio-0.1.0-linux-amd64.manifest.json`, containing artifact SHA-256 hashes.
+- `babel-audio_1.0.0_amd64.deb`;
+- `babel-audio-1.0.0-1.x86_64.rpm`;
+- `babel-audio-1.0.0-linux-amd64.tar.gz`;
+- `babel-audio-1.0.0-linux-amd64.manifest.json`, containing artifact SHA-256 hashes.
 
 Generation inspects the three executables as amd64 ELF and extracts glibc
 requirements. An unknown dynamic library stops the build until an explicit
@@ -51,7 +51,7 @@ starting Babel or audio.
 ## Install the DEB on Debian/Ubuntu
 
 ```sh
-sudo apt install ./babel-audio_0.1.0_amd64.deb
+sudo apt install ./babel-audio_1.0.0_amd64.deb
 ```
 
 The package installs `babel`, `babel-tray`, `babel-feedback`, and `babel-launch`
@@ -82,10 +82,10 @@ autostart remain separate user actions in the application.
 ## Install the RPM on Fedora and other RPM distributions
 
 ```sh
-sudo dnf install ./babel-audio-0.1.0-1.x86_64.rpm
+sudo dnf install ./babel-audio-1.0.0-1.x86_64.rpm
 ```
 
-On openSUSE, use `sudo zypper install ./babel-audio-0.1.0-1.x86_64.rpm`.
+On openSUSE, use `sudo zypper install ./babel-audio-1.0.0-1.x86_64.rpm`.
 The RPM installs the same files, launcher, and user unit as the DEB. It declares
 compatible glibc, `libgcc_s.so.1` when used, `/bin/sh`, D-Bus, and tools through
 the paths `/usr/bin/pactl`, `/usr/bin/parec`, `/usr/bin/pacat`, and
@@ -128,8 +128,8 @@ to finalize the session and files, with a 15-second limit.
 ## Use the tarball on other distributions
 
 ```sh
-tar -xzf babel-audio-0.1.0-linux-amd64.tar.gz
-./babel-audio-0.1.0-linux-amd64/bin/babel-launch
+tar -xzf babel-audio-1.0.0-linux-amd64.tar.gz
+./babel-audio-1.0.0-linux-amd64/bin/babel-launch
 ```
 
 Install your distribution's PulseAudio tools (`pactl`, `parec`, `pacat`),

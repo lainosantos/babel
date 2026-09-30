@@ -3,6 +3,7 @@
 No installation. Network downloads use exact commit URLs plus per-file SHA256.
 """
 import argparse, hashlib, json, re, shutil, subprocess, urllib.request
+from datetime import datetime
 from xml.sax.saxutils import escape
 from pathlib import Path
 ROOT = Path(__file__).resolve().parent
@@ -14,7 +15,31 @@ def replace(text, old, new, count=1):
         raise ValueError(f'Pinned source mismatch: expected {count}, got {actual}: {old[:80]!r}')
     return text.replace(old, new)
 
+def driver_version(path=None):
+    text=Path(path or ROOT/'BabelAudio.inx').read_text(encoding='utf-8')
+    values=re.findall(r'^DriverVer=([0-9]{2}/[0-9]{2}/[0-9]{4}),([0-9]+(?:\.[0-9]+){3})\s*$',text,re.M)
+    if len(values)!=1:
+        raise ValueError('The driver INX must contain one explicit DriverVer date and four-part version')
+    date,version=values[0]
+    datetime.strptime(date,'%m/%d/%Y')
+    if any(int(part)>65535 for part in version.split('.')):
+        raise ValueError('Driver version components must fit in 16 bits')
+    return {'date':date,'version':version}
+
+def version_resource(text,version):
+    # Keep the pinned sample's resource and notices, but never inherit the SDK's
+    # Windows version as Babel's file/product version through ntverp.h.
+    overrides='\n'.join(f'#undef {name}\n#define {name} {value}' for name,value in [
+        ('VER_FILEVERSION',version.replace('.',',')),
+        ('VER_PRODUCTVERSION',version.replace('.',',')),
+        ('VER_FILEVERSION_STR',f'"{version}"'),
+        ('VER_PRODUCTVERSION_STR',f'"{version}"'),
+    ])
+    text=replace(text,'#include <ntverp.h>','#include <ntverp.h>\n\n'+overrides)
+    return text.replace('Microsoft Virtual Simple Audio Sample Driver','Babel Virtual Audio Driver').replace('SimpleAudioSample.sys','BabelAudio.sys')
+
 def transform(base):
+    release=driver_version()
     def edit(name, action):
         path = base / 'Source' / name
         path.write_text(action(path.read_text(encoding='utf-8-sig')), encoding='utf-8')
@@ -121,10 +146,12 @@ def transform(base):
         shutil.copy2(ROOT/'shim'/name,base/'Source/Main'/name)
     shutil.copy2(ROOT/'BabelAudio.inx',base/'Source/Main/BabelAudio.inx')
     (base/'Source/Main/SimpleAudioSample.inx').unlink()
-    edit('Main/Main.vcxproj',lambda t:replace(t,'    <ClCompile Include="adapter.cpp" />','    <ClCompile Include="BabelTransport.cpp" />\n    <ClCompile Include="adapter.cpp" />').replace('<TargetName>SimpleAudioSample</TargetName>','<TargetName>BabelAudio</TargetName>').replace('  <Import Project="$(VCTargetsPath)\\Microsoft.Cpp.targets" />','''  <ItemDefinitionGroup><Link><AdditionalDependencies>%(AdditionalDependencies);$(BabelTransportLib)</AdditionalDependencies></Link></ItemDefinitionGroup>
+    stamp=f'<Inf><SpecifyDriverVerDirectiveDate>true</SpecifyDriverVerDirectiveDate><DateStamp>{release["date"]}</DateStamp><SpecifyDriverVerDirectiveVersion>true</SpecifyDriverVerDirectiveVersion><TimeStamp>{release["version"]}</TimeStamp></Inf>'
+    edit('Main/Main.vcxproj',lambda t:replace(t,'    <ClCompile Include="adapter.cpp" />','    <ClCompile Include="BabelTransport.cpp" />\n    <ClCompile Include="adapter.cpp" />').replace('<TargetName>SimpleAudioSample</TargetName>','<TargetName>BabelAudio</TargetName>').replace('  <Import Project="$(VCTargetsPath)\\Microsoft.Cpp.targets" />',f'  <ItemDefinitionGroup>{stamp}</ItemDefinitionGroup>\n'+'''  <ItemDefinitionGroup><Link><AdditionalDependencies>%(AdditionalDependencies);$(BabelTransportLib)</AdditionalDependencies></Link></ItemDefinitionGroup>
   <Target Name="RequireBabelTransport" BeforeTargets="Link"><Error Condition="!Exists('$(BabelTransportLib)')" Text="Build the Babel Rust transport with build.ps1 first." /></Target>
   <Import Project="$(VCTargetsPath)\\Microsoft.Cpp.targets" />'''))
-    edit('Main/SimpleAudioSample.rc',lambda t:t.replace('Microsoft Virtual Simple Audio Sample Driver','Babel Virtual Audio Driver').replace('SimpleAudioSample.sys','BabelAudio.sys'))
+    edit('Main/SimpleAudioSample.rc',lambda t:version_resource(t,release['version']))
+    (base/'driver-version.json').write_text(json.dumps(release)+'\n',encoding='utf-8')
     (base/'UPSTREAM.txt').write_text(MANIFEST['repository']+'\n'+MANIFEST['commit']+'\nMicrosoft source and modifications: MS-PL. See LICENSE-Microsoft.txt.\n')
     shutil.copy2(ROOT/'LICENSE-Microsoft.txt',base/'LICENSE-Microsoft.txt')
 

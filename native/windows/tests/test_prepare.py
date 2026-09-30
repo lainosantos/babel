@@ -1,4 +1,4 @@
-import importlib.util, json, os, tempfile, unittest, hashlib, zipfile, subprocess
+import importlib.util, json, os, tempfile, unittest, hashlib, zipfile, subprocess, shutil, tomllib
 from unittest import mock
 import xml.etree.ElementTree as ET
 from pathlib import Path
@@ -7,6 +7,31 @@ spec=importlib.util.spec_from_file_location('prepare',ROOT/'prepare.py')
 prepare=importlib.util.module_from_spec(spec); spec.loader.exec_module(prepare)
 
 class PackageTests(unittest.TestCase):
+    def test_driver_release_metadata_matches_the_application_and_rejects_invalid_fields(self):
+        declared=prepare.driver_version()
+        package=tomllib.loads((ROOT.parents[1]/'Cargo.toml').read_text())['package']['version']
+        self.assertEqual(declared['version'],package+'.0')
+        with tempfile.TemporaryDirectory() as temp:
+            inf=Path(temp)/'BabelAudio.inx'
+            for value in ['09/30/2026,1.0.0','09/31/2026,1.0.0.0','09/30/2026,65536.0.0.0',
+                          '09/30/2026,1.0.0.0\nDriverVer=09/30/2026,2.0.0.0']:
+                inf.write_text('[Version]\nDriverVer='+value+'\n')
+                with self.subTest(value=value),self.assertRaises(ValueError):prepare.driver_version(inf)
+
+    @unittest.skipUnless(shutil.which('cc'),'A C preprocessor is required for resource expansion')
+    def test_resource_version_overrides_sdk_defaults_for_binary_and_string_fields(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root=Path(temp)
+            (root/'ntverp.h').write_text('#define VER_PRODUCTVERSION 10,0,26100,6584\n#define VER_PRODUCTVERSION_STR "10.0.26100.6584"\n')
+            source=root/'driver.rc'
+            source.write_text(prepare.version_resource('#include <ntverp.h>\nFILEVERSION VER_FILEVERSION\nPRODUCTVERSION VER_PRODUCTVERSION\nVALUE "FileVersion", VER_FILEVERSION_STR\nVALUE "ProductVersion", VER_PRODUCTVERSION_STR\n','1.0.0.0'))
+            expanded=subprocess.run(['cc','-E','-P','-x','c','-I',str(root),str(source)],check=True,capture_output=True,text=True).stdout
+            self.assertIn('FILEVERSION 1,0,0,0',expanded)
+            self.assertIn('PRODUCTVERSION 1,0,0,0',expanded)
+            self.assertIn('VALUE "FileVersion", "1.0.0.0"',expanded)
+            self.assertIn('VALUE "ProductVersion", "1.0.0.0"',expanded)
+            self.assertNotIn('26100',expanded)
+
     def test_git_checkout_encoding_does_not_change_pinned_blob_verification(self):
         with tempfile.TemporaryDirectory() as temp:
             root=Path(temp); checkout=root/'checkout'; checkout.mkdir()
@@ -120,6 +145,19 @@ class PackageTests(unittest.TestCase):
             # All configuration/architecture variants publish the same exact
             # package identity. Solution/resource filenames may retain upstream names.
             project=(out/'Source/Main/Main.vcxproj').read_text()
+            release=prepare.driver_version()
+            self.assertEqual(json.loads((out/'driver-version.json').read_text()),release)
+            ns={'m':'http://schemas.microsoft.com/developer/msbuild/2003'}
+            version=ET.fromstring(project).find('m:ItemDefinitionGroup/m:Inf',ns)
+            for name,value in [('SpecifyDriverVerDirectiveDate','true'),('DateStamp',release['date']),
+                               ('SpecifyDriverVerDirectiveVersion','true'),('TimeStamp',release['version'])]:
+                self.assertEqual(version.find('m:'+name,ns).text,value)
+            resource=(out/'Source/Main/SimpleAudioSample.rc').read_text()
+            for name,value in [('VER_FILEVERSION',release['version'].replace('.',',')),
+                               ('VER_PRODUCTVERSION',release['version'].replace('.',',')),
+                               ('VER_FILEVERSION_STR','"'+release['version']+'"'),
+                               ('VER_PRODUCTVERSION_STR','"'+release['version']+'"')]:
+                self.assertIn(f'#undef {name}\n#define {name} {value}',resource)
             self.assertEqual(project.count('<TargetName>BabelAudio</TargetName>'),4)
             self.assertIn('<Inf Exclude="@(Inx)" Include="*.inx" />',project)
             self.assertEqual([p.name for p in (out/'Source/Main').glob('*.inx')],['BabelAudio.inx'])

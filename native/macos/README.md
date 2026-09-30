@@ -91,7 +91,7 @@ Default outputs:
 
 ```text
 native/macos/dist/BabelAudio.driver
-native/macos/dist/BabelAudio-0.1.0.pkg
+native/macos/dist/BabelAudio-1.0.0.pkg
 native/macos/dist/BabelAudio.pkg
 native/macos/dist/uninstall.sh
 ```

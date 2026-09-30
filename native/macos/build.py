@@ -15,7 +15,7 @@ import sys
 import tempfile
 
 ROOT = Path(__file__).resolve().parent
-VERSION = "0.1.0"
+VERSION = "1.0.0"
 BUNDLE_ID = "org.babel.audio.driver"
 FACTORY_ID = "D4189035-7C66-4D8D-9F21-7E378334542F"
 TYPE_ID = "443ABAB8-E7B3-491A-B985-BEB9187030DB"
@@ -99,7 +99,7 @@ def main(argv=None):
         info = {"CFBundleIdentifier": BUNDLE_ID, "CFBundleExecutable": "BabelAudio",
                 "CFBundleName": "Babel Audio", "CFBundlePackageType": "BNDL",
                 "CFBundleInfoDictionaryVersion": "6.0", "CFBundleShortVersionString": VERSION,
-                "CFBundleVersion": "1", "CFBundleDevelopmentRegion": "en",
+                "CFBundleVersion": VERSION, "CFBundleDevelopmentRegion": "en",
                 "LSMinimumSystemVersion": "11.0", "CFPlugInDynamicRegistration": False,
                 "CFPlugInFactories": {FACTORY_ID: "BabelCreate"},
                 "CFPlugInTypes": {TYPE_ID: [FACTORY_ID]}}

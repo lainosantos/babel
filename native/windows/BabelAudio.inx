@@ -4,7 +4,7 @@ Signature="$Windows NT$"
 Class=MEDIA
 ClassGUID={4d36e96c-e325-11ce-bfc1-08002be10318}
 Provider=%ProviderName%
-DriverVer=09/29/2026,0.1.0.0
+DriverVer=09/30/2026,1.0.0.0
 CatalogFile=BabelAudio.cat
 PnpLockdown=1
 
