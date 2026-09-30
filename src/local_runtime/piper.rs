@@ -114,7 +114,7 @@ pub(super) async fn start(
             !id.is_empty() && id.len() <= 200,
             "Invalid managed Piper voice"
         );
-        let mut command = Command::new(executable);
+        let mut command = crate::execution::background_command(executable);
         command
             .arg("-m")
             .arg(model)
@@ -250,8 +250,7 @@ impl VoiceProcess {
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
             .kill_on_drop(true);
-        #[cfg(windows)]
-        command.creation_flags(0x0800_0000);
+        crate::execution::configure_background_process(&mut command);
         let mut child = command.spawn().context("Could not start bundled Piper")?;
         let input = child.stdin.take().context("Piper stdin unavailable")?;
         let mut output =

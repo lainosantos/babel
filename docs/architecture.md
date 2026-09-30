@@ -3,17 +3,14 @@
 ## Componentes
 
 ```text
-Dispositivo de captura
-  → backend PulseAudio ou callback CPAL
-  → filas limitadas
-     ├─ sem sessão → passagem original → reprodução
-     └─ sessão ativa → supervisor da faixa
-        ├─ tradução ligada → SpeechProvider → PCM16 mono 24 kHz → reprodução
-        └─ tradução desligada → passagem original → reprodução
-
-Na sessão, independentemente da tradução:
-  captura original → gravador opcional → mistura → um arquivo .wav
-  captura original → reconhecimento opcional → um arquivo .txt com origens
+Em cada direção, enquanto Babel é o dispositivo selecionado/em uso:
+  captura → float32 intercalado, taxa/canais da origem → filas limitadas
+     ├─ tradução desligada → executor de áudio → reprodução original
+     └─ cópia limitada → executor de processamento → PCM16 mono 16 kHz
+        ├─ histórico em memória
+        ├─ sessão + gravação → mistura das origens → um arquivo .wav
+        ├─ sessão + transcrição → STT → um arquivo .txt com origens
+        └─ sessão + tradução → SpeechProvider → PCM16 mono 24 kHz → reprodução
 
 Modo opcional de voz:
   texto traduzido em memória → segmentador → TTS em streaming → PCM de reprodução
@@ -26,10 +23,15 @@ A flag `enabled` de cada faixa seleciona somente tradução: a rota continua
 encaminhando áudio original quando essa flag está desligada. Transcrição e
 gravação selecionam suas fontes separadamente. Sem tradução, o adaptador de ASR
 produz somente texto original, sem enviar esse áudio ao tradutor ou sintetizador.
-A gravação opcional mistura os originais somente no WAV local. Falhas de
-processamento, provedor ou escrita encerram a sessão e permanecem no status.
-O monitor restaura a passagem original automaticamente após o fechamento dos
-streams, verificando esse estado a cada 250 ms. Isso pode produzir uma lacuna.
+A gravação opcional mistura os originais somente no WAV local. Falha de STT,
+fila de gravação saturada ou erro de escrita fica visível como erro de
+processamento; não cancela as rotas originais nem a outra função independente.
+O arquivo afetado pode estar incompleto. Perdas da cópia de processamento têm
+contador separado das perdas de captura/reprodução. O histórico também pode
+conter lacunas se o processamento não acompanhar a captura.
+Falhas fatais de tradução ou de transporte ainda podem encerrar a sessão. O
+monitor restaura a passagem original após o fechamento dos streams, verificando
+esse estado a cada 250 ms. Isso pode produzir uma lacuna.
 Falhas dos dispositivos físicos têm recuperação própria: o painel mostra o erro
 e permite escolher outro dispositivo pela bandeja sem recriar a sessão de IA.
 
@@ -74,8 +76,42 @@ explícitos permanecem sob responsabilidade do usuário.
 Preparar modelos não abre captura para tradução/transcrição nem cria arquivos
 de sessão. Depois do primeiro download, inferência integrada funciona offline.
 O diretório de pesos é próprio e absoluto, separado dos TXT/WAV; `threads`
-controla Whisper/llama.cpp, sem prometer controlar threads internas de Piper.
+controla Whisper/llama.cpp e é limitado pelo orçamento de CPUs de processamento.
+Variáveis dos filhos limitam bibliotecas de cálculo conhecidas, inclusive as
+usadas pelo Piper, mas não são uma garantia de limite total de CPU de cada motor.
 Veja [modelos locais](local-inference.md) para catálogo, caminhos e limites.
+
+## Separação do transporte e do processamento
+
+O executor `babel-audio` possui workers e pool de tarefas bloqueantes próprios
+para captura, reprodução e operações curtas sobre PCM. Encaminhar original não
+executa inferência, DSP de fala, locks do histórico ou escrita de arquivos. A
+cópia para processamento compartilha amostras imutáveis por `Arc`; o envio usa
+`try_send`, sem esperar espaço no consumidor. O executor `babel-processing`
+executa providers, transcrição, comandos, histórico e writers. O controle de
+seleção dos dispositivos e de início/parada fica no executor de controle:
+revogar uma rota não depende de o modelo atender uma nova tarefa.
+
+No Linux e Windows, quando a afinidade e a capacidade disponível permitem,
+workers de áudio usam um conjunto de um ou dois CPUs lógicos separado dos
+workers de controle/processamento. Uma quota de um CPU ou falha de afinidade
+mantém os executores separados, sem impedir áudio. Isso não reserva núcleos
+físicos exclusivamente: SMT, outros processos e largura de banda de memória
+continuam compartilhados. No macOS há executores distintos e o escalonamento
+CoreAudio, sem promessa de pinning de CPU.
+
+Helpers gerenciados de inferência e comandos recebem limites de threads das
+bibliotecas conhecidas. Em Unix, `nice` reduz sua prioridade quando disponível;
+no Linux eles herdam a máscara de CPU do worker que os cria. No Windows são
+criados sem console e com prioridade abaixo da normal, mas filhos herdam a
+afinidade do processo, não a máscara do worker. Portanto, não há garantia de
+CPU exclusiva contra esses filhos. O Babel não controla os recursos de
+providers externos já em execução.
+
+Essa separação evita que uma fila ou worker de IA ocupado consuma os workers
+dedicados ao áudio. Não é um sistema de tempo real rígido: carga global do SO,
+drivers, GPU, pressão de memória, tarefas bloqueantes que não cooperam e
+permissões de escalonamento ainda podem afetar áudio e encerramento.
 
 ## Sessão, arquivos e troca de dispositivo
 
@@ -104,10 +140,28 @@ conter só gravação, só reconhecimento ou uma combinação com tradução. Se
 passagem não envia áudio a provedores nem abre arquivos. Motores locais
 selecionados podem ficar preparados independentemente da sessão. `stop()` encerra a sessão e retoma o
 original; `shutdown()` encerra também esse roteamento quando o aplicativo sai.
-O original usa PCM16 mono a 48 kHz e quadros de 10 ms, inclusive durante uma
-sessão com tradução desligada. Cópias para ASR/WAV são convertidas para 16 kHz.
+O original usa float32 intercalado com a taxa e os canais da captura, inclusive
+durante uma sessão com tradução desligada. A passagem não reduz estéreo a mono
+nem quantiza as amostras para PCM16. Conversões de taxa/canais necessárias para
+o dispositivo de destino pertencem ao backend; os drivers virtuais e o mixer
+do SO ainda podem impor seu próprio formato. Não há garantia de áudio bit a bit
+idêntico de ponta a ponta. Somente as cópias para histórico, comandos, ASR e WAV
+são convertidas para PCM16 mono a 16 kHz, com filtragem anti-alias. Portanto, o
+WAV misturado continua sendo uma gravação de fala a 16 kHz, não um arquivo
+multicanal de alta resolução. Áudio traduzido mantém seu formato mono a 24 kHz.
 Iniciar/encerrar sessão pode reabrir streams e produzir um breve intervalo, sem
 trocar os dispositivos virtuais selecionados pelos outros aplicativos.
+
+Pastas e arquivos são preparados antes de parar o roteamento original. Após
+fechar os streams anteriores, o controlador fixa a fronteira do histórico e
+ajusta a origem temporal do WAV, evitando silêncio artificial pelo tempo gasto
+na abertura dos arquivos. Na parada, o fechamento das rotas libera a retomada
+do original enquanto os writers ainda finalizam. O supervisor aplica um prazo
+global de três segundos à drenagem; ao excedê-lo aborta as tarefas e informa
+que os arquivos podem estar incompletos. O controlador também limita sua espera.
+Reabrir dispositivos e encerrar tarefas atrasadas pode produzir uma lacuna;
+se um executor ou chamada do SO ficar bloqueado, esse prazo não torna o
+encerramento instantâneo nem garante que uma chamada bloqueante seja preemptada.
 
 Nos três backends, o microfone ativa quando o endpoint virtual Babel é a entrada
 padrão do sistema ou um aplicativo externo o usa explicitamente. A seleção
@@ -115,6 +169,12 @@ como padrão basta para abrir a captura e permitir comandos de voz, sem exigir
 um aplicativo consumidor. A saída permanece condicionada à reprodução de um
 aplicativo externo no endpoint virtual; selecioná-la como padrão, sozinha, não
 abre a rota. Fluxos do próprio Babel não ativam a saída.
+
+No Linux, os novos endpoints Babel usam float32 estéreo. A atualização de
+endpoints antigos pertencentes ao Babel exige que nenhum aplicativo os esteja
+usando; caso contrário, a instalação informa que a migração foi adiada. Não move
+aplicativos para outro endpoint para forçar a atualização. O procedimento tem
+rollback e restaura as seleções padrão Babel que existiam antes da migração.
 
 No Linux, o monitor acompanha o padrão de entrada e eventos do servidor
 PulseAudio/pipewire-pulse e confere snapshots limitados; fluxos internos do Babel
@@ -147,9 +207,13 @@ diagnóstico, sem captura contínua como fallback. Essas consultas não capturam
 áudio e não executam nos callbacks de áudio. O período de detecção acrescenta
 uma pequena janela ao iniciar/parar o roteamento; não é uma barreira instantânea.
 
-As seleções de microfone e saída físicos são atualizadas pela bandeja. A camada
-de dispositivo substitui o stream envolvido enquanto mantém provedor, identidade
-da sessão e arquivos. O stream pode ficar indisponível durante a troca ou após
+As seleções de microfone e saída físicos são atualizadas pela bandeja. Na passagem
+original, trocar a captura fecha os streams da direção, consulta a nova taxa e
+os novos canais e reabre captura/reprodução juntos, mantendo a cópia para
+processamento e os arquivos. Trocar somente a saída substitui seu stream, com
+conversão de formato quando necessária. A tradução mantém seu formato de fala;
+uma troca de dispositivo não transforma o formato de saída do provider.
+Identidade da sessão e arquivos são preservados. O stream pode ficar indisponível durante a troca ou após
 uma falha; o erro aparece no painel e uma nova seleção permite recuperação.
 Com ou sem sessão, a camada de dispositivo tenta novamente o mesmo endpoint com
 erro a cada três segundos. A seleção manual de outro dispositivo aciona a troca
@@ -184,8 +248,10 @@ o stack ou todos os drivers sejam livres de `unsafe`/C/C++.
 
 Nos backends nativos, callbacks usam filas lock-free previamente alocadas,
 conversão de amostras e contadores atômicos. Não fazem alocação, locks de mutex,
-rede, escrita de arquivos ou logging. O worker aplica resampling sinc de 64 taps,
-com filtro anti-alias, fora do callback. No Linux, `parec`/`pacat` persistentes
+rede, escrita de arquivos ou logging. O worker aplica resampling sinc de 64 taps
+com filtro anti-alias e estado separado por canal quando a taxa precisa mudar;
+taxas iguais dispensam filtragem. O downmix para fala acontece na cópia de
+processamento, fora do callback. No Linux, `parec`/`pacat` persistentes
 fazem I/O e conversão pelo servidor existente; não se inicia um subprocesso por
 quadro. `pactl` é usado para administração/listagem, fora do caminho de áudio.
 
@@ -196,8 +262,12 @@ são rejeitados antes de alimentarem dispositivos.
 
 ## Orçamento de buffers
 
-As filas têm limites explícitos. Com defaults por faixa, 200 ms de PCM16 a 16 kHz
-correspondem a aproximadamente 6,4 KiB por fila de captura/envio. A fila de áudio
+As filas têm limites explícitos. O PCM original consome aproximadamente
+`taxa × canais × 4 × duração_em_segundos` bytes por fila; 80 ms a 48 kHz estéreo
+correspondem a 30 KiB de amostras. A cópia compartilha o quadro float imutável
+antes da conversão, mas pode manter referências por uma fila própria limitada.
+Com defaults por faixa, 200 ms de PCM16 mono a 16 kHz correspondem a
+aproximadamente 6,4 KiB por fila de envio ao modelo. A fila de áudio
 traduzido de 2000 ms a 24 kHz comporta aproximadamente 96 KiB de amostras. Há buffers
 adicionais limitados nos backends, eventos de provider, TLS/WebSocket/SSE, pipes e
 no próprio sistema operacional. Esses números não são o RSS total do processo.
@@ -208,8 +278,12 @@ validado, evitando que um limite por número de mensagens esconda mensagens
 arbitrariamente grandes. A síntese transmite quadros de 480 amostras ou menores e
 faz pacing pela duração real do PCM, não pelo número de mensagens HTTP.
 
-Captura atrasada é descartada; saturação contínua de texto/reprodução encerra o
-fluxo com erro em vez de acumular minutos de atraso. Um contador de geração
+Captura original com mais de 100 ms é descartada. Fila de reprodução original
+cheia descarta quadros sem esperar; uma cópia de processamento perdida não
+contabiliza perda de reprodução. Saturação ou falha do writer/STT é reportada
+separadamente, sem parar a passagem original. A fila de reprodução traduzida
+continua limitada e pode encerrar o fluxo de tradução com erro em vez de acumular
+minutos de atraso. Um contador de geração
 invalida o áudio antigo em uma interrupção, inclusive quando a fila está cheia.
 Linux reinicia o stream de reprodução para limpar o buffer no servidor; CPAL
 ignora amostras de gerações antigas. A interrupção não pode desfazer som que já

@@ -15,7 +15,7 @@ use std::{
     sync::{Arc, Mutex, Weak},
     time::Duration,
 };
-use tokio::{process::Command, sync::watch, task::JoinHandle};
+use tokio::{sync::watch, task::JoinHandle};
 use tokio_util::sync::CancellationToken;
 
 #[derive(Clone, Debug, Default, Serialize)]
@@ -71,7 +71,7 @@ impl Plan {
     fn from_config(cfg: &AppConfig) -> Result<Self> {
         let mut plan = Self {
             directory: cfg.local_runtime.directory.clone(),
-            threads: cfg.local_runtime.threads,
+            threads: crate::execution::inference_threads(cfg.local_runtime.threads),
             idle_unload_secs: u64::from(cfg.local_runtime.idle_unload_secs),
             whisper: BTreeSet::new(),
             translation: None,
@@ -273,10 +273,20 @@ impl RuntimeManager {
             self.changed.send_replace(state.generation);
             return;
         }
-        let Ok(handle) = tokio::runtime::Handle::try_current() else {
+        let Ok(_) = tokio::runtime::Handle::try_current() else {
             state.plan = None;
             state.task = previous;
             return;
+        };
+        let handle = match crate::execution::processing_handle() {
+            Ok(handle) => handle,
+            Err(error) => {
+                state.plan = None;
+                state.task = previous;
+                state.status.phase = "error".into();
+                state.status.message = Some(format!("{error:#}"));
+                return;
+            }
         };
         state.plan = Some(plan.clone());
         state.status = RuntimeStatus {
@@ -579,7 +589,7 @@ async fn prepare_into(
                 services: resources.names.clone(),
                 ..Default::default()
             });
-            let mut command = Command::new(bundle.executable("whisper")?);
+            let mut command = crate::execution::background_command(bundle.executable("whisper")?);
             command
                 .args([
                     "--host",
@@ -624,7 +634,7 @@ async fn prepare_into(
                 services: resources.names.clone(),
                 ..Default::default()
             });
-            let mut command = Command::new(bundle.executable("llama")?);
+            let mut command = crate::execution::background_command(bundle.executable("llama")?);
             command
                 .args([
                     "--host",

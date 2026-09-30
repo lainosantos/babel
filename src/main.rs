@@ -62,10 +62,7 @@ fn main() -> Result<()> {
     {
         return babel_audio::tray::run_native(cli.config, *port);
     }
-    tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .build()?
-        .block_on(run(cli, command))
+    babel_audio::execution::control_runtime()?.block_on(run(cli, command))
 }
 
 async fn run(cli: Cli, command: Command) -> Result<()> {

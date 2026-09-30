@@ -648,9 +648,7 @@ pub fn run_native(path: std::path::PathBuf, port: u16) -> Result<()> {
         use tao::platform::macos::{ActivationPolicy, EventLoopExtMacOS};
         event_loop.set_activation_policy(ActivationPolicy::Accessory);
     }
-    let runtime = tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .build()?;
+    let runtime = crate::execution::control_runtime()?;
     let language = resolve_language(&config.interface.language);
     let controller = Arc::new(Controller::new(config, instance.config_path().to_owned())?);
     let cancel = CancellationToken::new();

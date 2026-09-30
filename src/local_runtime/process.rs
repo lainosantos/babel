@@ -44,8 +44,7 @@ impl ServiceProcess {
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
             .kill_on_drop(true);
-        #[cfg(windows)]
-        command.creation_flags(0x0800_0000); // CREATE_NO_WINDOW, via safe Tokio API.
+        crate::execution::configure_background_process(&mut command);
         let mut child = command
             .spawn()
             .context("Could not start an installed local inference service")?;

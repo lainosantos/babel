@@ -109,6 +109,20 @@ impl SessionAudioRecorder {
     pub fn path(&self) -> &Path {
         &self.path
     }
+    /// File creation can precede the capture boundary so slow storage never
+    /// pauses original routing. Rebase only before any PCM has been accepted.
+    pub(crate) fn set_origin(&mut self, origin: Instant) -> Result<()> {
+        ensure!(
+            self.written == 0 && self.latest_end == 0 && self.pending.is_empty(),
+            "Não é possível alterar o início após receber áudio"
+        );
+        ensure!(
+            origin <= Instant::now(),
+            "Relógio da gravação está no futuro"
+        );
+        self.origin = origin;
+        Ok(())
+    }
 
     /// Supervisor closes all senders after capture stops. EOF drains queued
     /// frames and finalizes the WAV; cancelling this worker early loses its tail.
@@ -507,6 +521,34 @@ mod tests {
                 0o600
             );
         }
+    }
+    #[tokio::test]
+    async fn preparing_the_file_before_capture_does_not_add_silence_to_the_recording() {
+        let directory = tempfile::tempdir().unwrap();
+        let origin = Instant::now() - Duration::from_secs(1);
+        let mut recorder = SessionAudioRecorder::create(
+            directory.path(),
+            "prepared",
+            origin - Duration::from_secs(10),
+            true,
+            false,
+        )
+        .await
+        .unwrap();
+        recorder.set_origin(origin).unwrap();
+        let path = recorder.path().to_owned();
+        let (sender, receiver) = mpsc::channel(1);
+        sender
+            .send(AudioRecord {
+                lane: RecordingLane::Microphone,
+                samples: vec![777; 320],
+                captured_at: origin + Duration::from_millis(20),
+            })
+            .await
+            .unwrap();
+        drop(sender);
+        recorder.run(receiver).await.unwrap();
+        assert_eq!(pcm(&path), vec![777; 320]);
     }
     #[tokio::test]
     async fn invalid_names_and_oversized_frames_fail_before_consuming_unbounded_data() {

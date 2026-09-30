@@ -7,7 +7,7 @@ use std::{
     ops::Range,
     sync::{
         Arc, Mutex,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
     },
     time::{Duration, Instant},
 };
@@ -133,6 +133,7 @@ struct Contents {
     config: HistoryConfig,
     lanes: [Lane; 2],
     pruned_at: Option<Instant>,
+    enabled_since: Option<Instant>,
 }
 impl Contents {
     fn prune(&mut self, now: Instant) {
@@ -166,16 +167,19 @@ impl Contents {
 
 pub struct HistoryBuffer {
     enabled: AtomicBool,
+    generation: AtomicU64,
     contents: Mutex<Contents>,
 }
 impl HistoryBuffer {
     pub fn new(config: &HistoryConfig) -> Self {
         Self {
             enabled: AtomicBool::new(config.enabled),
+            generation: AtomicU64::new(0),
             contents: Mutex::new(Contents {
                 config: bounded_config(config),
                 lanes: Default::default(),
                 pruned_at: None,
+                enabled_since: None,
             }),
         }
     }
@@ -184,10 +188,30 @@ impl HistoryBuffer {
         self.enabled.load(Ordering::Relaxed)
     }
 
+    /// Workers discard queued captures from before the latest explicit enable.
+    pub fn accepts(&self, captured_at: Instant) -> bool {
+        if !self.enabled() {
+            return false;
+        }
+        let contents = self.contents.lock().unwrap_or_else(|e| e.into_inner());
+        contents.config.enabled
+            && contents
+                .enabled_since
+                .is_none_or(|since| captured_at >= since)
+    }
+
+    pub fn generation(&self) -> u64 {
+        self.generation.load(Ordering::Acquire)
+    }
+
     /// Reducing retention prunes immediately; disabling releases all stored PCM.
     /// A larger capacity preserves available originals without manufacturing history.
     pub fn configure(&self, config: &HistoryConfig) {
         let mut contents = self.contents.lock().unwrap_or_else(|e| e.into_inner());
+        if contents.config.enabled != config.enabled {
+            contents.enabled_since = config.enabled.then(Instant::now);
+            self.generation.fetch_add(1, Ordering::AcqRel);
+        }
         contents.config = bounded_config(config);
         contents.prune(Instant::now());
         self.enabled.store(config.enabled, Ordering::Relaxed);
@@ -200,7 +224,11 @@ impl HistoryBuffer {
             return;
         }
         let mut contents = self.contents.lock().unwrap_or_else(|e| e.into_inner());
-        if !contents.config.enabled {
+        if !contents.config.enabled
+            || contents
+                .enabled_since
+                .is_some_and(|since| captured_at < since)
+        {
             return;
         }
         contents.prune(captured_at);
@@ -311,6 +339,26 @@ fn samples_duration(samples: usize) -> Duration {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reenabled_history_rejects_old_processing_queue_frames() {
+        let config = HistoryConfig::default();
+        let history = HistoryBuffer::new(&config);
+        let queued_at = Instant::now();
+        history.configure(&HistoryConfig {
+            enabled: false,
+            ..config.clone()
+        });
+        history.configure(&config);
+        assert_eq!(history.generation(), 2);
+        assert!(!history.accepts(queued_at));
+        history.push(RecordingLane::Microphone, &[1; 160], queued_at);
+        assert!(history.snapshot(600, Instant::now()).frames.is_empty());
+        let current = Instant::now();
+        assert!(history.accepts(current));
+        history.push(RecordingLane::Microphone, &[2; 160], current);
+        assert_eq!(history.snapshot(600, Instant::now()).frames.len(), 1);
+    }
     use RecordingLane::{Microphone, Speaker};
 
     fn buffer(seconds: u32) -> HistoryBuffer {

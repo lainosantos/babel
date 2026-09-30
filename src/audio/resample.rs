@@ -15,8 +15,70 @@ pub(crate) struct Resampler {
     passthrough: bool,
 }
 
+/// Independent channel filters retain stereo separation during unavoidable
+/// hardware-rate conversion. Equal-rate transport does not filter samples.
+#[cfg(any(target_os = "macos", target_os = "windows", test))]
+pub(crate) struct ChannelResampler {
+    channels: usize,
+    filters: Vec<Resampler>,
+    input: Vec<f32>,
+    outputs: Vec<Vec<f32>>,
+    passthrough: bool,
+}
+#[cfg(any(target_os = "macos", target_os = "windows", test))]
+impl ChannelResampler {
+    pub(crate) fn new(input_rate: u32, output_rate: u32, channels: u16) -> Self {
+        let channels = usize::from(channels);
+        Self {
+            channels,
+            filters: (0..channels)
+                .map(|_| Resampler::new(input_rate, output_rate))
+                .collect(),
+            input: Vec::new(),
+            outputs: (0..channels).map(|_| Vec::new()).collect(),
+            passthrough: input_rate == output_rate,
+        }
+    }
+    pub(crate) fn process(&mut self, input: &[f32], output: &mut Vec<f32>) {
+        if self.passthrough {
+            output.extend_from_slice(input);
+            return;
+        }
+        for channel in 0..self.channels {
+            self.input.clear();
+            self.input.extend(
+                input
+                    .chunks_exact(self.channels)
+                    .map(|frame| frame[channel]),
+            );
+            self.outputs[channel].clear();
+            self.filters[channel].process(&self.input, &mut self.outputs[channel]);
+        }
+        for frame in 0..self.outputs[0].len() {
+            for channel in 0..self.channels {
+                output.push(self.outputs[channel][frame]);
+            }
+        }
+    }
+    #[cfg(any(target_os = "macos", target_os = "windows", test))]
+    pub(crate) fn reset(&mut self) {
+        for filter in &mut self.filters {
+            filter.reset();
+        }
+    }
+}
+
 impl Resampler {
     pub(crate) fn new(input_rate: u32, output_rate: u32) -> Self {
+        if input_rate == output_rate {
+            return Self {
+                ratio: 1.0,
+                position: 0.0,
+                buffer: VecDeque::new(),
+                coefficients: Vec::new(),
+                passthrough: true,
+            };
+        }
         let cutoff = (f64::from(output_rate) / f64::from(input_rate)).min(1.0) * 0.90;
         let mut coefficients = Vec::with_capacity(PHASES);
         for phase in 0..PHASES {
@@ -87,6 +149,36 @@ impl Resampler {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn equal_rate_preserves_float_bits_and_does_not_construct_filters() {
+        let input = [0.12345679, -0.9876543, f32::from_bits(1), -0.0];
+        let mut resampler = Resampler::new(96_000, 96_000);
+        assert!(resampler.coefficients.is_empty());
+        let mut output = Vec::new();
+        resampler.process(&input, &mut output);
+        assert_eq!(
+            input.map(f32::to_bits).as_slice(),
+            output.iter().map(|v| v.to_bits()).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn hardware_rate_conversion_keeps_channels_separate() {
+        let mut resampler = ChannelResampler::new(96_000, 48_000, 2);
+        let input = [0.75, -0.25].repeat(960);
+        let mut output = Vec::new();
+        resampler.process(&input, &mut output);
+        for frame in output.as_chunks::<2>().0.iter().skip(30) {
+            assert!((frame[0] - 0.75).abs() < 0.00001);
+            assert!((frame[1] + 0.25).abs() < 0.00001);
+        }
+        assert!(output.len() > 900);
+        resampler.reset();
+        output.clear();
+        resampler.process(&[0.0; 960], &mut output);
+        assert!(output.iter().all(|value| *value == 0.0));
+    }
 
     fn convert_tone(frequency: f64) -> Vec<f32> {
         let input: Vec<f32> = (0..48_000)

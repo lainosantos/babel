@@ -32,6 +32,7 @@ struct Shared {
     feedback: FeedbackPublisher,
     tools: Arc<dyn CommandTools>,
     active: AtomicBool,
+    capture_scope: AtomicU64,
     enabled: AtomicBool,
     busy: AtomicBool,
     started: AtomicBool,
@@ -44,7 +45,8 @@ struct Shared {
 }
 
 /// A bounded original-microphone tap. Construct outside Tokio if needed, then
-/// call `start` once a runtime is available. No inference runs on audio workers.
+/// call `start` to use the dedicated processing runtime. No inference runs on
+/// audio workers, even if the caller itself is on the audio runtime.
 pub struct CommandService {
     shared: Arc<Shared>,
     audio_tx: mpsc::Sender<PcmFrame>,
@@ -73,6 +75,7 @@ impl CommandService {
                 config: RwLock::new(config),
                 tools,
                 active: AtomicBool::new(false),
+                capture_scope: AtomicU64::new(0),
                 busy: AtomicBool::new(false),
                 started: AtomicBool::new(false),
                 dropped: AtomicU64::new(0),
@@ -89,8 +92,7 @@ impl CommandService {
     }
 
     pub fn start(&self) -> Result<()> {
-        let runtime = tokio::runtime::Handle::try_current()
-            .map_err(|_| anyhow::anyhow!("voice command service needs an active Tokio runtime"))?;
+        let runtime = crate::execution::processing_handle()?;
         let mut task = self.task.lock().unwrap_or_else(|e| e.into_inner());
         if task.is_some() {
             return Ok(());
@@ -108,14 +110,18 @@ impl CommandService {
         Ok(())
     }
 
+    /// Cheap worker-side gate: skip speech DSP while commands cannot use audio.
+    pub(crate) fn wants_audio(&self) -> bool {
+        self.shared.started.load(Ordering::Acquire)
+            && self.shared.enabled.load(Ordering::Relaxed)
+            && self.shared.active.load(Ordering::Relaxed)
+            && !self.shared.busy.load(Ordering::Relaxed)
+    }
+
     /// Copies only after reserving bounded queue space, never blocks or waits for
     /// ASR/model/MCP. The caller must supply the physical microphone's original PCM.
     pub fn try_audio(&self, frame: &PcmFrame) -> bool {
-        if !self.shared.started.load(Ordering::Acquire)
-            || !self.shared.enabled.load(Ordering::Relaxed)
-            || !self.shared.active.load(Ordering::Relaxed)
-            || self.shared.busy.load(Ordering::Relaxed)
-        {
+        if !self.wants_audio() {
             return false;
         }
         if !(8_000..=192_000).contains(&frame.sample_rate)
@@ -145,9 +151,28 @@ impl CommandService {
     /// False cancels pending work and drops old speech. Toggle false/true when
     /// switching physical sources so no command spans two different microphones.
     pub fn set_microphone_active(&self, active: bool) {
+        self.set_microphone_active_inner(active, None);
+    }
+
+    pub(crate) fn begin_capture_scope(&self) -> u64 {
+        self.shared.capture_scope.fetch_add(1, Ordering::AcqRel) + 1
+    }
+
+    pub(crate) fn capture_scope_current(&self, scope: u64) -> bool {
+        self.shared.capture_scope.load(Ordering::Acquire) == scope
+    }
+
+    pub(crate) fn set_microphone_active_scoped(&self, active: bool, scope: u64) {
+        self.set_microphone_active_inner(active, Some(scope));
+    }
+
+    fn set_microphone_active_inner(&self, active: bool, scope: Option<u64>) {
+        let mut status = self.shared.status.lock().unwrap_or_else(|e| e.into_inner());
+        if scope.is_some_and(|scope| !self.capture_scope_current(scope)) {
+            return;
+        }
         if self.shared.active.swap(active, Ordering::AcqRel) != active {
             self.shared.changed();
-            let mut status = self.shared.status.lock().unwrap_or_else(|e| e.into_inner());
             status.microphone_active = active;
             status.phase = if !self.shared.enabled.load(Ordering::Relaxed) {
                 CommandPhase::Disabled

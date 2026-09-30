@@ -50,8 +50,7 @@ impl ServiceProcess {
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
             .kill_on_drop(true);
-        #[cfg(windows)]
-        command.creation_flags(0x0800_0000); // CREATE_NO_WINDOW, via safe Tokio API.
+        crate::execution::configure_background_process(&mut command);
         let mut child = command
             .spawn()
             .context("Could not start an installed local voice service")?;
@@ -218,9 +217,7 @@ impl ManagedServices {
         }
         if config.whisper_endpoint == "auto" {
             let model = whisper_model(&root, &config.whisper_model)?;
-            let threads = config
-                .local_threads
-                .min(std::thread::available_parallelism().map_or(1, |n| n.get() as u32));
+            let threads = crate::execution::inference_threads(config.local_threads);
             let key = (model.clone(), threads);
             if self.whisper_key.as_ref() != Some(&key)
                 && let Some(process) = self.whisper.take()
@@ -229,7 +226,7 @@ impl ManagedServices {
             }
             if self.whisper.is_none() {
                 let executable = whisper_binary(&root).context("Whisper is not installed in the local services folder; run scripts/setup_whisper.py")?;
-                let mut command = Command::new(executable);
+                let mut command = crate::execution::background_command(executable);
                 command
                     .args(["--host", "127.0.0.1", "--port", "0", "-t"])
                     .arg(threads.to_string())
@@ -266,7 +263,7 @@ impl ManagedServices {
                     python.is_file() && script.is_file(),
                     "Needle is not installed in the local services folder; install cactus-needle in .tools/needle"
                 );
-                let mut command = Command::new(python);
+                let mut command = crate::execution::background_command(python);
                 command
                     .arg(script)
                     .args(["--port", "0", "--idle-unload-secs"])

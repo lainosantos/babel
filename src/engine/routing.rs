@@ -75,7 +75,12 @@ pub(super) async fn stop_routing(state: &mut State) -> Result<()> {
 }
 
 pub(super) async fn maintain_routing(state: &mut State) {
-    if !state.routing_enabled || state.running.is_some() {
+    if !state.routing_enabled
+        || state
+            .running
+            .as_ref()
+            .is_some_and(|running| !running.routes_closed.is_closed())
+    {
         return;
     }
     if let Some(routing) = state.routing.as_mut() {
@@ -117,6 +122,7 @@ pub(super) async fn maintain_routing(state: &mut State) {
     let mut jobs = JoinSet::new();
     let options = AudioOptions {
         sample_rate: 48_000,
+        channels: 2,
         frame_ms: 10,
         latency_ms: cfg.audio.device_latency_ms,
         queue_ms: 80,

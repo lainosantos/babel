@@ -175,7 +175,7 @@ async fn original_tones_share_one_recorded_timeline_without_changing_babel_devic
         external_clients.push(external_client(&names[2],false)?);
         let started=Instant::now();
         controller.start_named(Some("Gravação simultânea / teste".into())).await?;
-        let options=AudioOptions{sample_rate:16000,frame_ms:20,latency_ms:40,queue_ms:200};
+        let options=AudioOptions{sample_rate:16000,channels:1,frame_ms:20,latency_ms:40,queue_ms:200};
         let mut senders=Vec::new();
         for device in [names[0].clone(),names[2].clone()] {
             let (tx,rx)=mpsc::channel(8);senders.push(tx);let cancelled=cancel.clone();
@@ -262,7 +262,7 @@ async fn original_tones_share_one_recorded_timeline_without_changing_babel_devic
 }
 
 async fn observe_original_tone(
-    receiver: &mut mpsc::Receiver<audio::PcmFrame>,
+    receiver: &mut mpsc::Receiver<audio::OriginalFrame>,
     frequency: f64,
 ) -> Result<()> {
     // Drop stale observation frames at a phase boundary, then inspect newly
@@ -274,7 +274,9 @@ async fn observe_original_tone(
         let mut samples = Vec::with_capacity(3200);
         while let Some(frame) = receiver.recv().await {
             received_samples += frame.samples.len();
-            samples.extend(frame.samples);
+            samples.extend(frame.samples.iter().map(|sample| {
+                (sample * 32768.0).round().clamp(i16::MIN as f32, i16::MAX as f32) as i16
+            }));
             if samples.len() >= 3200 {
                 best_amplitude = best_amplitude.max(amplitude(&samples[..3200], frequency));
                 if best_amplitude > 6000.0 {
@@ -338,7 +340,7 @@ async fn idle_routing_recording_and_transcription_are_independent_without_cloud(
         external_clients.push(external_client(&format!("{}.monitor",names[1]),true)?);
         external_clients.push(external_client(&names[2],false)?);
         controller.enable_routing().await?;
-        let options=AudioOptions{sample_rate:16000,frame_ms:20,latency_ms:40,queue_ms:200};
+        let options=AudioOptions{sample_rate:16000,channels:1,frame_ms:20,latency_ms:40,queue_ms:200};
         let mut senders=Vec::new();
         for device in [names[0].clone(),names[2].clone()] {
             let (tx,rx)=mpsc::channel(8);senders.push(tx);let cancelled=cancel.clone();

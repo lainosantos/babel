@@ -16,7 +16,7 @@ impl Backend for MockBackend {
         &self,
         device: &str,
         options: AudioOptions,
-        output: mpsc::Sender<PcmFrame>,
+        output: mpsc::Sender<OriginalFrame>,
         cancel: CancellationToken,
         _: Arc<AudioStats>,
     ) -> Result<()> {
@@ -25,9 +25,10 @@ impl Backend for MockBackend {
             bail!("mock capture failure");
         }
         output
-            .send(PcmFrame {
-                samples: vec![if device == "old" { 1 } else { 2 }],
+            .send(OriginalFrame {
+                samples: vec![if device == "old" { 1.0 } else { 2.0 }].into(),
                 sample_rate: options.sample_rate,
+                channels: options.channels,
                 captured_at: Instant::now(),
             })
             .await?;
@@ -76,6 +77,7 @@ impl Backend for MockBackend {
 fn options() -> AudioOptions {
     AudioOptions {
         sample_rate: 24000,
+        channels: 1,
         frame_ms: 20,
         queue_ms: 200,
         latency_ms: 20,
@@ -105,7 +107,7 @@ impl Backend for ReconnectingBackend {
         &self,
         device: &str,
         options: AudioOptions,
-        output: mpsc::Sender<PcmFrame>,
+        output: mpsc::Sender<OriginalFrame>,
         cancel: CancellationToken,
         stats: Arc<AudioStats>,
     ) -> Result<()> {
@@ -180,7 +182,7 @@ async fn capture_reconnects_same_identity_without_selection_or_channel_replaceme
         event(&mut received).await,
         Event::Started("persistent-usb-microphone".into())
     );
-    assert_eq!(audio.recv().await.unwrap().samples, vec![2]);
+    assert_eq!(audio.recv().await.unwrap().samples.as_ref(), &[2.0]);
     assert!(observed.capture_error.lock().unwrap().is_none());
     cancel.cancel();
     task.await.unwrap().unwrap();
@@ -251,11 +253,11 @@ async fn capture_replaces_worker_in_order_and_preserves_outer_channel() {
         capture_with(&backend, "old", options(), output, selected, token, stats).await
     });
     assert_eq!(event(&mut received).await, Event::Started("old".into()));
-    assert_eq!(audio.recv().await.unwrap().samples, vec![1]);
+    assert_eq!(audio.recv().await.unwrap().samples.as_ref(), &[1.0]);
     devices.send_replace("new".into());
     assert_eq!(event(&mut received).await, Event::Stopped("old".into()));
     assert_eq!(event(&mut received).await, Event::Started("new".into()));
-    assert_eq!(audio.recv().await.unwrap().samples, vec![2]);
+    assert_eq!(audio.recv().await.unwrap().samples.as_ref(), &[2.0]);
     assert!(!audio.is_closed());
     cancel.cancel();
     assert_eq!(event(&mut received).await, Event::Stopped("new".into()));
@@ -299,7 +301,7 @@ async fn capture_failure_can_recover_without_ending_the_session() {
     assert!(!task.is_finished());
     devices.send_replace("new".into());
     assert_eq!(event(&mut received).await, Event::Started("new".into()));
-    assert_eq!(audio.recv().await.unwrap().samples, vec![2]);
+    assert_eq!(audio.recv().await.unwrap().samples.as_ref(), &[2.0]);
     assert!(stats.capture_error.lock().unwrap().is_none());
     cancel.cancel();
     task.await.unwrap().unwrap();
@@ -506,36 +508,61 @@ impl crate::commands::CommandTools for NoCommandTools {
 
 #[tokio::test]
 async fn command_tap_backpressure_is_bounded_and_never_mutates_original_pcm() {
+    let stats = Arc::new(AudioStats::default());
+    let (tx, receiver) = mpsc::channel(8);
+    let tap = CommandCaptureTap {
+        frames: Some(tx),
+        worker: None,
+        cleanup: None,
+        stats: stats.clone(),
+    };
+    let frame = OriginalFrame {
+        samples: vec![-1.0, -0.1234567, 0.0, 0.5678912, 1.0].into(),
+        sample_rate: 48_000,
+        channels: 1,
+        captured_at: Instant::now(),
+    };
+    let original = frame.samples.clone();
+    for _ in 0..100 {
+        tap.frame(frame.clone());
+    }
+    assert_eq!(receiver.len(), 8);
+    assert_eq!(stats.processing_dropped_frames.load(Ordering::Relaxed), 92);
+    assert_eq!(stats.dropped_frames.load(Ordering::Relaxed), 0);
+    assert!(Arc::ptr_eq(&original, &frame.samples));
+}
+
+async fn microphone_active(service: &crate::commands::CommandService, active: bool) {
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while service.status().microphone_active != active {
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+    })
+    .await
+    .unwrap();
+}
+
+#[test]
+fn delayed_command_activation_or_cleanup_cannot_override_a_new_capture() {
     let service = crate::commands::CommandService::new(
         crate::commands::AgentConfig::default(),
         Arc::new(NoCommandTools),
     )
     .unwrap();
-    service.start().unwrap();
-    let stats = AudioStats {
-        command_tap: Some(Arc::downgrade(&service)),
-        ..Default::default()
-    };
-    let mut tap = CommandCaptureTap::new(&stats);
-    let frame = PcmFrame {
-        samples: vec![i16::MIN, -1234, 0, 5678, i16::MAX],
-        sample_rate: 48_000,
-        captured_at: Instant::now(),
-    };
-    // No await: the single-thread runtime cannot drain the bounded service queue
-    // during this burst. The audio worker must return even when it is full.
-    for _ in 0..100 {
-        tap.frame(&frame);
-    }
-    assert!(service.status().microphone_active);
-    assert!(service.status().dropped_frames >= 68);
-    assert_eq!(frame.samples, vec![i16::MIN, -1234, 0, 5678, i16::MAX]);
-    drop(tap);
+    let old = service.begin_capture_scope();
+    service.set_microphone_active_scoped(true, old);
+    let current = service.begin_capture_scope();
+    service.set_microphone_active_scoped(false, current);
+    service.set_microphone_active_scoped(true, old);
     assert!(!service.status().microphone_active);
-    service.shutdown().await;
+    service.set_microphone_active_scoped(true, current);
+    service.set_microphone_active_scoped(false, old);
+    assert!(service.status().microphone_active);
+    service.set_microphone_active_scoped(false, current);
+    assert!(!service.status().microphone_active);
 }
 
-#[tokio::test(start_paused = true)]
+#[tokio::test]
 async fn microphone_command_tap_deactivates_before_replacement_and_on_cancellation() {
     let service = crate::commands::CommandService::new(
         crate::commands::AgentConfig::default(),
@@ -565,22 +592,22 @@ async fn microphone_command_tap_deactivates_before_replacement_and_on_cancellati
         .await
     });
     assert_eq!(event(&mut received).await, Event::Started("old".into()));
-    assert_eq!(audio.recv().await.unwrap().samples, vec![1]);
-    assert!(service.status().microphone_active);
+    assert_eq!(audio.recv().await.unwrap().samples.as_ref(), &[1.0]);
+    microphone_active(&service, true).await;
     // A failing replacement emits no frame: inactivity must survive the handoff.
     devices.send_replace("broken".into());
     assert_eq!(event(&mut received).await, Event::Stopped("old".into()));
-    assert!(!service.status().microphone_active);
+    microphone_active(&service, false).await;
     assert_eq!(event(&mut received).await, Event::Started("broken".into()));
-    assert!(!service.status().microphone_active);
+    microphone_active(&service, false).await;
     devices.send_replace("new".into());
     assert_eq!(event(&mut received).await, Event::Started("new".into()));
-    assert_eq!(audio.recv().await.unwrap().samples, vec![2]);
-    assert!(service.status().microphone_active);
+    assert_eq!(audio.recv().await.unwrap().samples.as_ref(), &[2.0]);
+    microphone_active(&service, true).await;
     cancel.cancel();
     assert_eq!(event(&mut received).await, Event::Stopped("new".into()));
     task.await.unwrap().unwrap();
-    assert!(!service.status().microphone_active);
+    microphone_active(&service, false).await;
 }
 
 #[tokio::test(start_paused = true)]
@@ -614,7 +641,7 @@ async fn speaker_stats_have_no_command_tap_and_do_not_activate_the_agent() {
         event(&mut received).await,
         Event::Started("speaker-monitor".into())
     );
-    assert_eq!(audio.recv().await.unwrap().samples, vec![2]);
+    assert_eq!(audio.recv().await.unwrap().samples.as_ref(), &[2.0]);
     assert!(!service.status().microphone_active);
     cancel.cancel();
     task.await.unwrap().unwrap();
@@ -622,7 +649,7 @@ async fn speaker_stats_have_no_command_tap_and_do_not_activate_the_agent() {
 }
 
 struct InjectedCapture {
-    input: tokio::sync::Mutex<mpsc::Receiver<PcmFrame>>,
+    input: tokio::sync::Mutex<mpsc::Receiver<OriginalFrame>>,
 }
 #[async_trait]
 impl Backend for InjectedCapture {
@@ -630,7 +657,7 @@ impl Backend for InjectedCapture {
         &self,
         _: &str,
         _: AudioOptions,
-        output: mpsc::Sender<PcmFrame>,
+        output: mpsc::Sender<OriginalFrame>,
         cancel: CancellationToken,
         _: Arc<AudioStats>,
     ) -> Result<()> {
@@ -759,20 +786,22 @@ async fn original_capture_reaches_local_asr_without_waiting_for_its_response() {
         .await
     });
     input
-        .send(PcmFrame {
-            samples: vec![0; 320],
+        .send(OriginalFrame {
+            samples: vec![0.0; 320].into(),
             sample_rate: 16_000,
+            channels: 1,
             captured_at: Instant::now(),
         })
         .await
         .unwrap();
     audio.recv().await.unwrap();
     tokio::time::sleep(Duration::from_millis(20)).await;
-    for samples in [vec![4096; 1600], vec![0; 3200]] {
+    for samples in [vec![0.125; 1600], vec![0.0; 3200]] {
         input
-            .send(PcmFrame {
-                samples: samples.clone(),
+            .send(OriginalFrame {
+                samples: samples.clone().into(),
                 sample_rate: 16_000,
+                channels: 1,
                 captured_at: Instant::now(),
             })
             .await
@@ -782,8 +811,9 @@ async fn original_capture_reaches_local_asr_without_waiting_for_its_response() {
                 .await
                 .unwrap()
                 .unwrap()
-                .samples,
-            samples
+                .samples
+                .as_ref(),
+            samples.as_slice()
         );
     }
     let samples = tokio::time::timeout(Duration::from_secs(2), original)

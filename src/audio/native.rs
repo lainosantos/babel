@@ -21,10 +21,10 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 use super::{
-    AudioOptions, AudioStats, Device, DeviceDirection, PcmFrame, PlaybackCommand,
+    AudioOptions, AudioStats, Device, DeviceDirection, OriginalFrame, PlaybackCommand,
     native_ids::{self, Selection},
     native_lease::DeviceLease,
-    resample::Resampler,
+    resample::ChannelResampler,
 };
 
 fn virtual_name(name: &str) -> bool {
@@ -143,6 +143,23 @@ pub async fn devices() -> Result<Vec<Device>> {
     })
     .await
     .context("native audio enumeration task failed")?
+}
+
+pub async fn original_format(capture: &str, _playback: &str) -> Result<(u32, u16)> {
+    let capture = capture.to_owned();
+    crate::execution::audio_handle()?
+        .spawn_blocking(move || {
+            let (_lease, device) = leased_device(&capture, DeviceDirection::Input)?;
+            let format = device.default_input_config()?;
+            ensure!(
+                (8_000..=192_000).contains(&format.sample_rate())
+                    && (1..=32).contains(&format.channels()),
+                "unsupported original audio format"
+            );
+            Ok((format.sample_rate(), format.channels()))
+        })
+        .await
+        .context("reading original device format")?
 }
 
 pub async fn install_virtual_devices() -> Result<String> {
@@ -289,28 +306,38 @@ where
     T: SizedSample,
     f32: FromSample<T>,
 {
-    let channels = usize::from(config.channels);
+    let mut configured = false;
+    let error_stats = stats.clone();
     Ok(device.build_input_stream(
         *config,
         move |data: &[T], _| {
-            let frames = data.len() / channels;
+            if !configured {
+                crate::execution::configure_audio_thread();
+                configured = true;
+            }
+            let frames = data.len();
             // Dropping a whole hardware callback avoids partially spliced frames.
             if queue.capacity() - queue.len() < frames {
                 stats.dropped_frames.fetch_add(1, Ordering::Relaxed);
                 return;
             }
-            for frame in data.chunks_exact(channels) {
-                // Use channels 1/2 only: BlackHole 16ch's unused channels are zero.
-                let mono = frame
-                    .iter()
-                    .take(2)
-                    .map(|sample| sample.to_sample::<f32>())
-                    .sum::<f32>()
-                    / channels.min(2) as f32;
-                let _ = queue.push(mono);
+            for sample in data {
+                let _ = queue.push(sample.to_sample::<f32>());
             }
         },
-        move |_| {
+        move |error| {
+            match error.kind() {
+                cpal::ErrorKind::RealtimeDenied => {
+                    error_stats.realtime_denied.store(true, Ordering::Relaxed);
+                    return;
+                }
+                cpal::ErrorKind::Xrun => {
+                    error_stats.underruns.fetch_add(1, Ordering::Relaxed);
+                    return;
+                }
+                cpal::ErrorKind::DeviceChanged => return,
+                _ => (),
+            }
             failed.store(true, Ordering::Release);
         },
         None,
@@ -345,7 +372,7 @@ fn build_input(
 pub async fn capture(
     device: &str,
     options: AudioOptions,
-    sink: mpsc::Sender<PcmFrame>,
+    sink: mpsc::Sender<OriginalFrame>,
     cancel: CancellationToken,
     stats: Arc<AudioStats>,
 ) -> Result<()> {
@@ -354,7 +381,7 @@ pub async fn capture(
     let cancel = cancel.child_token();
     let _cancel_on_drop = cancel.clone().drop_guard();
     let id = device.to_owned();
-    tokio::task::spawn_blocking(move || -> Result<()> {
+    crate::execution::audio_handle()?.spawn_blocking(move || -> Result<()> {
         if cancel.is_cancelled() { return Ok(()); }
         let (_lease, device) = leased_device(&id, DeviceDirection::Input)?;
         let supported = device
@@ -362,11 +389,11 @@ pub async fn capture(
             .context("reading native input format")?;
         let config = supported.config();
         ensure!(
-            config.channels > 0 && (8_000..=768_000).contains(&config.sample_rate),
+            (1..=32).contains(&config.channels) && (8_000..=768_000).contains(&config.sample_rate),
             "invalid or unsupported native audio format"
         );
         let queue = Arc::new(ArrayQueue::new(
-            (u64::from(config.sample_rate) * u64::from(options.queue_ms) / 1000) as usize,
+            (u64::from(config.sample_rate) * u64::from(options.queue_ms) * u64::from(config.channels) / 1000) as usize,
         ));
         let failed = Arc::new(AtomicBool::new(false));
         let stream = build_input(
@@ -377,8 +404,10 @@ pub async fn capture(
             failed.clone(),
             stats.clone(),
         )?;
-        let mut resampler = Resampler::new(config.sample_rate, options.sample_rate);
+        let mut resampler = ChannelResampler::new(config.sample_rate, options.sample_rate, options.channels);
+        let mut mapped = Vec::with_capacity(8192);
         let mut input = Vec::with_capacity(4096);
+        let mut pending = Vec::with_capacity(32);
         let mut output = Vec::with_capacity(8192);
         let mut frame = Vec::with_capacity(options.frame_samples());
         if cancel.is_cancelled() { return Ok(()); }
@@ -387,12 +416,14 @@ pub async fn capture(
             .context("starting native microphone capture; check OS microphone permission")?;
         let mut last_samples = Instant::now();
         while !cancel.is_cancelled() && !sink.is_closed() {
+            if stats.realtime_denied.swap(false, Ordering::Relaxed) { tracing::warn!("OS denied real-time audio priority; routing continues at the available priority"); }
             ensure!(
                 !failed.load(Ordering::Acquire),
                 "native input stream failed or the device was disconnected"
             );
             input.clear();
-            while input.len() < 4096 {
+            input.append(&mut pending);
+            while input.len() < 4096 / usize::from(config.channels) * usize::from(config.channels) {
                 let Some(sample) = queue.pop() else {
                     break;
                 };
@@ -403,18 +434,32 @@ pub async fn capture(
                 thread::sleep(Duration::from_millis(2));
                 continue;
             }
+            let complete = input.len() / usize::from(config.channels) * usize::from(config.channels);
+            pending.extend_from_slice(&input[complete..]);
+            if complete == 0 {
+                ensure!(last_samples.elapsed() < Duration::from_secs(2), "native input stopped delivering complete audio frames");
+                thread::sleep(Duration::from_millis(2));
+                continue;
+            }
             last_samples = Instant::now();
             output.clear();
-            resampler.process(&input, &mut output);
+            mapped.clear();
+            for values in input.chunks_exact(usize::from(config.channels)) {
+                for channel in 0..usize::from(options.channels) {
+                    mapped.push(if options.channels == 1 && values.len() > 1 { values.iter().sum::<f32>() / values.len() as f32 } else if values.len() == 1 { values[0] } else { values.get(channel).copied().unwrap_or(0.0) });
+                }
+            }
+            resampler.process(&mapped, &mut output);
             for sample in &output {
-                frame.push((sample.clamp(-1.0, 1.0) * 32767.0).round() as i16);
+                frame.push(*sample);
                 if frame.len() == options.frame_samples() {
                     let samples =
                         std::mem::replace(&mut frame, Vec::with_capacity(options.frame_samples()));
                     stats.captured_frames.fetch_add(1, Ordering::Relaxed);
-                    match sink.try_send(PcmFrame {
-                        samples,
+                    match sink.try_send(OriginalFrame {
+                        samples: samples.into(),
                         sample_rate: options.sample_rate,
+                        channels: options.channels,
                         captured_at: Instant::now(),
                     }) {
                         Ok(()) => (),
@@ -435,7 +480,7 @@ pub async fn capture(
 
 #[derive(Clone, Copy)]
 struct OutputSample {
-    value: f32,
+    values: [f32; 32],
     generation: u64,
 }
 
@@ -450,28 +495,46 @@ where
     T: SizedSample + FromSample<f32>,
 {
     let channels = usize::from(config.channels);
+    let mut configured = false;
+    let error_stats = stats.clone();
     Ok(device.build_output_stream(
         *config,
         move |data: &mut [T], _| {
+            if !configured {
+                crate::execution::configure_audio_thread();
+                configured = true;
+            }
             let mut underrun = false;
             for frame in data.chunks_exact_mut(channels) {
                 let generation = stats.playback_generation.load(Ordering::Acquire);
                 let sample = match queue.pop() {
-                    Some(sample) if sample.generation == generation => sample.value,
+                    Some(sample) if sample.generation == generation => sample.values,
                     _ => {
                         underrun = true;
-                        0.0
+                        [0.0; 32]
                     }
                 };
                 for (channel, target) in frame.iter_mut().enumerate() {
-                    *target = T::from_sample(if channel < 2 { sample } else { 0.0 });
+                    *target = T::from_sample(sample[channel]);
                 }
             }
             if underrun {
                 stats.underruns.fetch_add(1, Ordering::Relaxed);
             }
         },
-        move |_| {
+        move |error| {
+            match error.kind() {
+                cpal::ErrorKind::RealtimeDenied => {
+                    error_stats.realtime_denied.store(true, Ordering::Relaxed);
+                    return;
+                }
+                cpal::ErrorKind::Xrun => {
+                    error_stats.underruns.fetch_add(1, Ordering::Relaxed);
+                    return;
+                }
+                cpal::ErrorKind::DeviceChanged => return,
+                _ => (),
+            }
             failed.store(true, Ordering::Release);
         },
         None,
@@ -515,7 +578,7 @@ pub async fn playback(
     let cancel = cancel.child_token();
     let _cancel_on_drop = cancel.clone().drop_guard();
     let id = device.to_owned();
-    tokio::task::spawn_blocking(move || -> Result<()> {
+    crate::execution::audio_handle()?.spawn_blocking(move || -> Result<()> {
         if cancel.is_cancelled() { return Ok(()); }
         let (_lease, device) = leased_device(&id, DeviceDirection::Output)?;
         let supported = device
@@ -523,7 +586,7 @@ pub async fn playback(
             .context("reading native output format")?;
         let config = supported.config();
         ensure!(
-            config.channels > 0 && (8_000..=768_000).contains(&config.sample_rate),
+            (1..=32).contains(&config.channels) && (8_000..=768_000).contains(&config.sample_rate),
             "invalid or unsupported native audio format"
         );
         // Keep the hardware bridge short; queue_ms bounds the engine's speech queue.
@@ -540,13 +603,15 @@ pub async fn playback(
             failed.clone(),
             stats.clone(),
         )?;
-        let mut resampler = Resampler::new(options.sample_rate, config.sample_rate);
+        let mut resampler = ChannelResampler::new(options.sample_rate, config.sample_rate, options.channels);
+        let mut mapped = Vec::with_capacity((config.sample_rate / 5) as usize);
         let mut input = Vec::with_capacity(options.frame_samples());
         let mut output = Vec::with_capacity((config.sample_rate / 5) as usize);
         let mut generation = stats.playback_generation.load(Ordering::Acquire);
         if cancel.is_cancelled() { return Ok(()); }
         stream.play().context("starting native playback")?;
         'playback: while !cancel.is_cancelled() {
+            if stats.realtime_denied.swap(false, Ordering::Relaxed) { tracing::warn!("OS denied real-time audio priority; routing continues at the available priority"); }
             ensure!(
                 !failed.load(Ordering::Acquire),
                 "native output stream failed or the device was disconnected"
@@ -566,21 +631,31 @@ pub async fn playback(
                     while queue.pop().is_some() {}
                     resampler.reset();
                 }
-                Ok(PlaybackCommand::Audio {
-                    samples,
-                    generation: queued_generation,
-                }) => {
+                Ok(command @ (PlaybackCommand::Audio { .. } | PlaybackCommand::Original { .. })) => {
+                    let (samples, queued_generation): (Arc<[f32]>, u64) = match command {
+                        PlaybackCommand::Original { samples, generation } => (samples, generation),
+                        PlaybackCommand::Audio { samples, generation } => (samples.into_iter().map(|sample| f32::from(sample) / 32768.0).collect(), generation),
+                        PlaybackCommand::Flush => unreachable!(),
+                    };
                     if queued_generation != generation {
                         continue;
                     }
                     for chunk in samples.chunks(options.frame_samples()) {
                         input.clear();
-                        input.extend(chunk.iter().map(|sample| f32::from(*sample) / 32768.0));
+                        input.extend_from_slice(chunk);
                         output.clear();
                         resampler.process(&input, &mut output);
-                        for sample in &output {
+                        mapped.clear();
+                        for values in output.chunks_exact(usize::from(options.channels)) {
+                            for channel in 0..usize::from(config.channels) {
+                                mapped.push(if config.channels == 1 && values.len() > 1 { values.iter().sum::<f32>() / values.len() as f32 } else if values.len() == 1 && channel < 2 { values[0] } else { values.get(channel).copied().unwrap_or(0.0) });
+                            }
+                        }
+                        for frame in mapped.chunks_exact(usize::from(config.channels)) {
+                            let mut values = [0.0; 32];
+                            values[..frame.len()].copy_from_slice(frame);
                             let mut sample = OutputSample {
-                                value: *sample,
+                                values,
                                 generation,
                             };
                             let mut stalled_since = None;

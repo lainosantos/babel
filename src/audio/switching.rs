@@ -1,5 +1,5 @@
 //! Replace device workers without replacing the provider or transcript channels.
-use super::{AudioOptions, AudioStats, PcmFrame, PlaybackCommand};
+use super::{AudioOptions, AudioStats, OriginalFrame, PlaybackCommand};
 use anyhow::{Context, Result, anyhow, bail};
 use async_trait::async_trait;
 use std::{
@@ -16,7 +16,7 @@ trait Backend: Send + Sync {
         &self,
         device: &str,
         options: AudioOptions,
-        output: mpsc::Sender<PcmFrame>,
+        output: mpsc::Sender<OriginalFrame>,
         cancel: CancellationToken,
         stats: Arc<AudioStats>,
     ) -> Result<()>;
@@ -39,7 +39,7 @@ impl Backend for SystemBackend {
         &self,
         device: &str,
         options: AudioOptions,
-        output: mpsc::Sender<PcmFrame>,
+        output: mpsc::Sender<OriginalFrame>,
         cancel: CancellationToken,
         stats: Arc<AudioStats>,
     ) -> Result<()> {
@@ -60,7 +60,7 @@ impl Backend for SystemBackend {
 pub async fn capture(
     initial: &str,
     options: AudioOptions,
-    output: mpsc::Sender<PcmFrame>,
+    output: mpsc::Sender<OriginalFrame>,
     devices: watch::Receiver<String>,
     cancel: CancellationToken,
     stats: Arc<AudioStats>,
@@ -143,35 +143,77 @@ enum End {
 }
 
 struct CommandCaptureTap {
-    service: Option<Arc<crate::commands::CommandService>>,
-    active: bool,
+    frames: Option<mpsc::Sender<OriginalFrame>>,
+    worker: Option<tokio::task::JoinHandle<()>>,
+    stats: Arc<AudioStats>,
+    cleanup: Option<(
+        Arc<crate::commands::CommandService>,
+        u64,
+        tokio::runtime::Handle,
+    )>,
 }
 impl CommandCaptureTap {
-    fn new(stats: &AudioStats) -> Self {
-        Self {
-            service: stats
-                .command_tap
-                .as_ref()
-                .and_then(std::sync::Weak::upgrade),
-            active: false,
+    fn new(stats: &Arc<AudioStats>) -> Self {
+        let service = stats
+            .command_tap
+            .as_ref()
+            .and_then(std::sync::Weak::upgrade);
+        let mut tap = Self {
+            frames: None,
+            worker: None,
+            stats: stats.clone(),
+            cleanup: None,
+        };
+        if let Some(service) = service
+            && let Ok(runtime) = crate::execution::processing_handle()
+        {
+            let (tx, mut rx) = mpsc::channel::<OriginalFrame>(8);
+            let generation = service.begin_capture_scope();
+            tap.cleanup = Some((service.clone(), generation, runtime.clone()));
+            tap.worker = Some(runtime.spawn(async move {
+                service.set_microphone_active_scoped(false, generation);
+                let mut active = false;
+                let mut speech = super::speech::SpeechTap::new();
+                while let Some(frame) = rx.recv().await {
+                    if !service.capture_scope_current(generation) {
+                        break;
+                    }
+                    if !active {
+                        service.set_microphone_active_scoped(true, generation);
+                        active = true;
+                    }
+                    if service.wants_audio() {
+                        let converted = speech.convert(&frame);
+                        if service.capture_scope_current(generation) {
+                            service.try_audio(&converted);
+                        }
+                    }
+                }
+                service.set_microphone_active_scoped(false, generation);
+            }));
+            tap.frames = Some(tx);
         }
+        tap
     }
-    fn frame(&mut self, frame: &PcmFrame) {
-        if let Some(service) = &self.service {
-            if !self.active {
-                service.set_microphone_active(true);
-                self.active = true;
-            }
-            service.try_audio(frame);
+    fn frame(&self, frame: OriginalFrame) {
+        if let Some(frames) = &self.frames
+            && frames.try_send(frame).is_err()
+        {
+            self.stats
+                .processing_dropped_frames
+                .fetch_add(1, Ordering::Relaxed);
         }
     }
 }
 impl Drop for CommandCaptureTap {
     fn drop(&mut self) {
-        if self.active
-            && let Some(service) = &self.service
-        {
-            service.set_microphone_active(false);
+        if let Some(worker) = &self.worker {
+            worker.abort();
+        }
+        if let Some((service, generation, runtime)) = self.cleanup.take() {
+            runtime.spawn(async move {
+                service.set_microphone_active_scoped(false, generation);
+            });
         }
     }
 }
@@ -180,7 +222,7 @@ async fn capture_with(
     backend: &dyn Backend,
     initial: &str,
     options: AudioOptions,
-    output: mpsc::Sender<PcmFrame>,
+    output: mpsc::Sender<OriginalFrame>,
     mut devices: watch::Receiver<String>,
     cancel: CancellationToken,
     stats: Arc<AudioStats>,
@@ -209,7 +251,7 @@ async fn capture_with(
         );
         let mut finished = false;
         let mut frame_channel_open = true;
-        let mut command_tap = CommandCaptureTap::new(&stats);
+        let command_tap = CommandCaptureTap::new(&stats);
         let end = loop {
             tokio::select! {
                 biased;
@@ -225,12 +267,15 @@ async fn capture_with(
                 }
                 frame = incoming.recv(), if frame_channel_open => {
                     let Some(frame) = frame else { frame_channel_open = false; continue; };
-                    command_tap.frame(&frame);
+                    // Original frames share immutable storage; publishing to routing
+                    // happens before any speech/command work on a separate runtime.
+                    let command_frame = frame.clone();
                     match output.try_send(frame) {
                         Ok(()) => (),
                         Err(mpsc::error::TrySendError::Full(_)) => { stats.dropped_frames.fetch_add(1, Ordering::Relaxed); }
                         Err(mpsc::error::TrySendError::Closed(_)) => break End::Disconnected,
                     }
+                    command_tap.frame(command_frame);
                 }
             }
         };
@@ -274,7 +319,10 @@ async fn capture_with(
 }
 
 fn discard_audio(command: PlaybackCommand, stats: &AudioStats) {
-    if matches!(command, PlaybackCommand::Audio { .. }) {
+    if matches!(
+        command,
+        PlaybackCommand::Audio { .. } | PlaybackCommand::Original { .. }
+    ) {
         stats.dropped_frames.fetch_add(1, Ordering::Relaxed);
     }
 }
@@ -296,7 +344,8 @@ fn invalidate_playback(
 }
 fn is_current(command: &PlaybackCommand, stats: &AudioStats) -> bool {
     match command {
-        PlaybackCommand::Audio { generation, .. } => {
+        PlaybackCommand::Audio { generation, .. }
+        | PlaybackCommand::Original { generation, .. } => {
             *generation == stats.playback_generation.load(Ordering::Acquire)
         }
         PlaybackCommand::Flush => true,

@@ -19,7 +19,14 @@ async fn full_or_disconnected_stt_queue_does_not_block_translation_and_vice_vers
     drop(recognized);
     fanout_original_audio(vec![5], Some(&translation), Some(&recognition), &metrics);
     assert_eq!(translated.recv().await, Some(vec![5]));
-    assert_eq!(metrics.audio.dropped_frames.load(Ordering::Relaxed), 3);
+    assert_eq!(
+        metrics
+            .audio
+            .processing_dropped_frames
+            .load(Ordering::Relaxed),
+        3
+    );
+    assert_eq!(metrics.audio.dropped_frames.load(Ordering::Relaxed), 0);
 }
 
 #[tokio::test]

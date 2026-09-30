@@ -30,7 +30,7 @@ use std::{
 };
 use tokio::{
     io::{AsyncRead, ReadBuf},
-    process::{Child, ChildStdin, ChildStdout, Command},
+    process::{Child, ChildStdin, ChildStdout},
 };
 
 pub(super) const MAX_MESSAGE_BYTES: usize = 1024 * 1024;
@@ -124,7 +124,7 @@ pub(super) struct ChildTransport {
 }
 impl ChildTransport {
     pub(super) fn spawn(config: &McpIntegration) -> Result<Self> {
-        let mut command = Command::new(&config.command);
+        let mut command = crate::execution::background_command(&config.command);
         // Only a small OS environment and explicitly mapped credentials reach the child.
         command.env_clear();
         for name in [
@@ -155,14 +155,14 @@ impl ChildTransport {
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
             .kill_on_drop(true);
-        #[cfg(windows)]
-        command.creation_flags(0x0800_0000); // CREATE_NO_WINDOW, via safe Tokio API.
+
         if !config.cwd.is_empty() {
             command.current_dir(&config.cwd);
         }
         for (name, reference) in &config.secret_env {
             command.env(name, credentials::get(reference)?.as_str());
         }
+        crate::execution::configure_background_process(&mut command);
         let mut child = command
             .spawn()
             .map_err(|_| anyhow::anyhow!("Could not start registered MCP executable"))?;

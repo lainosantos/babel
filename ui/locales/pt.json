@@ -52,6 +52,7 @@
   "ui.translated": "Traduzido",
   "ui.captured_frames": "Frames capturados",
   "ui.dropped_frames": "Frames descartados",
+  "ui.processing_dropped_frames": "Cópias descartadas no processamento",
   "ui.playback_underruns": "Faltas na reprodução",
   "ui.latest_original_transcript": "Última transcrição original",
   "ui.waiting_for_audio": "Aguardando áudio.",

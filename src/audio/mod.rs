@@ -1,7 +1,7 @@
 //! Bounded audio transport. No cloud or configuration work runs on audio callbacks.
 
 use std::{
-    sync::atomic::{AtomicU32, AtomicU64},
+    sync::atomic::{AtomicBool, AtomicU32, AtomicU64},
     time::Instant,
 };
 
@@ -19,12 +19,17 @@ mod native_ids;
 mod native_lease;
 pub mod passthrough;
 pub(crate) mod resample;
+pub mod speech;
 pub mod switching;
 
 #[cfg(target_os = "linux")]
-pub use linux::{capture, devices, install_virtual_devices, playback, uninstall_virtual_devices};
+pub use linux::{
+    capture, devices, install_virtual_devices, original_format, playback, uninstall_virtual_devices,
+};
 #[cfg(any(target_os = "macos", target_os = "windows"))]
-pub use native::{capture, devices, install_virtual_devices, playback, uninstall_virtual_devices};
+pub use native::{
+    capture, devices, install_virtual_devices, original_format, playback, uninstall_virtual_devices,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -44,6 +49,7 @@ pub struct Device {
 #[derive(Debug, Clone, Copy)]
 pub struct AudioOptions {
     pub sample_rate: u32,
+    pub channels: u16,
     pub frame_ms: u32,
     pub latency_ms: u32,
     pub queue_ms: u32,
@@ -54,6 +60,10 @@ impl AudioOptions {
         ensure!(
             (8_000..=192_000).contains(&self.sample_rate),
             "audio sample rate must be 8000..192000 Hz"
+        );
+        ensure!(
+            (1..=32).contains(&self.channels),
+            "audio channels must be 1..32"
         );
         ensure!(
             (5..=200).contains(&self.frame_ms),
@@ -75,7 +85,8 @@ impl AudioOptions {
     }
 
     fn frame_samples(self) -> usize {
-        (u64::from(self.sample_rate) * u64::from(self.frame_ms) / 1000) as usize
+        (u64::from(self.sample_rate) * u64::from(self.frame_ms) * u64::from(self.channels) / 1000)
+            as usize
     }
 }
 
@@ -86,8 +97,21 @@ pub struct PcmFrame {
     pub captured_at: Instant,
 }
 
+/// Full-resolution interleaved original PCM. Speech conversion belongs to a sidecar.
+#[derive(Debug, Clone)]
+pub struct OriginalFrame {
+    pub samples: std::sync::Arc<[f32]>,
+    pub sample_rate: u32,
+    pub channels: u16,
+    pub captured_at: Instant,
+}
+
 #[derive(Debug)]
 pub enum PlaybackCommand {
+    Original {
+        samples: std::sync::Arc<[f32]>,
+        generation: u64,
+    },
     Audio {
         samples: Vec<i16>,
         generation: u64,
@@ -102,7 +126,10 @@ pub struct AudioStats {
     pub command_tap: Option<std::sync::Weak<crate::commands::CommandService>>,
     pub captured_frames: AtomicU64,
     pub dropped_frames: AtomicU64,
+    pub processing_dropped_frames: AtomicU64,
+    pub sidecar_dropped_frames: AtomicU64,
     pub underruns: AtomicU64,
+    pub realtime_denied: AtomicBool,
     /// Incrementing this epoch interrupts playback even when its channel is full.
     pub playback_generation: AtomicU64,
     /// Normalized RMS f32 bits, updated by the passthrough worker, not callbacks.
@@ -120,6 +147,7 @@ mod tests {
     fn invalid_audio_options_are_rejected_before_allocating() {
         let valid = AudioOptions {
             sample_rate: 16_000,
+            channels: 1,
             frame_ms: 20,
             latency_ms: 40,
             queue_ms: 200,

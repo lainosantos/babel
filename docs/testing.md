@@ -34,6 +34,82 @@ runners. As regressões da interface incluem integração systemd/XDG, identific
 da entrada de login e preservação de rascunhos ao trocar idioma. Não foram
 executados drivers, captura ou reprodução nativos macOS/Windows nesta validação.
 
+## Isolamento do áudio, qualidade e falhas de processamento
+
+As regressões abaixo usam PCM sintético, filas limitadas, executores privados e
+arquivos temporários. Não abrem dispositivos físicos nem chamam providers do
+usuário:
+
+```sh
+cargo test --locked --lib execution::tests::
+cargo test --locked --lib audio::passthrough::tests::
+cargo test --locked --lib audio::resample::tests::
+cargo test --locked --lib engine::isolation_tests::
+cargo test --locked --lib session_writer
+cargo test --locked --lib preparing_the_file_before_capture_does_not_add_silence_to_the_recording
+```
+
+O teste de saturação bloqueia todos os workers de um executor de processamento
+privado e exige que o executor de áudio e seu pool bloqueante executem antes de
+liberá-los. Outra regressão mantém cheia a fila da cópia de processamento e
+verifica que quadros estéreo float continuam chegando à reprodução, com os
+mesmos bits e sem incrementar o contador de perdas de áudio. As perdas da cópia
+têm contador próprio. Os testes do controle verificam a revogação de uma rota
+com processamento ocupado, sem depender de drivers instalados.
+
+O DSP é verificado separadamente: taxas iguais preservam amostras float sem
+construir filtros; conversão de taxa mantém os canais separados, rejeita
+aliasing e preserva continuidade entre blocos. Isso comprova as operações do
+Babel exercitadas pelo teste, não transparência bit a bit do mixer ou do driver
+do sistema de destino.
+
+Dois testes do supervisor exercitam rotas sintéticas independentes enquanto um
+writer falha ou fica pendente. Eles exigem que ambas continuem transportando os
+quadros, que `Controller::status()` mantenha o roteamento ativo com erro de
+processamento visível, e que o fechamento das rotas libere a retomada do
+original antes de esperar o writer travado. O prazo global de drenagem encerra
+a espera e informa arquivos potencialmente incompletos; o teste também verifica
+o descarte da tarefa pendente. Um teste escreve/reabre um WAV real depois de
+prepará-lo antes da captura e verifica que o tempo de preparação não cria
+silêncio no início. Esses casos de writer e WAV passaram localmente em Linux
+em 30/09/2026.
+
+Esses testes portáveis integram a suíte Rust executada pela matriz de CI.
+Resultados locais não comprovam execução nativa macOS/Windows; consulte o run
+de cada alvo. Afinidade de workers, prioridade/limites de helpers e filas
+limitadas são políticas de recursos, não benchmarks de latência ou de consumo.
+Providers externos já em execução não estão sujeitos a essa política. No macOS
+não há pinning de CPU; no Windows, reduzir a prioridade dos filhos não aplica a
+eles a máscara de afinidade de uma thread do Babel.
+
+A troca de captura no caminho original renegocia taxa/canais e reabre os
+streams da direção; no Linux, endpoints antigos precisam de migração para o
+novo formato float estéreo. As regressões sem dispositivos não substituem
+testar migração, hotplug e troca entre formatos em cada SO. Abrir/fechar streams,
+pressão global de CPU/memória ou uma chamada bloqueada do sistema ainda podem
+causar lacunas, inclusive ao parar a sessão. Não há promessa de zero lacunas ou
+meta de p99 derivada desses testes.
+
+### Precisão do transporte original em servidor de áudio real
+
+Em 30/09/2026, o teste `tests/original_quality.rs` passou usando dois sinks nulos
+exclusivos no PipeWire/PulseAudio. Verificou 4.800 frames estéreo consecutivos
+(100 ms a 48 kHz) com amostras float32 idênticas bit a bit, incluindo detalhes
+menores que um passo PCM16. A captura leu apenas o monitor sintético de destino.
+O teste confirmou a remoção dos seus dispositivos e a preservação dos padrões
+do sistema e dos dispositivos Babel existentes.
+
+```sh
+cargo test --locked --test original_quality -- --ignored --nocapture
+```
+
+É uma regressão de fidelidade do caminho original em taxas iguais, não uma
+medição de latência nem garantia de fidelidade de conversores físicos ou de
+resampling entre formatos diferentes. Para a suíte completa em máquinas com
+muitos CPUs, `cargo test --locked --all-targets -- --test-threads=4` evita centenas
+de servidores mock e testes de prazo disputando simultaneamente os executores
+limitados do aplicativo.
+
 ## Diagnóstico dos serviços de comandos de voz
 
 Após separar falhas de configuração e falhas de comandos, **225 testes Rust e

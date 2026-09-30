@@ -65,6 +65,7 @@ async fn synthetic_original_audio_crosses_controller_and_virtual_devices() -> Re
         let (capture_tx, mut capture_rx) = mpsc::channel(100);
         let options = AudioOptions {
             sample_rate: 24000,
+            channels: 1,
             frame_ms: 20,
             latency_ms: 30,
             queue_ms: 200,
@@ -115,7 +116,7 @@ async fn synthetic_original_audio_crosses_controller_and_virtual_devices() -> Re
                 if frame
                     .samples
                     .iter()
-                    .any(|sample| sample.unsigned_abs() > 1000)
+                    .any(|sample| sample.abs() > 1000.0 / 32768.0)
                 {
                     return true;
                 }

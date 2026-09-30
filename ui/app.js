@@ -721,7 +721,7 @@
       byId(`${route}-state`).textContent = current.device_error ? t("ui.device_unavailable") : routeWaiting(route, status) ? t('routing.waiting_for_app') : translations[current.state] || current.state || t("ui.stopped");
       byId(`${route}-state`).title = routeWaiting(route, status) ? waitingHint(route) : '';
       byId(`${route}-reconnects`).textContent = t('audio.reconnections', { count: i18n.number(current.reconnects || 0) });
-      for (const metric of ['captured_frames', 'dropped_frames', 'underruns']) {
+      for (const metric of ['captured_frames', 'dropped_frames', 'processing_dropped_frames', 'underruns']) {
         byId(`${route}-${metric}`).textContent = i18n.number(current[metric] || 0);
         byId(`${route}-${metric}`).classList.toggle('nonzero', metric !== 'captured_frames' && current[metric] > 0);
       }

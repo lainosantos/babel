@@ -15,7 +15,7 @@ use tokio::{
 };
 use tokio_util::sync::CancellationToken;
 
-use super::{AudioOptions, AudioStats, Device, DeviceDirection, PcmFrame, PlaybackCommand};
+use super::{AudioOptions, AudioStats, Device, DeviceDirection, OriginalFrame, PlaybackCommand};
 
 const OWNER: &str = "babel.owner=org.babel.audio.v1";
 static MODULE_LOCK: Mutex<()> = Mutex::const_new(());
@@ -36,8 +36,9 @@ const MODULES: [ModuleSpec; 3] = [
         arguments: &[
             "sink_name=babel_mic_bus",
             "rate=48000",
-            "channels=1",
-            "channel_map=mono",
+            "format=float32le",
+            "channels=2",
+            "channel_map=front-left,front-right",
             "sink_properties='device.description=Babel_Microphone_Bus babel.owner=org.babel.audio.v1'",
         ],
     },
@@ -48,9 +49,9 @@ const MODULES: [ModuleSpec; 3] = [
         arguments: &[
             "source_name=babel_microphone",
             "master=babel_mic_bus.monitor",
-            "channels=1",
-            "channel_map=mono",
-            "master_channel_map=mono",
+            "channels=2",
+            "channel_map=front-left,front-right",
+            "master_channel_map=front-left,front-right",
             "source_properties='device.description=Babel_Microphone babel.owner=org.babel.audio.v1'",
         ],
     },
@@ -61,6 +62,7 @@ const MODULES: [ModuleSpec; 3] = [
         arguments: &[
             "sink_name=babel_speaker",
             "rate=48000",
+            "format=float32le",
             "channels=2",
             "channel_map=front-left,front-right",
             "sink_properties='device.description=Babel_Speaker babel.owner=org.babel.audio.v1'",
@@ -68,7 +70,7 @@ const MODULES: [ModuleSpec; 3] = [
     },
 ];
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 struct Module {
     index: u32,
     name: String,
@@ -172,6 +174,39 @@ pub async fn devices() -> Result<Vec<Device>> {
     Ok(found)
 }
 
+/// Preserve the selected source's server format; the server negotiates the
+/// destination device when its hardware uses a different format.
+pub async fn original_format(capture: &str, _playback: &str) -> Result<(u32, u16)> {
+    let sources: Vec<Value> =
+        serde_json::from_str(&pactl(&["--format=json", "list", "sources"]).await?)?;
+    let source = sources
+        .iter()
+        .find(|source| source["name"].as_str() == Some(capture))
+        .context("original capture device is unavailable")?;
+    let spec = source["sample_specification"]
+        .as_str()
+        .context("capture device has no sample specification")?;
+    let channels = spec
+        .split_whitespace()
+        .find_map(|part| {
+            part.strip_suffix("ch")
+                .and_then(|part| part.parse::<u16>().ok())
+        })
+        .context("capture channel count unavailable")?;
+    let rate = spec
+        .split_whitespace()
+        .find_map(|part| {
+            part.strip_suffix("Hz")
+                .and_then(|part| part.parse::<u32>().ok())
+        })
+        .context("capture sample rate unavailable")?;
+    ensure!(
+        (8_000..=192_000).contains(&rate) && (1..=32).contains(&channels),
+        "unsupported original audio format"
+    );
+    Ok((rate, channels))
+}
+
 async fn unload_owned(index: u32, spec: ModuleSpec) -> Result<()> {
     if modules()
         .await?
@@ -183,12 +218,143 @@ async fn unload_owned(index: u32, spec: ModuleSpec) -> Result<()> {
     Ok(())
 }
 
+fn format_upgrade_needed(module: &Module, spec: ModuleSpec) -> bool {
+    if !owned_by(module, spec) {
+        return false;
+    }
+    let words: Vec<_> = module
+        .argument
+        .split(|c: char| c.is_whitespace() || c == '\'' || c == '"')
+        .collect();
+    spec.arguments
+        .iter()
+        .filter(|argument| {
+            [
+                "rate=",
+                "format=",
+                "channels=",
+                "channel_map=",
+                "master_channel_map=",
+            ]
+            .iter()
+            .any(|prefix| argument.starts_with(prefix))
+        })
+        .any(|argument| !words.contains(argument))
+}
+
+fn numeric_id(value: &Value) -> Option<u64> {
+    value
+        .as_u64()
+        .or_else(|| value.as_str().and_then(|value| value.parse().ok()))
+}
+
+fn external_virtual_consumers(
+    streams: &[Value],
+    endpoints: &[Value],
+    target: &str,
+    existing: &[Module],
+) -> bool {
+    let uncertain_endpoint = endpoints.iter().any(|endpoint| {
+        endpoint["name"].as_str().is_some_and(|name| {
+            [
+                "babel_mic_bus",
+                "babel_mic_bus.monitor",
+                "babel_microphone",
+                "babel_speaker",
+                "babel_speaker.monitor",
+            ]
+            .contains(&name)
+        }) && numeric_id(&endpoint["index"]).is_none()
+    });
+    let endpoint_ids: Vec<_> = endpoints
+        .iter()
+        .filter(|endpoint| {
+            endpoint["name"].as_str().is_some_and(|name| {
+                [
+                    "babel_mic_bus",
+                    "babel_mic_bus.monitor",
+                    "babel_microphone",
+                    "babel_speaker",
+                    "babel_speaker.monitor",
+                ]
+                .contains(&name)
+            })
+        })
+        .filter_map(|endpoint| numeric_id(&endpoint["index"]))
+        .collect();
+    streams.iter().any(|stream| {
+        let internal = stream["properties"]["babel.owner"].as_str() == Some("org.babel.audio.v1")
+            || numeric_id(&stream["owner_module"]).is_some_and(|id| {
+                existing.iter().any(|module| {
+                    u64::from(module.index) == id
+                        && MODULES.iter().any(|spec| owned_by(module, *spec))
+                })
+            });
+        !internal
+            && (uncertain_endpoint
+                || numeric_id(&stream[target]).is_none_or(|id| endpoint_ids.contains(&id)))
+    })
+}
+
+async fn ensure_virtual_devices_idle(existing: &[Module]) -> Result<()> {
+    let (sinks, sources, inputs, outputs) = tokio::try_join!(
+        pactl(&["--format=json", "list", "sinks"]),
+        pactl(&["--format=json", "list", "sources"]),
+        pactl(&["--format=json", "list", "sink-inputs"]),
+        pactl(&["--format=json", "list", "source-outputs"]),
+    )?;
+    ensure!(
+        !external_virtual_consumers(
+            &serde_json::from_str::<Vec<Value>>(&inputs)?,
+            &serde_json::from_str::<Vec<Value>>(&sinks)?,
+            "sink",
+            existing
+        ) && !external_virtual_consumers(
+            &serde_json::from_str::<Vec<Value>>(&outputs)?,
+            &serde_json::from_str::<Vec<Value>>(&sources)?,
+            "source",
+            existing
+        ),
+        "Babel audio devices need a stereo/float format upgrade. Close apps using the Babel devices and try installing again; active apps were not moved or disconnected."
+    );
+    Ok(())
+}
+
+async fn restore_babel_defaults(defaults: &Value) -> Result<()> {
+    if let Some(source) = defaults["default_source_name"].as_str().filter(|source| {
+        [
+            "babel_microphone",
+            "babel_mic_bus.monitor",
+            "babel_speaker.monitor",
+        ]
+        .contains(source)
+    }) {
+        pactl(&["set-default-source", source]).await?;
+    }
+    if let Some(sink) = defaults["default_sink_name"]
+        .as_str()
+        .filter(|sink| ["babel_mic_bus", "babel_speaker"].contains(sink))
+    {
+        pactl(&["set-default-sink", sink]).await?;
+    }
+    Ok(())
+}
+
+async fn restore_previous_modules(previous: &[Module], defaults: &Value) -> Result<()> {
+    for spec in MODULES {
+        for old in previous.iter().filter(|module| owned_by(module, spec)) {
+            if !modules().await?.iter().any(|module| owned_by(module, spec)) {
+                pactl(&["load-module", &old.name, &old.argument]).await?;
+            }
+        }
+    }
+    restore_babel_defaults(defaults).await
+}
+
 pub async fn install_virtual_devices() -> Result<String> {
     let _guard = MODULE_LOCK.lock().await;
     let found = devices().await?;
     let existing = modules().await?;
-    // Validate all collisions before creating anything. Existing unrelated devices
-    // are never renamed, replaced, connected, or made default.
     for spec in MODULES {
         if found.iter().any(|device| device.id == spec.endpoint) {
             ensure!(
@@ -198,39 +364,78 @@ pub async fn install_virtual_devices() -> Result<String> {
             );
         }
     }
+    let upgrade = existing.iter().any(|module| {
+        MODULES
+            .iter()
+            .any(|spec| format_upgrade_needed(module, *spec))
+    });
+    let defaults = if upgrade {
+        ensure_virtual_devices_idle(&existing).await?;
+        serde_json::from_str::<Value>(&pactl(&["--format=json", "info"]).await?)?
+    } else {
+        Value::Null
+    };
+    let previous: Vec<_> = if upgrade {
+        existing
+            .iter()
+            .filter(|module| MODULES.iter().any(|spec| owned_by(module, *spec)))
+            .cloned()
+            .collect()
+    } else {
+        Vec::new()
+    };
     let mut created = Vec::new();
-    for spec in MODULES {
-        if existing.iter().any(|module| owned_by(module, spec)) {
-            continue;
-        }
-        let mut args = vec!["load-module", spec.kind];
-        args.extend_from_slice(spec.arguments);
-        let loaded = pactl(&args).await.and_then(|text| {
-            text.trim()
-                .parse::<u32>()
-                .context("pactl did not return a module ID")
-        });
-        match loaded {
-            Ok(index) => created.push((index, spec)),
-            Err(error) => {
-                for (index, created_spec) in created.into_iter().rev() {
-                    if let Err(cleanup) = unload_owned(index, created_spec).await {
-                        tracing::warn!(%cleanup, "failed to roll back a Babel audio module");
-                    }
+    let result: Result<()> = async {
+        if upgrade {
+            for spec in [MODULES[1], MODULES[2], MODULES[0]] {
+                for old in previous.iter().filter(|module| owned_by(module, spec)) {
+                    unload_owned(old.index, spec).await?;
                 }
-                return Err(error.context(format!("creating virtual device {}", spec.endpoint)));
             }
         }
+        for spec in MODULES {
+            if !upgrade && existing.iter().any(|module| owned_by(module, spec)) {
+                continue;
+            }
+            let mut args = vec!["load-module", spec.kind];
+            args.extend_from_slice(spec.arguments);
+            let text = pactl(&args)
+                .await
+                .with_context(|| format!("creating virtual device {}", spec.endpoint))?;
+            let index = text
+                .trim()
+                .parse::<u32>()
+                .context("pactl did not return a module ID")?;
+            created.push((index, spec));
+        }
+        let actual = devices().await?;
+        for spec in MODULES {
+            ensure!(
+                actual.iter().any(|device| device.id == spec.endpoint),
+                "audio server loaded a module but did not expose {}",
+                spec.endpoint
+            );
+        }
+        if upgrade {
+            restore_babel_defaults(&defaults).await?;
+        }
+        Ok(())
     }
-    let actual = devices().await?;
-    for spec in MODULES {
-        ensure!(
-            actual.iter().any(|device| device.id == spec.endpoint),
-            "audio server loaded a module but did not expose {}",
-            spec.endpoint
-        );
+    .await;
+    if let Err(error) = result {
+        for (index, spec) in created.into_iter().rev() {
+            if let Err(cleanup) = unload_owned(index, spec).await {
+                tracing::warn!(%cleanup, "failed to roll back a Babel audio module");
+            }
+        }
+        if upgrade && let Err(rollback) = restore_previous_modules(&previous, &defaults).await {
+            return Err(error.context(format!(
+                "Unable to restore previous Babel devices: {rollback:#}"
+            )));
+        }
+        return Err(error);
     }
-    Ok("Babel_Microphone and Babel_Speaker are available. Select them in your calling app; system defaults were not changed.".to_owned())
+    Ok(if upgrade { "Babel virtual devices upgraded to stereo/float audio. Existing Babel default selections were restored." } else { "Babel_Microphone and Babel_Speaker are available. Select them in your calling app; system defaults were not changed." }.to_owned())
 }
 
 pub async fn uninstall_virtual_devices() -> Result<String> {
@@ -283,8 +488,7 @@ fn audio_command(program: &str, device: &str, options: AudioOptions, record: boo
     command
         .args([
             "--raw",
-            "--format=s16le",
-            "--channels=1",
+            "--format=float32le",
             "--client-name=Babel",
             "--stream-name=Babel_translation",
             "--property=application.id=org.babel.audio",
@@ -307,6 +511,7 @@ fn audio_command(program: &str, device: &str, options: AudioOptions, record: boo
             "--property=babel.direction=playback"
         })
         .arg(format!("--rate={}", options.sample_rate))
+        .arg(format!("--channels={}", options.channels))
         .arg(format!("--latency-msec={}", options.latency_ms))
         .arg(format!("--process-time-msec={}", options.frame_ms))
         .stdin(if record {
@@ -349,7 +554,7 @@ impl AudioProcess {
 pub async fn capture(
     device: &str,
     options: AudioOptions,
-    sink: mpsc::Sender<PcmFrame>,
+    sink: mpsc::Sender<OriginalFrame>,
     cancel: CancellationToken,
     stats: Arc<AudioStats>,
 ) -> Result<()> {
@@ -361,7 +566,7 @@ pub async fn capture(
         .stdout
         .take()
         .context("missing parec stdout")?;
-    let mut bytes = vec![0_u8; options.frame_samples() * 2];
+    let mut bytes = vec![0_u8; options.frame_samples() * 4];
     let result = loop {
         let received = tokio::select! {
             biased;
@@ -373,15 +578,16 @@ pub async fn capture(
             break Err(error.into());
         }
         let samples = bytes
-            .as_chunks::<2>()
+            .as_chunks::<4>()
             .0
             .iter()
-            .map(|s| i16::from_le_bytes([s[0], s[1]]))
+            .map(|s| f32::from_le_bytes([s[0], s[1], s[2], s[3]]))
             .collect();
         stats.captured_frames.fetch_add(1, Ordering::Relaxed);
-        let frame = PcmFrame {
+        let frame = OriginalFrame {
             samples,
             sample_rate: options.sample_rate,
+            channels: options.channels,
             captured_at: Instant::now(),
         };
         match sink.try_send(frame) {
@@ -450,7 +656,7 @@ pub async fn playback(
     require_device(device, DeviceDirection::Output).await?;
     let (mut process, mut stdin) = spawn_playback(device, options)?;
     let mut generation = stats.playback_generation.load(Ordering::Acquire);
-    let mut bytes = Vec::with_capacity(options.frame_samples() * 2);
+    let mut bytes = Vec::with_capacity(options.frame_samples() * 4);
     let mut check = tokio::time::interval(Duration::from_millis(5));
     let result = 'playback: loop {
         let current = stats.playback_generation.load(Ordering::Acquire);
@@ -475,10 +681,24 @@ pub async fn playback(
                 // Reopening removes server-side buffered audio as well as the pipe.
                 (process, stdin) = spawn_playback(device, options)?;
             }
-            Some(PlaybackCommand::Audio {
-                samples,
-                generation: queued_generation,
-            }) => {
+            Some(command @ (PlaybackCommand::Audio { .. } | PlaybackCommand::Original { .. })) => {
+                let (samples, queued_generation) = match command {
+                    PlaybackCommand::Original {
+                        samples,
+                        generation,
+                    } => (samples, generation),
+                    PlaybackCommand::Audio {
+                        samples,
+                        generation,
+                    } => (
+                        samples
+                            .into_iter()
+                            .map(|sample| f32::from(sample) / 32768.0)
+                            .collect(),
+                        generation,
+                    ),
+                    PlaybackCommand::Flush => unreachable!(),
+                };
                 if queued_generation != generation {
                     continue;
                 }
@@ -520,6 +740,7 @@ mod tests {
     fn audio_streams_keep_explicit_targets_and_stable_ownership_in_both_directions() {
         let options = AudioOptions {
             sample_rate: 48_000,
+            channels: 2,
             frame_ms: 20,
             latency_ms: 40,
             queue_ms: 200,
@@ -535,6 +756,8 @@ mod tests {
                 .map(|value| value.to_str().unwrap())
                 .collect();
             assert!(args.contains(&format!("--device={device}").as_str()));
+            assert!(args.contains(&"--format=float32le"));
+            assert!(args.contains(&"--channels=2"));
             assert!(args.contains(&format!("--property=babel.target={device}").as_str()));
             assert!(args.contains(&format!("--property=babel.direction={direction}").as_str()));
             for property in [
@@ -550,6 +773,90 @@ mod tests {
             // adding it would stop all audio on standard PulseAudio utilities.
             assert!(!args.contains(&"--dont-move"));
         }
+    }
+
+    #[test]
+    fn new_virtual_devices_preserve_stereo_and_float_precision() {
+        for spec in [MODULES[0], MODULES[2]] {
+            assert!(spec.arguments.contains(&"format=float32le"));
+            assert!(spec.arguments.contains(&"channels=2"));
+            assert!(
+                spec.arguments
+                    .contains(&"channel_map=front-left,front-right")
+            );
+        }
+        assert!(
+            MODULES[1]
+                .arguments
+                .contains(&"master_channel_map=front-left,front-right")
+        );
+    }
+
+    #[test]
+    fn format_upgrade_requires_exact_owned_device_and_different_format() {
+        let current = Module {
+            index: 42,
+            name: MODULES[0].kind.into(),
+            argument: MODULES[0].arguments.join(" "),
+        };
+        assert!(!format_upgrade_needed(&current, MODULES[0]));
+        let old = Module {
+            argument: current
+                .argument
+                .replace("float32le", "s16le")
+                .replace("channels=2", "channels=1"),
+            ..current.clone()
+        };
+        assert!(format_upgrade_needed(&old, MODULES[0]));
+        let external = Module {
+            argument: old.argument.replace(OWNER, "another.owner=external"),
+            ..old
+        };
+        assert!(!format_upgrade_needed(&external, MODULES[0]));
+        assert!(!format_upgrade_needed(&current, MODULES[2]));
+    }
+
+    #[test]
+    fn format_upgrade_defers_external_consumers_without_touching_physical_routes() {
+        let existing = vec![Module {
+            index: 42,
+            name: MODULES[1].kind.into(),
+            argument: MODULES[1].arguments.join(" "),
+        }];
+        let endpoints = serde_json::json!([
+            {"index":1,"name":"physical"}, {"index":2,"name":"babel_microphone"}, {"index":3,"name":"babel_mic_bus.monitor"}
+        ]);
+        let endpoints = endpoints.as_array().unwrap();
+        assert!(!external_virtual_consumers(
+            &[serde_json::json!({"source":1,"client":12})],
+            endpoints,
+            "source",
+            &existing
+        ));
+        assert!(external_virtual_consumers(
+            &[serde_json::json!({"source":2,"client":12})],
+            endpoints,
+            "source",
+            &existing
+        ));
+        assert!(!external_virtual_consumers(
+            &[serde_json::json!({"source":3,"owner_module":42})],
+            endpoints,
+            "source",
+            &existing
+        ));
+        assert!(external_virtual_consumers(
+            &[serde_json::json!({"source":3,"owner_module":99})],
+            endpoints,
+            "source",
+            &existing
+        ));
+        assert!(!external_virtual_consumers(
+            &[serde_json::json!({"source":2,"properties":{"babel.owner":"org.babel.audio.v1"}})],
+            endpoints,
+            "source",
+            &existing
+        ));
     }
 
     #[test]
@@ -613,6 +920,7 @@ mod tests {
         let playback_stats = stats.clone();
         let options = AudioOptions {
             sample_rate: 16_000,
+            channels: 1,
             frame_ms: 20,
             latency_ms: 40,
             queue_ms: 2_000,
@@ -695,7 +1003,7 @@ mod tests {
             }
         }
         ensure!(
-            maximum_rms > 1_000.0,
+            maximum_rms > 0.03,
             "no tone received through {output_device} → {input_device}"
         );
         ensure!(
@@ -703,7 +1011,7 @@ mod tests {
             "no frames captured after interruption"
         );
         ensure!(
-            after_interrupt.iter().all(|rms| *rms < 100.0),
+            after_interrupt.iter().all(|rms| *rms < 0.003),
             "obsolete audio remained after generation change"
         );
         Ok(())

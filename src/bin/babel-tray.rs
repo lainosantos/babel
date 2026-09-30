@@ -54,44 +54,37 @@ fn main() -> Result<()> {
         use babel_audio::{config::AppConfig, dashboard, engine::Controller};
         use std::sync::Arc;
         use tokio_util::sync::CancellationToken;
-        tokio::runtime::Builder::new_multi_thread()
-            .enable_all()
-            .build()?
-            .block_on(async move {
-                let instance = dashboard::InstanceGuard::acquire(&path)?;
-                let config = if instance.config_path().exists() {
-                    AppConfig::load(instance.config_path())?
-                } else {
-                    AppConfig::default()
-                };
-                let controller =
-                    Arc::new(Controller::new(config, instance.config_path().to_owned())?);
-                let cancel = CancellationToken::new();
-                let signal = cancel.clone();
-                tokio::spawn(async move {
-                    if tokio::signal::ctrl_c().await.is_ok() {
-                        signal.cancel();
-                    }
-                });
-                let tray = match babel_audio::tray::start(controller.clone(), cancel.clone()).await
-                {
-                    Ok(tray) => Some(tray),
-                    Err(error) => {
-                        tracing::warn!(
-                            "Bandeja indisponível; painel continua disponível: {error:#}"
-                        );
-                        None
-                    }
-                };
-                let result = dashboard::serve(controller.clone(), args.port, cancel.clone()).await;
-                cancel.cancel();
-                let stopped = controller.shutdown().await;
-                if let Some(tray) = tray {
-                    let _ = tokio::task::spawn_blocking(move || tray.join()).await;
+        babel_audio::execution::control_runtime()?.block_on(async move {
+            let instance = dashboard::InstanceGuard::acquire(&path)?;
+            let config = if instance.config_path().exists() {
+                AppConfig::load(instance.config_path())?
+            } else {
+                AppConfig::default()
+            };
+            let controller = Arc::new(Controller::new(config, instance.config_path().to_owned())?);
+            let cancel = CancellationToken::new();
+            let signal = cancel.clone();
+            tokio::spawn(async move {
+                if tokio::signal::ctrl_c().await.is_ok() {
+                    signal.cancel();
                 }
-                stopped?;
-                result
-            })
+            });
+            let tray = match babel_audio::tray::start(controller.clone(), cancel.clone()).await {
+                Ok(tray) => Some(tray),
+                Err(error) => {
+                    tracing::warn!("Bandeja indisponível; painel continua disponível: {error:#}");
+                    None
+                }
+            };
+            let result = dashboard::serve(controller.clone(), args.port, cancel.clone()).await;
+            cancel.cancel();
+            let stopped = controller.shutdown().await;
+            if let Some(tray) = tray {
+                let _ = tokio::task::spawn_blocking(move || tray.join()).await;
+            }
+            stopped?;
+            result
+        })
     }
 }
 

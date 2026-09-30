@@ -90,7 +90,10 @@ pub(super) async fn write_transcript(
         return writer.run(live).await;
     }
     let (output, output_rx) = mpsc::channel(128);
-    let mut writer_task = tokio::spawn(writer.run(output_rx));
+    // A session deadline can abort this parent while storage is unavailable.
+    // Keep ownership of the child task instead of detaching it on that path.
+    let mut writer_task =
+        tokio_util::task::AbortOnDropHandle::new(tokio::spawn(writer.run(output_rx)));
     let (history_tx, mut history_rx) = mpsc::channel(32);
     let replay_cancel = cancel.child_token();
     let replay_guard = replay_cancel.clone().drop_guard();

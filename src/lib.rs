@@ -9,6 +9,7 @@ pub mod config;
 pub mod credentials;
 pub mod dashboard;
 pub mod engine;
+pub mod execution;
 pub mod feedback;
 pub mod history;
 pub mod i18n;
