@@ -218,10 +218,21 @@
         <label class="switch session-feature"><input id="session-transcription-enabled" type="checkbox" data-session-feature="transcription" disabled><span class="switch-track"></span><span class="session-feature-label" data-i18n="workspace.transcription_nav">Transcription</span></label>
       </div>
       <div class="session-dock-name"><label class="session-name-field"><span><span data-i18n="ui.session_name">Session name</span> <span class="optional-label" data-i18n="ui.optional">(optional)</span></span><input id="session-name" type="text" maxlength="100" autocomplete="off" placeholder="e.g. Team meeting" disabled="" data-i18n-placeholder="ui.e_g_team_meeting"></label></div><div class="session-dock-status"><p id="session-identity" role="status" hidden=""></p><p id="history-session-status" class="session-hint" role="status" hidden></p><span id="save-state" class="save-state" data-i18n="ui.settings_loaded">Settings loaded</span><p id="session-hint" class="session-hint" data-i18n="ui.loading_devices_and_settings">Loading devices and settings…</p></div><div class="session-dock-actions"><details id="history-start-options" class="history-start-options"><summary><span id="history-advanced-label" data-i18n="history.advanced">Advanced start</span></summary><div class="history-start-panel">
+          <div class="history-buffer" aria-labelledby="history-buffer-label">
+            <span id="history-buffer-label" data-i18n="history.buffer_label">Audio available in memory</span>
+            <strong id="history-buffer-duration" role="timer" aria-live="off" aria-labelledby="history-buffer-label">—</strong>
+            <p id="history-buffer-capacity" class="field-hint"></p>
+            <p class="field-hint" data-i18n="history.buffer_scope">Microphone and incoming audio together. Simultaneous audio is counted once.</p>
+            <span id="history-buffer-update" class="history-buffer-update"></span>
+          </div>
           <label class="checkbox-label"><input id="history-include" type="checkbox" disabled aria-describedby="history-start-scope history-availability-hint"><span data-i18n="history.include">Include recent history</span></label>
-          <label class="history-request-field"><span data-i18n="history.request_minutes">Include up to (minutes)</span><input id="history-request-minutes" type="number" value="10" min="0.016666666666666666" max="10" step="any" required disabled aria-describedby="history-request-error history-available"></label>
+          <label class="history-request-field"><span data-i18n="history.request_minutes">Include up to (minutes)</span><input id="history-request-minutes" type="number" value="10" min="0.016666666666666666" max="10" step="any" required disabled aria-describedby="history-request-error history-buffer-duration history-available"></label>
           <p id="history-request-error" class="file-path-error" role="alert" hidden></p>
-          <p id="history-available" class="field-hint"></p><p id="history-availability-hint" class="field-hint"></p>
+          <dl id="history-available" class="history-available field-hint">
+            <div><dt data-i18n="history.source_microphone">Microphone</dt><dd id="history-available-microphone">—</dd></div>
+            <div><dt data-i18n="history.source_speaker">Incoming audio</dt><dd id="history-available-speaker">—</dd></div>
+          </dl>
+          <p id="history-availability-hint" class="field-hint"></p>
           <p id="history-start-scope" class="field-hint" data-i18n="history.scope">Applies only to the sources selected for recording and transcription. Translation and playback start with live audio. This choice resets after every session start.</p>
           <p class="field-hint" data-i18n="history.start_privacy">Before you start, this history is neither written to files nor sent for transcription.</p>
           <button id="history-settings-link" type="button" class="button quiet" data-workspace-field="history-enabled" data-i18n="history.settings_link">History retention settings</button>

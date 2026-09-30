@@ -4,7 +4,7 @@
   const byId = (id) => document.getElementById(id);
   const routeNames = ['microphone', 'speaker'];
   const form = byId('configuration');
-  const state = { config: null, configRevision: null, configConflict: false, syncing: false, activity: 0, devices: [], status: null, autostart: null, platform: null, platformError: null, interface: null, busy: false, dirty: false, authenticated: false, polling: false, libraryBusy: false, starting: false, cancelStarting: false, startCancelled: false, libraryRoute: null, voices: { gemini: [], elevenlabs: [] } };
+  const state = { config: null, configRevision: null, configConflict: false, syncing: false, activity: 0, devices: [], status: null, statusFresh: false, autostart: null, platform: null, platformError: null, interface: null, busy: false, dirty: false, authenticated: false, polling: false, libraryBusy: false, starting: false, cancelStarting: false, startCancelled: false, libraryRoute: null, voices: { gemini: [], elevenlabs: [] } };
   const i18n = window.BabelI18n;
   const t = (key, values) => i18n.t(key, values);
   const filePathPreview = { revision: 0, timer: null, controller: null, phase: 'idle', paths: null, error: '' };
@@ -604,6 +604,30 @@
       && Number(state.status.history[`${route}_secs`]) > 0);
   }
 
+  function historyDuration(seconds, padded = false) {
+    const safe = Number.isFinite(Number(seconds)) ? Math.max(0, Math.floor(Number(seconds))) : 0;
+    const digits = padded ? { minimumIntegerDigits: 2 } : undefined;
+    return t('history.duration', { minutes: i18n.number(Math.floor(safe / 60), digits), seconds: i18n.number(safe % 60, digits) });
+  }
+
+  function renderHistoryBuffer() {
+    const buffer = state.status?.history;
+    const known = state.statusFresh && Number.isFinite(buffer?.combined_audio_secs);
+    const current = known ? historyDuration(buffer.enabled ? buffer.combined_audio_secs : 0, true) : '—';
+    const reading = byId('history-buffer-duration');
+    if (reading.textContent !== current) reading.textContent = current;
+    byId('history-buffer-capacity').textContent = Number.isFinite(buffer?.capacity_secs)
+      ? t('history.buffer_capacity', { duration: historyDuration(buffer.capacity_secs) }) : '';
+    const update = byId('history-buffer-update');
+    update.textContent = t(!known ? 'history.buffer_unavailable' : buffer.enabled ? 'history.buffer_live' : 'history.buffer_disabled');
+    update.dataset.live = String(Boolean(known && buffer.enabled));
+    for (const route of routeNames) {
+      const seconds = buffer?.[`${route}_secs`];
+      byId(`history-available-${route}`).textContent = state.statusFresh && Number.isFinite(seconds)
+        ? historyDuration(seconds, true) : '—';
+    }
+  }
+
   function updateHistoryControls(unavailable, running) {
     const retention = byId('history-duration-minutes');
     const capacity = historySeconds(retention);
@@ -624,13 +648,8 @@
     byId('history-request-error').hidden = !requestError;
     byId('history-start-options').hidden = running || state.starting;
     byId('history-advanced-label').textContent = t(include.checked ? 'history.advanced_selected' : 'history.advanced');
-    const duration = seconds => {
-      const safe = Number.isFinite(Number(seconds)) ? Math.max(0, Math.floor(Number(seconds))) : 0;
-      return t('history.duration', { minutes: i18n.number(Math.floor(safe / 60)), seconds: i18n.number(safe % 60) });
-    };
-    byId('history-available').textContent = t('history.available', {
-      microphone: duration(state.status?.history?.microphone_secs), speaker: duration(state.status?.history?.speaker_secs),
-    });
+    const duration = historyDuration;
+    renderHistoryBuffer();
     const reason = !byId('history-enabled').checked || !state.status?.history?.enabled ? 'history.disabled_hint'
       : !byId('recording-enabled').checked && !byId('transcription-enabled').checked ? 'history.features_hint'
       : !historySelectionAvailable() ? 'history.empty_hint' : 'history.partial_hint';
@@ -700,8 +719,9 @@
           : t("ui.choose_which_features_to_use_and_start_a_session_to_translate_transcribe_or");
   }
 
-  function renderStatus(status) {
+  function renderStatus(status, fresh = true) {
     state.status = status;
+    state.statusFresh = fresh;
     renderLocalRuntime();
     const sessionIdentity = status.session_name || status.session_id;
     const sessionLabel = sessionIdentity ? t(status.running ? 'session.identity' : 'session.previous', { name: sessionIdentity }) : '';
@@ -749,6 +769,8 @@
       renderStatus(status);
       if (!state.starting) await synchronizeConfig(status);
     } catch (error) {
+      state.statusFresh = false;
+      renderHistoryBuffer();
       byId('session-state').textContent = t("ui.disconnected");
       byId('status-dot').className = 'status-dot error';
       showError(t('error.connection', { error: error.message }));
@@ -1136,7 +1158,7 @@
     renderFilePathPreview();
     if (state.config) {
       updateProviderControls(); updateGainLabels(); updateQualityHint();
-      if (state.status) renderStatus(state.status);
+      if (state.status) renderStatus(state.status, state.statusFresh);
       libraryControls();
       renderAutostartDescription();
       updateControls();

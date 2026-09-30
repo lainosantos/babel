@@ -63,6 +63,9 @@ pub struct HistoryStatus {
     pub capacity_secs: u32,
     /// Wall-clock coverage up to now, including gaps after/between captures.
     pub available_secs: f64,
+    /// Union of retained sample intervals across both lanes: gaps are excluded
+    /// and simultaneous microphone/output audio is counted only once.
+    pub combined_audio_secs: f64,
     /// Retained PCM durations per lane, excluding gaps.
     pub microphone_secs: f64,
     pub speaker_secs: f64,
@@ -74,6 +77,7 @@ impl Default for HistoryStatus {
             enabled: false,
             capacity_secs: HistoryConfig::default().duration_secs,
             available_secs: 0.0,
+            combined_audio_secs: 0.0,
             microphone_secs: 0.0,
             speaker_secs: 0.0,
             buffered_bytes: 0,
@@ -162,6 +166,43 @@ impl Contents {
             .flat_map(|lane| &lane.frames)
             .map(HistoryFrame::started_at)
             .min()
+    }
+
+    fn combined_audio_duration(&self) -> Duration {
+        // Capture end timestamps are monotonic within each lane, but starts
+        // need not be: a longer frame may start before its predecessor. Merge
+        // backwards by end time so variable frame sizes and overlapping chunks
+        // require neither sorting nor a temporary allocation for each status.
+        let mut microphone = self.lanes[0].frames.iter().rev().peekable();
+        let mut speaker = self.lanes[1].frames.iter().rev().peekable();
+        let mut interval: Option<(Instant, Instant)> = None;
+        let mut total = Duration::ZERO;
+        loop {
+            let next = match (microphone.peek(), speaker.peek()) {
+                (Some(mic), Some(output)) if mic.captured_at >= output.captured_at => {
+                    microphone.next()
+                }
+                (Some(_), Some(_)) => speaker.next(),
+                (Some(_), None) => microphone.next(),
+                (None, Some(_)) => speaker.next(),
+                (None, None) => break,
+            };
+            let Some(frame) = next else { break };
+            let start = frame.started_at();
+            let end = frame.captured_at;
+            interval = Some(match interval {
+                Some((earliest, latest)) if end >= earliest => (earliest.min(start), latest),
+                Some((earliest, latest)) => {
+                    total += latest.duration_since(earliest);
+                    (start, end)
+                }
+                None => (start, end),
+            });
+        }
+        if let Some((start, end)) = interval {
+            total += end.duration_since(start);
+        }
+        total
     }
 }
 
@@ -309,6 +350,7 @@ impl HistoryBuffer {
             available_secs: contents.first_sample().map_or(0.0, |start| {
                 now.saturating_duration_since(start).as_secs_f64()
             }),
+            combined_audio_secs: contents.combined_audio_duration().as_secs_f64(),
             microphone_secs: seconds(&contents.lanes[0]),
             speaker_secs: seconds(&contents.lanes[1]),
             buffered_bytes: contents
@@ -366,6 +408,90 @@ mod tests {
             enabled: true,
             duration_secs: seconds,
         })
+    }
+
+    #[test]
+    fn combined_audio_counts_simultaneous_sources_once() {
+        let history = buffer(10);
+        let now = Instant::now();
+        history.push(Microphone, &vec![1; SAMPLE_RATE], now);
+        history.push(Speaker, &vec![2; SAMPLE_RATE], now);
+        let status = history.status(now);
+        assert_eq!(status.microphone_secs, 1.0);
+        assert_eq!(status.speaker_secs, 1.0);
+        assert_eq!(status.combined_audio_secs, 1.0);
+        assert_eq!(status.available_secs, 1.0);
+        assert_eq!(status.capacity_secs, 10);
+    }
+
+    #[test]
+    fn combined_audio_excludes_gaps_and_does_not_grow_when_capture_stops() {
+        let history = buffer(10);
+        let now = Instant::now();
+        history.push(Microphone, &[1; 4800], now - Duration::from_millis(700));
+        history.push(Speaker, &[2; 4800], now);
+        let initial = history.status(now);
+        assert_eq!(initial.combined_audio_secs, 0.6);
+        assert_eq!(initial.available_secs, 1.0);
+        let stopped = history.status(now + Duration::from_secs(2));
+        assert_eq!(stopped.combined_audio_secs, 0.6);
+        assert_eq!(stopped.available_secs, 3.0);
+    }
+
+    #[test]
+    fn combined_audio_handles_variable_frame_starts_and_cross_lane_overlap() {
+        let history = buffer(10);
+        let now = Instant::now();
+        // Starts are deliberately out of order in the microphone lane: the
+        // second, longer chunk fully contains the first despite ending later.
+        history.push(Microphone, &[1; 1600], now - Duration::from_millis(500));
+        history.push(
+            Microphone,
+            &vec![2; SAMPLE_RATE],
+            now - Duration::from_millis(400),
+        );
+        history.push(Speaker, &[3; 8800], now);
+        let status = history.status(now);
+        assert_eq!(status.microphone_secs, 1.1);
+        assert_eq!(status.speaker_secs, 0.55);
+        assert_eq!(status.combined_audio_secs, 1.4);
+    }
+
+    #[test]
+    fn combined_audio_tracks_partial_expiration_and_disabled_state() {
+        let history = buffer(2);
+        let now = Instant::now();
+        history.push(
+            Microphone,
+            &vec![1; SAMPLE_RATE],
+            now - Duration::from_millis(500),
+        );
+        history.push(Speaker, &vec![2; SAMPLE_RATE], now);
+        assert_eq!(history.status(now).combined_audio_secs, 1.5);
+        assert_eq!(
+            history
+                .status(now + Duration::from_millis(750))
+                .combined_audio_secs,
+            1.25
+        );
+        assert_eq!(
+            history
+                .status(now + Duration::from_secs(2))
+                .combined_audio_secs,
+            0.0
+        );
+        let fresh = now + Duration::from_secs(3);
+        history.push(Microphone, &[1; 160], fresh);
+        assert_eq!(history.status(fresh).combined_audio_secs, 0.01);
+        history.configure(&HistoryConfig {
+            enabled: false,
+            duration_secs: 2,
+        });
+        let disabled = history.status(fresh);
+        assert_eq!(disabled.combined_audio_secs, 0.0);
+        assert_eq!(disabled.available_secs, 0.0);
+        assert_eq!(disabled.buffered_bytes, 0);
+        assert_eq!(HistoryStatus::default().combined_audio_secs, 0.0);
     }
 
     #[test]

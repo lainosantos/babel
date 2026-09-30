@@ -62,7 +62,7 @@ async function page(t, options = {}) {
   let firstStatus = true;
   let running = false;
   let localRuntime = { phase: 'idle', message: null, download: null, services: [] };
-  let audioHistory = { enabled: true, capacity_secs: 600, available_secs: 180, microphone_secs: 180, speaker_secs: 90, ...options.history };
+  let audioHistory = { enabled: true, capacity_secs: 600, available_secs: 180, combined_audio_secs: 180, microphone_secs: 180, speaker_secs: 90, ...options.history };
   let historySession = { history_included_secs: 0, history_transcription_pending: false, ...options.historySession };
   let routingActive = true;
   let routingError = null;
@@ -80,6 +80,7 @@ async function page(t, options = {}) {
   window.HTMLDialogElement.prototype.close = function () { this.open = false; };
   const initialChange = options.initialChange;
   const startRequest = options.startRequest;
+  const statusRequest = options.statusRequest;
   window.fetch = async (url, options) => {
     const parsed = new URL(url, window.location.origin);
     if (parsed.pathname.startsWith('/locales/')) {
@@ -104,6 +105,7 @@ async function page(t, options = {}) {
     }
     else if (parsed.pathname === '/api/devices') value = [{ id: 'physical-mic', name: 'Physical mic', direction: 'input', is_virtual: false }, { id: 'physical-speaker', name: 'Headphones', direction: 'output', is_virtual: false }, { id: 'babel_mic_bus', name: platformOs === 'macos' ? 'Babel Microphone' : platformOs === 'windows' ? 'Babel Microphone Feed' : 'Virtual microphone', direction: 'output', is_virtual: true }, { id: 'babel_speaker.monitor', name: platformOs === 'macos' ? 'Babel Speaker' : platformOs === 'windows' ? 'Babel Speaker Monitor' : 'Virtual output', direction: 'input', is_virtual: true }];
     else if (parsed.pathname === '/api/status') {
+      if (statusRequest) await statusRequest();
       if (firstStatus && initialChange) { initialChange(config); revision++; }
       firstStatus = false;
       const route = name => ({ ...metrics, state: running && config[name].enabled ? 'streaming' : routingActive || running ? 'passthrough' : 'stopped', ...routeStatuses[name] });
@@ -1607,7 +1609,8 @@ test('history is opt-in per start with shorter availability and the existing rev
   p.set('recording-speaker', false);
   p.set('history-include', true);
   p.set('session-name', 'Meeting with history');
-  assert.match(p.byId('history-available').textContent, /microphone 3 min 0 s; incoming audio 1 min 30 s/);
+  assert.equal(p.byId('history-available-microphone').textContent, '03 min 00 s');
+  assert.equal(p.byId('history-available-speaker').textContent, '01 min 30 s');
   assert.match(p.byId('history-availability-hint').textContent, /only the available portion/);
   p.byId('start').click();
   await settle(() => !p.byId('stop').hidden);
@@ -1621,6 +1624,61 @@ test('history is opt-in per start with shorter availability and the existing rev
   p.byId('start').click();
   await settle(() => !p.byId('stop').hidden);
   assert.equal(p.calls.filter(call => call.path === '/api/start')[1].body.history_seconds, 0);
+});
+
+test('advanced start shows live combined audio without enabling history or changing the requested duration', async t => {
+  const p = await page(t, { language: 'en' });
+  p.byId('history-start-options').open = true;
+  const reading = p.byId('history-buffer-duration');
+  assert.equal(reading.textContent, '03 min 00 s');
+  assert.equal(reading.getAttribute('aria-live'), 'off', 'avoid speaking a timer every second');
+  assert.equal(p.byId('history-include').checked, false);
+  assert.equal(p.byId('history-buffer-capacity').textContent, 'Buffer capacity: 10 min 0 s');
+  p.set('recording-enabled', true);
+  p.set('history-include', true);
+  p.set('history-request-minutes', 1.5);
+  const writes = p.calls.filter(call => call.options.method !== 'GET').length;
+  for (const seconds of [181, 182, 599, 600, 601, 3599, 3600, 95, 0]) {
+    // The backend's union is authoritative, never the sum of the two lanes
+    // or the retrospective window (which includes time without capture).
+    p.history({ enabled: true, capacity_secs: 600, available_secs: 600,
+      combined_audio_secs: seconds, microphone_secs: seconds, speaker_secs: seconds });
+    await p.poll();
+    const duration = `${String(Math.floor(seconds / 60)).padStart(2, '0')} min ${String(seconds % 60).padStart(2, '0')} s`;
+    assert.equal(reading.textContent, duration);
+    assert.equal(reading.textContent.length, 11, 'digit boundaries keep a stable clock width');
+    assert.equal(p.byId('history-available-microphone').textContent, duration);
+    assert.equal(p.byId('history-available-speaker').textContent, duration);
+    assert.equal(p.byId('history-start-options').open, true);
+    assert.equal(p.byId('history-request-minutes').value, '1.5');
+    assert.equal(p.byId('history-include').checked, true);
+  }
+  assert.equal(p.byId('history-buffer-update').textContent, 'Updated every second');
+  assert.equal(p.calls.filter(call => call.options.method !== 'GET').length, writes);
+});
+
+test('buffer timer distinguishes disabled, unavailable and recovered status in both interface languages', async t => {
+  let offline = false;
+  const p = await page(t, { language: 'pt', statusRequest: () => { if (offline) throw new Error('offline fixture'); } });
+  assert.equal(p.byId('history-buffer-label').textContent, 'Áudio disponível na memória');
+  assert.equal(p.byId('history-buffer-update').textContent, 'Atualizado a cada segundo');
+  offline = true;
+  await p.poll();
+  assert.equal(p.byId('history-buffer-duration').textContent, '—');
+  assert.equal(p.byId('history-buffer-update').textContent, 'Informações do buffer indisponíveis no momento');
+  offline = false;
+  p.history({ enabled: false, capacity_secs: 600, combined_audio_secs: 0, microphone_secs: 0, speaker_secs: 0 });
+  await p.poll();
+  assert.equal(p.byId('history-buffer-duration').textContent, '00 min 00 s');
+  assert.equal(p.byId('history-buffer-update').textContent, 'Buffer desativado');
+  assert.equal(p.byId('history-buffer-update').dataset.live, 'false');
+  p.history({ enabled: true, capacity_secs: 600, microphone_secs: 100, speaker_secs: 100 });
+  await p.poll();
+  assert.equal(p.byId('history-buffer-duration').textContent, '—', 'older API cannot supply a combined duration');
+  p.history({ enabled: true, capacity_secs: 600, combined_audio_secs: 42, microphone_secs: 42, speaker_secs: 42 });
+  await p.poll();
+  assert.equal(p.byId('history-buffer-duration').textContent, '00 min 42 s');
+  assert.equal(p.byId('history-buffer-update').dataset.live, 'true');
 });
 
 test('history request is session-only while retention serializes minutes as seconds', async t => {
