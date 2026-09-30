@@ -139,17 +139,12 @@ pub(super) async fn write_transcript(
         output.send(TranscriptRecord::Section("From the session start".into()))
             .await.context("Transcript file closed")?;
         for record in backlog { output.send(record).await.context("Transcript file closed")?; }
-        if replay_result.is_err() {
-            // Preserve live results already accepted when Stop cancels replay.
-            while let Ok(record) = live.try_recv() {
-                output.send(record).await.context("Transcript file closed")?;
-            }
-        }
-        replay_result?;
+        // Cancelling the optional history prefix must not discard live finals
+        // still arriving after the capture routes have stopped.
         while let Some(record) = live.recv().await {
             output.send(record).await.context("Transcript file closed")?;
         }
-        Ok(())
+        replay_result
     }.await;
     drop(replay_guard);
     drop(output);
@@ -687,10 +682,20 @@ mod tests {
         })
         .await
         .unwrap();
-        drop(live);
         let cancel = CancellationToken::new();
         cancel.cancel();
         let pending = Arc::new(AtomicBool::new(true));
+        let final_text = tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            live.send(TranscriptRecord::Text {
+                input: true,
+                text: "Final original received after capture stopped".into(),
+                metadata: Default::default(),
+                received_at: chrono::Utc::now().to_rfc3339(),
+            })
+            .await
+            .unwrap();
+        });
         let result = tokio::time::timeout(
             Duration::from_secs(2),
             write_transcript(writer, rx, config, snapshot, cancel, pending.clone()),
@@ -698,10 +703,12 @@ mod tests {
         .await
         .unwrap();
         assert!(result.is_err());
+        final_text.await.unwrap();
         assert!(!pending.load(Ordering::Acquire));
         let text = std::fs::read_to_string(directory.path().join("cancelled.txt")).unwrap();
         assert!(text.contains("Incomplete history:"));
         assert!(text.contains("resultado ao vivo já aceito"));
+        assert!(text.contains("Final original received after capture stopped"));
     }
 
     #[tokio::test]

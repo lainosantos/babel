@@ -3,6 +3,7 @@ mod agent;
 mod command_tools;
 mod history;
 mod notifications;
+mod recognition;
 mod route;
 mod routing;
 use route::run_route;
@@ -35,6 +36,7 @@ const INPUT_RATE: u32 = 16_000;
 const OUTPUT_RATE: u32 = 24_000;
 const OUTPUT_FRAME_MS: u32 = 20;
 const OUTPUT_FRAME_SAMPLES: usize = 480;
+const PROCESSING_FINALIZE_TIMEOUT: Duration = Duration::from_secs(15);
 
 #[derive(Debug)]
 pub struct ConfigurationChanged;
@@ -715,7 +717,8 @@ impl Controller {
         cancel_pending_start(&mut state);
         if let Some(mut running) = state.running.take() {
             running.cancel.cancel();
-            let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+            let deadline =
+                tokio::time::Instant::now() + PROCESSING_FINALIZE_TIMEOUT + Duration::from_secs(5);
             let closed = running.routes_closed.clone();
             let first = tokio::time::timeout_at(deadline, async {
                 tokio::select! {
@@ -890,13 +893,12 @@ struct TranscriptSink {
 
 #[derive(Clone)]
 struct RouteIo {
-    transcript: Option<TranscriptSink>,
+    recognition: Option<recognition::Sink>,
     audio: Option<mpsc::Sender<AudioRecord>>,
     origin: TranscriptOrigin,
     capture_changes: watch::Receiver<String>,
     playback_changes: watch::Receiver<String>,
     history: Arc<crate::history::HistoryBuffer>,
-    session_origin: Instant,
 }
 
 async fn run_session(
@@ -1016,6 +1018,19 @@ async fn run_session(
                 None
             };
             let audio = if record_audio { audio_tx.clone() } else { None };
+            let recognition = transcript.map(|transcript| {
+                let (sink, worker) =
+                    recognition::start(cfg.clone(), transcript, metrics.clone(), io.session_origin);
+                writers.spawn_on(
+                    observe_session_writer(
+                        worker,
+                        "Original speech transcription",
+                        [Some(metrics.clone()), None],
+                    ),
+                    &processing_handle,
+                );
+                sink
+            });
             routes.spawn_on(
                 run_selected_route(
                     name,
@@ -1025,13 +1040,12 @@ async fn run_session(
                     cancel.child_token(),
                     usage.clone(),
                     RouteIo {
-                        transcript,
+                        recognition,
                         audio,
                         origin,
                         capture_changes,
                         playback_changes,
                         history: io.history.clone(),
-                        session_origin: io.session_origin,
                     },
                 ),
                 &control_handle,
@@ -1123,17 +1137,13 @@ async fn supervise_session(
             retain_session_failure(&mut failure, completed, &metrics);
         }
         closed.close();
-        while let Some(completed) = writers.join_next().await {
-            retain_session_failure(&mut failure, completed, &metrics);
-        }
     })
     .await;
     if drained.is_err() {
         routes.abort_all();
-        writers.abort_all();
         // Aborted workers cannot retain device ownership or writer senders.
         // Their JoinSets are dropped immediately; no unbounded drain follows.
-        let error = "Timed out while finalizing processing/files; files may be incomplete";
+        let error = "Timed out while stopping audio devices";
         for route in &metrics {
             route.report_processing_error(error);
         }
@@ -1143,6 +1153,24 @@ async fn supervise_session(
     }
     drop(routes);
     closed.close();
+    // Recognition flushes already captured originals after device ownership has
+    // ended. Restored routing never waits on this bounded network/file drain.
+    let finalized = tokio::time::timeout(PROCESSING_FINALIZE_TIMEOUT, async {
+        while let Some(completed) = writers.join_next().await {
+            retain_session_failure(&mut failure, completed, &metrics);
+        }
+    })
+    .await;
+    if finalized.is_err() {
+        writers.abort_all();
+        let error = "Timed out while finalizing processing/files; files may be incomplete";
+        for route in &metrics {
+            route.report_processing_error(error);
+        }
+        if failure.is_none() {
+            failure = Some(anyhow!(error));
+        }
+    }
     failure.map_or(Ok(()), Err)
 }
 
@@ -1188,19 +1216,13 @@ async fn run_selected_route(
         let io = io.clone();
         let processing = processing.clone();
         async move {
-            // The outer RouteIo keeps both writers alive across activations.
-            // Each activation gets fresh provider connections and PCM/event queues,
-            // so delayed translation or ASR from a previous turn cannot escape.
-            let transcript = io.transcript.clone();
-            let result = processing_route(
+            // Translation/playback are scoped to this activation. Original STT
+            // belongs to the session so a pause can still produce its final text.
+            processing_route(
                 &processing,
                 run_route(name, cfg, route, metrics.clone(), active_cancel, io),
             )
-            .await;
-            if let Err(error) = record(&transcript, TranscriptRecord::Gap) {
-                metrics.report_processing_error(&format!("{error:#}"));
-            }
-            result
+            .await
         }
     })
     .await
@@ -1497,7 +1519,7 @@ mod tests {
         assert!(closed.is_closed());
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn stalled_session_writer_does_not_hold_routes_or_unbounded_shutdown() {
         let cancel = CancellationToken::new();
         let (routes, mut ports) = synthetic_session_routes(&cancel);
@@ -1529,10 +1551,13 @@ mod tests {
             !supervisor.is_finished(),
             "The writer is still pending after routes close"
         );
-        let result = tokio::time::timeout(Duration::from_secs(4), supervisor)
-            .await
-            .expect("Shutdown has a global deadline")
-            .unwrap();
+        let result = tokio::time::timeout(
+            PROCESSING_FINALIZE_TIMEOUT + Duration::from_secs(1),
+            supervisor,
+        )
+        .await
+        .expect("Shutdown has a global deadline")
+        .unwrap();
         assert!(result.unwrap_err().to_string().contains("incomplete"));
         assert!(
             tokio::time::timeout(Duration::from_secs(1), writer_dropped)

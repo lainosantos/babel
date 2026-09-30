@@ -154,9 +154,10 @@ Folders and files are prepared before stopping original routing. After closing
 the previous streams, the controller fixes the history boundary and adjusts the
 WAV time origin, avoiding artificial silence caused by file-opening time. On
 stop, closing routes releases original-routing restart while writers continue
-finalizing. The supervisor applies one global three-second drain deadline;
-if exceeded, it aborts tasks and reports potentially incomplete files. The
-controller also bounds its wait. Reopening devices and ending delayed tasks
+finalizing. The supervisor allows three seconds to release routes, then up to
+15 seconds for session-owned STT and file writers to finish. A processing
+deadline never prolongs device ownership. A timeout reports potentially
+incomplete files, and the controller also bounds its total wait. Reopening devices and ending delayed tasks
 can produce a gap; if an executor or OS call blocks, the deadline does not make
 shutdown instantaneous or guarantee preemption of a blocking call.
 
@@ -181,14 +182,18 @@ waiting state; `running` still represents the session, while `routing_active`
 is true only if at least one direction is processing.
 
 When a route's activity condition disappears, its supervisor cancels capture,
-playback, provider and voice activation. It closes streams and discards queues
-before reopening. The next activation creates new connections/channels: audio
-or transcript events from the previous connection cannot enter the new one.
+playback, translation and voice-command activation. It closes streams and
+discards playback queues before reopening. Original STT is owned by the session,
+with one lazily opened recognizer per source and bounded pending PCM. It can
+finish a result after a device pauses, but has no playback handles and receives
+no new originals while the route is unselected. Captured timestamps map provider
+offsets back across source pauses. The next activation recreates translation
+connections/channels, so delayed translated audio cannot enter the new one.
 Separate epochs per direction preserve even rapid off/on changes coalesced by
 the control channel. The session name/ID and TXT/WAV writers remain; the
-transcript gets a break and the WAV retains the session clock. This pause can
-interrupt an utterance in progress but does not replay the delayed utterance
-on return. Inspection failure closes routes and appears in the dashboard.
+WAV retains the session clock. A normal pause no longer creates a spurious
+transcription interruption marker; actual provider reconnects or processing
+losses still do. Inspection failure closes routes and appears in the dashboard.
 On Windows, a COM MTA worker queries the system's default microphone and checks
 WASAPI sessions on the opposite side of each Babel cable (or optional VB-Audio
 cable), excluding Babel's PID. Pairing uses endpoint IDs and driver metadata;

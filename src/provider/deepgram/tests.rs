@@ -45,74 +45,76 @@ async fn next_event(events: &mut mpsc::Receiver<ProviderEvent>) -> ProviderEvent
 }
 
 #[tokio::test]
-async fn history_preserves_queued_pcm_and_waits_for_close_stream_metadata() {
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let url = format!("ws://{}/v1/listen", listener.local_addr().unwrap());
-    let (release, released) = tokio::sync::oneshot::channel();
-    let server = tokio::spawn(async move {
-        let (stream, _) = listener.accept().await.unwrap();
-        let mut socket = accept_async(stream).await.unwrap();
-        let mut samples = 0;
-        loop {
-            match socket.next().await.unwrap().unwrap() {
-                Message::Binary(bytes) => samples += bytes.len() / 2,
-                Message::Text(text) => {
-                    assert_eq!(
-                        serde_json::from_str::<Value>(&text).unwrap()["type"],
-                        "CloseStream"
-                    );
-                    break;
+async fn ended_source_preserves_queued_pcm_and_waits_for_close_stream_metadata() {
+    for history in [true, false] {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("ws://{}/v1/listen", listener.local_addr().unwrap());
+        let (release, released) = tokio::sync::oneshot::channel();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut socket = accept_async(stream).await.unwrap();
+            let mut samples = 0;
+            loop {
+                match socket.next().await.unwrap().unwrap() {
+                    Message::Binary(bytes) => samples += bytes.len() / 2,
+                    Message::Text(text) => {
+                        assert_eq!(
+                            serde_json::from_str::<Value>(&text).unwrap()["type"],
+                            "CloseStream"
+                        );
+                        break;
+                    }
+                    other => panic!("unexpected history message {other:?}"),
                 }
-                other => panic!("unexpected history message {other:?}"),
             }
-        }
-        assert_eq!(samples, 16321);
-        socket
-            .send(Message::Text(
-                final_result(0.9, "Last original.", false)
-                    .to_string()
-                    .into(),
-            ))
+            assert_eq!(samples, 16321);
+            socket
+                .send(Message::Text(
+                    final_result(0.9, "Last original.", false)
+                        .to_string()
+                        .into(),
+                ))
+                .await
+                .unwrap();
+            released.await.unwrap();
+            socket
+                .send(Message::Text(
+                    json!({"type":"Metadata","duration":1.0200625,"channels":1})
+                        .to_string()
+                        .into(),
+                ))
+                .await
+                .unwrap();
+        });
+        let provider = DeepgramProvider::new(DeepgramSttConfig::default()).unwrap();
+        let (tx, mut rx) = mpsc::channel(2);
+        tx.send(vec![0; 16000]).await.unwrap();
+        tx.send(vec![4000; 321]).await.unwrap();
+        drop(tx);
+        let (events, mut received) = mpsc::channel(8);
+        let worker = tokio::spawn(async move {
+            provider
+                .connection_mode(&url, "synthetic-key", &mut rx, &events, history)
+                .await
+        });
+        assert_eq!(next_event(&mut received).await, ProviderEvent::Connected);
+        assert!(matches!(
+            next_event(&mut received).await,
+            ProviderEvent::Transcript { input: true, .. }
+        ));
+        assert!(
+            !worker.is_finished(),
+            "a final utterance is not end-of-history acknowledgement"
+        );
+        release.send(()).unwrap();
+        timeout(Duration::from_secs(3), worker)
             .await
+            .unwrap()
+            .unwrap()
             .unwrap();
-        released.await.unwrap();
-        socket
-            .send(Message::Text(
-                json!({"type":"Metadata","duration":1.0200625,"channels":1})
-                    .to_string()
-                    .into(),
-            ))
-            .await
-            .unwrap();
-    });
-    let provider = DeepgramProvider::new(DeepgramSttConfig::default()).unwrap();
-    let (tx, mut rx) = mpsc::channel(2);
-    tx.send(vec![0; 16000]).await.unwrap();
-    tx.send(vec![4000; 321]).await.unwrap();
-    drop(tx);
-    let (events, mut received) = mpsc::channel(8);
-    let worker = tokio::spawn(async move {
-        provider
-            .connection_mode(&url, "synthetic-key", &mut rx, &events, true)
-            .await
-    });
-    assert_eq!(next_event(&mut received).await, ProviderEvent::Connected);
-    assert!(matches!(
-        next_event(&mut received).await,
-        ProviderEvent::Transcript { input: true, .. }
-    ));
-    assert!(
-        !worker.is_finished(),
-        "a final utterance is not end-of-history acknowledgement"
-    );
-    release.send(()).unwrap();
-    timeout(Duration::from_secs(3), worker)
-        .await
-        .unwrap()
-        .unwrap()
-        .unwrap();
-    assert_eq!(next_event(&mut received).await, ProviderEvent::TurnComplete);
-    server.await.unwrap();
+        assert_eq!(next_event(&mut received).await, ProviderEvent::TurnComplete);
+        server.await.unwrap();
+    }
 }
 
 #[tokio::test]
@@ -171,6 +173,226 @@ async fn history_missing_completion_times_out_as_error() {
     let error = worker.await.unwrap().unwrap_err();
     assert!(error.message.contains("acknowledgement timed out"));
     server.abort();
+}
+
+#[tokio::test]
+async fn live_eof_drains_original_finals_and_requires_terminal_metadata() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("ws://{}/v1/listen", listener.local_addr().unwrap());
+    let (release, released) = tokio::sync::oneshot::channel();
+    let server = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        let mut socket = accept_async(stream).await.unwrap();
+        assert_eq!(
+            socket.next().await.unwrap().unwrap(),
+            Message::Binary(vec![12, 0, 222, 255].into())
+        );
+        let close = socket.next().await.unwrap().unwrap().into_text().unwrap();
+        assert_eq!(
+            serde_json::from_str::<Value>(&close).unwrap()["type"],
+            "CloseStream"
+        );
+        socket
+            .send(Message::Text(
+                final_result(0.0, "Final original words.", false)
+                    .to_string()
+                    .into(),
+            ))
+            .await
+            .unwrap();
+        released.await.unwrap();
+        socket
+            .send(Message::Text(json!({"type":"Metadata"}).to_string().into()))
+            .await
+            .unwrap();
+    });
+    let provider = DeepgramProvider::new(DeepgramSttConfig::default()).unwrap();
+    let (audio, mut input) = mpsc::channel(2);
+    let (events, mut received) = mpsc::channel(8);
+    let worker = tokio::spawn(async move {
+        provider
+            .connection_mode(&url, "synthetic-key", &mut input, &events, false)
+            .await
+    });
+    assert_eq!(next_event(&mut received).await, ProviderEvent::Connected);
+    audio.send(vec![12, -34]).await.unwrap();
+    drop(audio);
+    assert_eq!(
+        next_event(&mut received).await,
+        transcript("Final original words.".into(), None, 0, 1000)
+    );
+    assert!(
+        !worker.is_finished(),
+        "final Results alone do not acknowledge the complete source"
+    );
+    release.send(()).unwrap();
+    timeout(Duration::from_secs(2), worker)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert_eq!(next_event(&mut received).await, ProviderEvent::TurnComplete);
+    server.await.unwrap();
+}
+
+#[tokio::test]
+async fn live_eof_without_metadata_fails_without_reconnecting() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let reference = "BABEL_TEST_DEEPGRAM_EOF_CLOSE";
+    let provider = provider(listener.local_addr().unwrap().port(), reference, 2);
+    let server = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        let mut socket = accept_async(stream).await.unwrap();
+        let close = socket.next().await.unwrap().unwrap().into_text().unwrap();
+        assert_eq!(
+            serde_json::from_str::<Value>(&close).unwrap()["type"],
+            "CloseStream"
+        );
+        socket.close(None).await.unwrap();
+        // Keep the listener alive: an incorrect retry must not look like a
+        // successful drain just because a replacement socket failed to open.
+        std::future::pending::<()>().await;
+    });
+    let (audio, input) = mpsc::channel(1);
+    let (events, mut received) = mpsc::channel(8);
+    let worker = tokio::spawn(async move {
+        provider
+            .run(session(), input, events, CancellationToken::new())
+            .await
+    });
+    assert_eq!(next_event(&mut received).await, ProviderEvent::Connected);
+    drop(audio);
+    let error = timeout(Duration::from_secs(2), worker)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap_err();
+    assert!(error.to_string().contains("completion acknowledgement"));
+    assert!(received.recv().await.is_none());
+    server.abort();
+    let _ = server.await;
+    crate::credentials::clear(reference).unwrap();
+}
+
+#[tokio::test]
+async fn live_eof_deadline_is_five_seconds_and_cancellation_stays_prompt() {
+    for stopping in [false, true] {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let reference = format!("BABEL_TEST_DEEPGRAM_EOF_TIMEOUT_{stopping}");
+        let provider = provider(listener.local_addr().unwrap().port(), &reference, 2);
+        let (flushed, flushed_rx) = tokio::sync::oneshot::channel();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut socket = accept_async(stream).await.unwrap();
+            let close = socket.next().await.unwrap().unwrap().into_text().unwrap();
+            assert_eq!(
+                serde_json::from_str::<Value>(&close).unwrap()["type"],
+                "CloseStream"
+            );
+            flushed.send(()).unwrap();
+            std::future::pending::<()>().await;
+            drop(socket);
+        });
+        let (audio, input) = mpsc::channel(1);
+        let (events, mut received) = mpsc::channel(8);
+        let cancel = CancellationToken::new();
+        let token = cancel.clone();
+        let worker =
+            tokio::spawn(async move { provider.run(session(), input, events, token).await });
+        assert_eq!(next_event(&mut received).await, ProviderEvent::Connected);
+        drop(audio);
+        flushed_rx.await.unwrap();
+        tokio::task::yield_now().await;
+        tokio::time::pause();
+        let started = Instant::now();
+        if stopping {
+            cancel.cancel();
+            worker.await.unwrap().unwrap();
+            assert_eq!(started.elapsed(), Duration::ZERO);
+        } else {
+            tokio::time::advance(Duration::from_secs(5)).await;
+            let error = worker.await.unwrap().unwrap_err();
+            assert!(error.to_string().contains("acknowledgement timed out"));
+            assert!(
+                (Duration::from_secs(5)..=Duration::from_millis(5010)).contains(&started.elapsed()),
+                "the final deadline permits only Tokio timer granularity"
+            );
+        }
+        assert!(received.recv().await.is_none());
+        tokio::time::resume();
+        server.abort();
+        let _ = server.await;
+        crate::credentials::clear(&reference).unwrap();
+    }
+}
+
+#[tokio::test]
+async fn live_metadata_before_source_eof_is_not_success() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("ws://{}/v1/listen", listener.local_addr().unwrap());
+    let server = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        let mut socket = accept_async(stream).await.unwrap();
+        socket
+            .send(Message::Text(json!({"type":"Metadata"}).to_string().into()))
+            .await
+            .unwrap();
+    });
+    let provider = DeepgramProvider::new(DeepgramSttConfig::default()).unwrap();
+    let (_audio, mut input) = mpsc::channel(1);
+    let (events, _received) = mpsc::channel(8);
+    let error = provider
+        .connection_mode(&url, "synthetic-key", &mut input, &events, false)
+        .await
+        .unwrap_err();
+    assert!(error.message.contains("completion before input finished"));
+    assert!(!error.retryable);
+    server.await.unwrap();
+}
+
+#[tokio::test]
+async fn source_eof_during_reconnect_backoff_does_not_start_empty_replacement() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let reference = "BABEL_TEST_DEEPGRAM_EOF_BACKOFF";
+    let provider = provider(listener.local_addr().unwrap().port(), reference, 1);
+    let server = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        let mut socket = accept_async(stream).await.unwrap();
+        socket.close(None).await.unwrap();
+        drop(socket);
+        let (stream, _) = listener.accept().await.unwrap();
+        let mut replacement = accept_async(stream).await.unwrap();
+        let _ = replacement.next().await; // An incorrect retry sends an empty CloseStream.
+        replacement
+            .send(Message::Text(json!({"type":"Metadata"}).to_string().into()))
+            .await
+            .unwrap();
+    });
+    let (audio, input) = mpsc::channel(1);
+    let (events, mut received) = mpsc::channel(8);
+    let worker = tokio::spawn(async move {
+        provider
+            .run(session(), input, events, CancellationToken::new())
+            .await
+    });
+    assert_eq!(next_event(&mut received).await, ProviderEvent::Connected);
+    assert_eq!(
+        next_event(&mut received).await,
+        ProviderEvent::Reconnecting { attempt: 1 }
+    );
+    drop(audio);
+    timeout(Duration::from_secs(2), worker)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap_err();
+    assert!(
+        received.recv().await.is_none(),
+        "EOF during backoff must not connect again"
+    );
+    server.abort();
+    let _ = server.await;
+    crate::credentials::clear(reference).unwrap();
 }
 
 #[test]

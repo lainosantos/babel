@@ -136,8 +136,9 @@ fn known_model_family(model: &str, family: &str) -> bool {
 pub trait SpeechProvider: Send + Sync {
     fn id(&self) -> &'static str;
 
-    /// Runs until cancellation or an error. An unexpected source-channel EOF is
-    /// an error, so the supervisor cannot mistake failed audio capture for success.
+    /// Runs until cancellation or an error. Translators reject unexpected audio
+    /// EOF. Dedicated original recognizers finalize pending speech on EOF; their
+    /// source is session-owned and closes only after its capture routes stop.
     async fn run(
         &self,
         config: SessionConfig,

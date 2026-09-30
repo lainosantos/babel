@@ -322,10 +322,28 @@ impl SpeechProvider for LocalProvider {
             _=cancel.cancelled()=>return Ok(()),
             result=emit(&events,ProviderEvent::Connected)=>result?,
         }
+        if self.transcription_only {
+            return tokio::select! {
+                biased;
+                _ = cancel.cancelled() => Ok(()),
+                result = async {
+                    tokio::try_join!(
+                        segment_audio(audio, &segments, &events, &self.config, true),
+                        self.process(&config, SegmentSource::Live(&segments), rendered_tx, &events, true),
+                    )?;
+                    // A final overload warning must not disappear behind the
+                    // live warning rate limit when the session is stopped.
+                    if segments.take_pending_warning() {
+                        emit(&events, ProviderEvent::Warning { message: OVERLOAD_WARNING.into() }).await?;
+                    }
+                    Ok(())
+                } => result,
+            };
+        }
         tokio::select! {
             biased;
             _=cancel.cancelled()=>Ok(()),
-            result=segment_audio(audio,&segments,&events,&self.config)=>result,
+            result=segment_audio(audio,&segments,&events,&self.config,false)=>result,
             result=self.process(&config,SegmentSource::Live(&segments),rendered_tx,&events,false)=>result,
             result=render_audio(rendered_rx,&events)=>result,
         }
@@ -533,6 +551,7 @@ struct LiveSegmentState {
     queued: VecDeque<QueuedSegment>,
     warning_pending: bool,
     last_warning: Option<Instant>,
+    closed: bool,
 }
 
 /// Only the live provider uses this lossy queue. Recording and history retain
@@ -571,27 +590,42 @@ impl LiveSegments {
         self.ready.notify_one();
     }
 
-    async fn recv(&self, events: &mpsc::Sender<ProviderEvent>) -> Segment {
+    fn close(&self) {
+        self.state.lock().unwrap_or_else(|e| e.into_inner()).closed = true;
+        self.ready.notify_one();
+    }
+
+    fn take_pending_warning(&self) -> bool {
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        std::mem::take(&mut state.warning_pending)
+    }
+
+    async fn recv(&self, events: &mpsc::Sender<ProviderEvent>) -> Option<Segment> {
         loop {
             // This queue has one consumer; notify_one retains a permit when
             // the producer runs between the empty check and this await.
             let ready = self.ready.notified();
-            let segment = {
+            let (segment, closed) = {
                 let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
                 let mut next = None;
                 while let Some(queued) = state.queued.pop_front() {
-                    if queued.queued_at.elapsed() > self.max_age {
+                    // Once input has ended, drain already accepted speech;
+                    // there is no newer live audio to prefer over this tail.
+                    if !state.closed && queued.queued_at.elapsed() > self.max_age {
                         state.warning_pending = true;
                     } else {
                         next = Some(queued.segment);
                         break;
                     }
                 }
-                next
+                (next, state.closed)
             };
             self.warn(events);
             if let Some(segment) = segment {
-                return segment;
+                return Some(segment);
+            }
+            if closed {
+                return None;
             }
             ready.await;
         }
@@ -623,7 +657,7 @@ enum SegmentSource<'a> {
 impl SegmentSource<'_> {
     async fn recv(&mut self, events: &mpsc::Sender<ProviderEvent>) -> Option<Segment> {
         match self {
-            Self::Live(segments) => Some(segments.recv(events).await),
+            Self::Live(segments) => segments.recv(events).await,
             Self::History(segments) => segments.recv().await,
         }
     }
@@ -703,16 +737,40 @@ async fn segment_audio(
     segments: &LiveSegments,
     events: &mpsc::Sender<ProviderEvent>,
     config: &LocalProviderConfig,
+    transcription_only: bool,
 ) -> Result<()> {
     let mut segmenter = Segmenter::new(config);
-    while let Some(samples) = audio.recv().await {
+    let silence = Duration::from_millis(u64::from(config.silence_ms));
+    let idle = tokio::time::sleep(silence);
+    tokio::pin!(idle);
+    loop {
+        let samples = tokio::select! {
+            samples = audio.recv() => samples,
+            _ = &mut idle, if transcription_only && !segmenter.active.is_empty() => {
+                segments.push(segmenter.finish(), events);
+                continue;
+            }
+        };
+        let Some(samples) = samples else {
+            break;
+        };
         ensure!(
             samples.len() <= INPUT_RATE,
             "local input chunk exceeds one second"
         );
+        if !samples.is_empty() {
+            idle.as_mut().reset(Instant::now() + silence);
+        }
         for segment in segmenter.push(&samples) {
             segments.push(segment, events);
         }
+    }
+    if transcription_only {
+        if !segmenter.active.is_empty() {
+            segments.push(segmenter.finish(), events);
+        }
+        segments.close();
+        return Ok(());
     }
     bail!("audio source closed unexpectedly")
 }
@@ -866,8 +924,14 @@ mod tests {
             }
         }
         assert_eq!(segments.state.lock().unwrap().queued.len(), 2);
-        assert_eq!(segments.recv(&events).await.start_sample, 18 * 8000);
-        assert_eq!(segments.recv(&events).await.start_sample, 19 * 8000);
+        assert_eq!(
+            segments.recv(&events).await.unwrap().start_sample,
+            18 * 8000
+        );
+        assert_eq!(
+            segments.recv(&events).await.unwrap().start_sample,
+            19 * 8000
+        );
         assert!(matches!(
             received.try_recv(),
             Ok(ProviderEvent::Warning { .. })
@@ -890,7 +954,7 @@ mod tests {
             Ok(ProviderEvent::Warning { .. })
         ));
         segments.push(segmenter.push(&vec![3000; 8000]).remove(0), &events);
-        assert_eq!(next.await.start_sample, 8000);
+        assert_eq!(next.await.unwrap().start_sample, 8000);
     }
 
     #[tokio::test]
@@ -902,8 +966,14 @@ mod tests {
         for _ in 0..20 {
             segments.push(segmenter.push(&vec![3000; 8000]).remove(0), &events);
         }
-        assert_eq!(segments.recv(&events).await.start_sample, 18 * 8000);
-        assert_eq!(segments.recv(&events).await.start_sample, 19 * 8000);
+        assert_eq!(
+            segments.recv(&events).await.unwrap().start_sample,
+            18 * 8000
+        );
+        assert_eq!(
+            segments.recv(&events).await.unwrap().start_sample,
+            19 * 8000
+        );
     }
 
     #[tokio::test]
@@ -1360,6 +1430,122 @@ mod tests {
         cancel.cancel();
         worker.await.unwrap().unwrap();
         server.abort();
+    }
+
+    #[tokio::test]
+    async fn transcription_flushes_idle_and_eof_speech_without_restarting() {
+        use std::sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        };
+        let calls = Arc::new(AtomicUsize::new(0));
+        let counted = calls.clone();
+        let app = Router::new().route(
+            "/inference",
+            post(move |body: Bytes| {
+                let turn = counted.fetch_add(1, Ordering::SeqCst);
+                async move {
+                    let wav = body.windows(4).position(|bytes| bytes == b"RIFF").unwrap();
+                    let mut reader = hound::WavReader::new(Cursor::new(&body[wav..])).unwrap();
+                    let samples: Vec<i16> = reader
+                        .samples()
+                        .collect::<std::result::Result<_, _>>()
+                        .unwrap();
+                    assert_eq!(
+                        samples,
+                        if turn == 0 {
+                            vec![5000; 1600]
+                        } else {
+                            vec![7000; 160]
+                        }
+                    );
+                    // EOF must not cancel the last in-flight recognizer request.
+                    tokio::time::sleep(Duration::from_millis(30)).await;
+                    Json(json!({"text": format!("original {turn}")}))
+                }
+            }),
+        );
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = format!("http://{}/inference", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let provider = LocalProvider::transcription(LocalProviderConfig {
+            whisper_endpoint: endpoint,
+            ..options()
+        })
+        .unwrap();
+        let (audio, input) = mpsc::channel(4);
+        let (events, mut output) = mpsc::channel(8);
+        let worker = tokio::spawn(async move {
+            provider
+                .run(session(), input, events, CancellationToken::new())
+                .await
+        });
+        assert_eq!(output.recv().await, Some(ProviderEvent::Connected));
+        audio.send(vec![5000; 1600]).await.unwrap();
+        // No silence frames arrive when the output route goes inactive.
+        assert!(
+            matches!(timeout(Duration::from_secs(2), output.recv()).await.unwrap(), Some(ProviderEvent::Transcript { text, .. }) if text == "original 0")
+        );
+        assert_eq!(output.recv().await, Some(ProviderEvent::TurnComplete));
+        assert!(!worker.is_finished());
+        audio.send(vec![7000; 160]).await.unwrap();
+        drop(audio);
+        timeout(Duration::from_secs(2), worker)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert!(
+            matches!(output.recv().await, Some(ProviderEvent::Transcript { text, .. }) if text == "original 1")
+        );
+        assert_eq!(output.recv().await, Some(ProviderEvent::TurnComplete));
+        assert_eq!(output.recv().await, None);
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn transcription_silent_eof_succeeds_but_translation_eof_is_error() {
+        for transcription_only in [true, false] {
+            let config = LocalProviderConfig {
+                whisper_endpoint: "http://127.0.0.1:1/inference".into(),
+                ollama_endpoint: "http://127.0.0.1:1/api/chat".into(),
+                piper_endpoint: "http://127.0.0.1:1/synthesize".into(),
+                ..options()
+            };
+            let provider = if transcription_only {
+                LocalProvider::transcription(config)
+            } else {
+                LocalProvider::new(config)
+            }
+            .unwrap();
+            let (audio, input) = mpsc::channel(1);
+            audio.send(vec![0; 1600]).await.unwrap();
+            drop(audio);
+            let (events, mut output) = mpsc::channel(8);
+            let result = provider
+                .run(session(), input, events, CancellationToken::new())
+                .await;
+            assert_eq!(result.is_ok(), transcription_only);
+            assert_eq!(output.recv().await, Some(ProviderEvent::Connected));
+            assert_eq!(output.recv().await, None);
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn transcription_eof_drains_accepted_segments_even_if_inference_was_slow() {
+        let segments = LiveSegments::new(&options());
+        let mut segmenter = Segmenter::new(&options());
+        let (events, mut received) = mpsc::channel(2);
+        for segment in segmenter.push(&vec![4000; 16000]) {
+            segments.push(segment, &events);
+        }
+        segments.close();
+        tokio::time::advance(segments.max_age + Duration::from_secs(1)).await;
+        assert_eq!(segments.recv(&events).await.unwrap().start_sample, 0);
+        assert_eq!(segments.recv(&events).await.unwrap().start_sample, 8000);
+        assert!(segments.recv(&events).await.is_none());
+        assert!(received.try_recv().is_err());
     }
 
     #[tokio::test]

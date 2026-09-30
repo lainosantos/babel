@@ -21,6 +21,7 @@ use tokio_util::sync::CancellationToken;
 use super::{ProviderEvent, SessionConfig, SpeechProvider, TranscriptMetadata};
 
 mod languages;
+mod transcription;
 pub(crate) use languages::target_language_code as translation_target_language;
 
 const ENDPOINT: &str = "wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent";
@@ -305,6 +306,11 @@ async fn run_sessions(
         if !failure.retryable {
             bail!("{}", failure.message);
         }
+        // EOF is a finite STT drain. A failed acknowledgement cannot become a
+        // successful empty connection after retrying already-consumed input.
+        if is_transcription_model(config) && audio.is_closed() {
+            bail!("{}", failure.message);
+        }
         // A healthy minute replenishes the budget, allowing normal long-running
         // session rotation while bounding rapid failure/reconnect loops.
         if started.elapsed() >= Duration::from_secs(60) {
@@ -327,6 +333,12 @@ async fn run_sessions(
             biased;
             _ = cancel.cancelled() => return Ok(()),
             _ = tokio::time::sleep(delay) => {}
+        }
+        // The source may close while retry notifications or backoff are in
+        // flight. Do not discard its final queued PCM and accept an empty
+        // replacement connection as successful transcription.
+        if is_transcription_model(config) && audio.is_closed() {
+            bail!("{}", failure.message);
         }
         discard_queued_audio(&mut audio);
     }
@@ -430,9 +442,9 @@ async fn run_connection_mode(
     .await
     .map_err(|_| Failure::retry("Gemini connection timed out"))?
     .map_err(socket_error)?;
-    if history {
+    if history || is_transcription_model(config) {
         // A single explicit turn in flight makes its finalized input transcript
-        // an unambiguous acknowledgement of the bounded historical utterance.
+        // an unambiguous acknowledgement of the bounded original utterance.
         setup["setup"]["realtimeInputConfig"] =
             json!({"automaticActivityDetection":{"disabled":true}});
     }
@@ -475,12 +487,15 @@ async fn run_connection_mode(
     })
     .await
     .map_err(|_| Failure::retry("Gemini setup acknowledgement timed out"))??;
-    if !history {
+    if !history && !is_transcription_model(config) {
         discard_queued_audio(audio);
     }
     emit(events, ProviderEvent::Connected).await?;
     if history {
         return transcribe_history(socket, audio, events, config.vad_silence_ms).await;
+    }
+    if is_transcription_model(config) {
+        return transcription::run(socket, audio, events, config.vad_silence_ms).await;
     }
     let (writer, reader) = socket.split();
     let (control_tx, control_rx) = mpsc::channel(8);

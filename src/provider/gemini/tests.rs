@@ -239,7 +239,6 @@ async fn dedicated_asr_sends_text_setup_and_only_final_originals() {
         for key in [
             "systemInstruction",
             "outputAudioTranscription",
-            "realtimeInputConfig",
             "sessionResumption",
         ] {
             assert!(setup["setup"].get(key).is_none());
@@ -250,10 +249,22 @@ async fn dedicated_asr_sends_text_setup_and_only_final_originals() {
             ))
             .await
             .unwrap();
+        let start = socket.next().await.unwrap().unwrap().into_text().unwrap();
+        assert!(
+            serde_json::from_str::<Value>(&start).unwrap()["realtimeInput"]
+                .get("activityStart")
+                .is_some()
+        );
         let input = socket.next().await.unwrap().unwrap().into_text().unwrap();
         assert!(
             serde_json::from_str::<Value>(&input).unwrap()["realtimeInput"]
                 .get("audio")
+                .is_some()
+        );
+        let end = socket.next().await.unwrap().unwrap().into_text().unwrap();
+        assert!(
+            serde_json::from_str::<Value>(&end).unwrap()["realtimeInput"]
+                .get("activityEnd")
                 .is_some()
         );
         for content in [
@@ -283,7 +294,10 @@ async fn dedicated_asr_sends_text_setup_and_only_final_originals() {
         ProviderEvent::Transcript {
             input: true,
             text: "Original correto.".into(),
-            metadata: Default::default()
+            metadata: TranscriptMetadata {
+                alignment_ms: Some(0),
+                ..Default::default()
+            }
         }
     );
     assert_eq!(event(&mut events).await, ProviderEvent::TurnComplete);

@@ -312,7 +312,7 @@ impl OpenAiProvider {
                 _ = cancel.cancelled() => return Ok(()),
                 result = self.connection(config,key,&endpoint,&mut audio,&events) => match result { Ok(()) => return Ok(()), Err(failure) => failure },
             };
-            if !failure.retryable {
+            if !failure.retryable || (self.transcription_only && audio.is_closed()) {
                 bail!("{}", failure.message);
             }
             if started.elapsed() >= Duration::from_secs(60) {
@@ -334,6 +334,9 @@ impl OpenAiProvider {
                 biased;
                 _ = cancel.cancelled() => return Ok(()),
                 _ = tokio::time::sleep(Duration::from_millis((250u64 << (attempts-1).min(5)).min(5000))) => (),
+            }
+            if self.transcription_only && audio.is_closed() {
+                bail!("OpenAI ASR input ended before reconnection completed");
             }
             discard_audio(&mut audio);
         }
@@ -415,21 +418,18 @@ impl OpenAiProvider {
         })
         .await
         .map_err(|_| Failure::retry("OpenAI session setup timed out"))??;
-        if !history {
+        if !history && !(self.transcription_only && audio.is_closed()) {
             discard_audio(audio);
         }
         emit(events, ProviderEvent::Connected).await?;
         if history {
             return transcription::run_history(socket, audio, events, config.vad_silence_ms).await;
         }
+        if self.transcription_only {
+            return transcription::run_live(socket, audio, events, config.vad_silence_ms).await;
+        }
         let (writer, reader) = socket.split();
         let (control_tx, control_rx) = mpsc::channel(8);
-        if self.transcription_only {
-            return tokio::select! {
-                result = transcription::send_audio(writer,audio,control_rx,config.vad_silence_ms) => result,
-                result = receive_events(reader,events,control_tx,config,true) => result,
-            };
-        }
         tokio::select! {
             result = send_audio(writer,audio,control_rx,is_translation(&config.model)) => result,
             result = receive_events(reader,events,control_tx,config,false) => result,

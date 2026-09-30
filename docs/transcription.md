@@ -55,8 +55,8 @@ interval to the selected service when the session starts.
 History results precede live results in the TXT file. The dashboard indicates
 when history transcription is pending; routing, playback, and translation
 continue with live audio. Recognizing several minutes may take time and consume
-provider quota. Stopping before completion may interrupt pending results, as
-with live transcription.
+provider quota. Stopping before completion may interrupt the historical prefix;
+live finals still drain into the same file after that incomplete prefix is marked.
 
 The default in-memory capacity is ten minutes, adjustable under **Settings →
 Recent audio history**. The dashboard shows the audio available per source;
@@ -75,7 +75,7 @@ automatically matched between historical and live connections.
 
 | STT provider | Transport and model | Speakers | Saved times | Requirements |
 | --- | --- | --- | --- | --- |
-| Gemini Live Transcribe | WebSocket; `gemini-3.5-transcribe-live` | No confirmed diarization in current streaming | Receipt time; actual metadata when present | Google key with access to the model |
+| Gemini Live Transcribe | WebSocket; `gemini-3.5-transcribe-live` | No confirmed diarization in current streaming | Submitted-turn alignment, not word timestamps | Google key with access to the model |
 | OpenAI Realtime Transcription | WebSocket; `gpt-live-transcribe` by default | No diarization in this adapter | Receipt time | OpenAI key with access to the model |
 | Deepgram Listen | WebSocket v1; `nova-3` by default, also Nova-2 | Optional; IDs supplied by the API | Segment intervals derived from returned words | Deepgram key and compatible model/language |
 | whisper.cpp | Embedded engine; multilingual Tiny/Base/Small, with compact Q5_1 variants. Optional external HTTP server | No diarization in this adapter | Boundaries of segments sent to the recognizer | Installer with runtimes; internet only to prepare missing weights |
@@ -96,6 +96,12 @@ translation prompt, or TTS voice.
 
 Babel saves final `inputTranscription` segments; speculative
 `interimInputTranscription` hypotheses are not saved as final text.
+Babel keeps one connection and uses manual activity boundaries, ending a turn
+when input pauses, reaches the configured interval of exact digital silence,
+or reaches five seconds of PCM (plus at most one input chunk). Quiet nonzero
+samples are retained. Each explicit boundary waits up to five seconds for its
+authoritative final result. This prevents continuous incoming speech from
+remaining only an unsaved hypothesis until the session stops.
 `auto` omits the language restriction; an explicit code is sent in
 `languageCodes`. Current streaming does not guarantee diarization or word-level
 timestamps. Features of the **file** API should not be confused with Live
@@ -278,24 +284,33 @@ not prevent the session.
 - The recognizer receives original audio, before translation and generated voice.
   Even when STS supplies auxiliary text, that text neither replaces nor duplicates
   transcription from the selected STT provider.
-- Timestamps are optional. When metadata exists, they preserve offsets from the
-  provider's audio session; otherwise, they indicate receipt time. They do not
-  guarantee word-level timestamps or a single timeline after reconnections.
-  Gaps are marked in the TXT file.
+- Timestamps are optional. Provider offsets are mapped to the captured session
+  timeline, preserving microphone/output pauses; unavailable metadata uses receipt
+  time. Gemini provides submitted-turn alignment, not word boundaries. Network
+  reconnections may lose audio and are marked in the TXT file.
 - Transcription, translation, and recording are enabled separately. Recording
   audio alone does not open STT. If both directions are selected for transcription,
   there will be two independent connections/requests, even with the same provider.
   Simultaneous cloud translation and STT may also incur separate charges.
 - The microphone is processed while Babel is the system's default microphone
   or an application uses its virtual microphone. Output requires an application
-  sending audio to Babel. When a route is deactivated, Babel cancels its processors
-  and discards old queued audio.
+  sending audio to Babel. Deactivation immediately stops physical capture and
+  playback. Already captured originals and pending STT results belong to the
+  session and can still complete while the route is inactive. No further audio
+  is captured from an unselected route. Translated playback never survives this
+  boundary.
   Voice-command activation remains limited to the microphone and uses its own
   configuration, independently of file transcription STT.
-- Queues are bounded, and routing does not wait for an STT call. Congestion may
-  drop processing frames to prevent unlimited delay. Fatal processor errors end
-  the session and return to original routing; independent options do not imply
-  isolated recovery from every failure.
+- Each selected STT source opens its provider lazily on the first captured frame.
+  Up to 20 seconds of original PCM are retained while it connects or catches up,
+  with separate frame-count and sample-count bounds. This queue is independent
+  of the optional ten-minute history buffer and is not saved before a session.
+  Congestion beyond the bound reports a gap rather than blocking audio routing.
+- **Stop** closes physical session routes first, then flushes the recognizers'
+  unfinished speech and drains text/files for up to 15 seconds. Original routing
+  can resume during this drain. A missing provider acknowledgement or timeout
+  reports an incomplete transcript; closing a connection is not treated as proof
+  that the last words were saved. Recognizer failures do not stop original audio.
 
 ## Older configurations
 

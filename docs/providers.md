@@ -97,10 +97,11 @@ See the [official Live Transcribe guide](https://ai.google.dev/gemini-api/docs/l
 
 The adapter ignores partial hypotheses to avoid duplicating TXT content. Model
 sessions have a ten-minute limit; `goAway` triggers controlled reconnection.
-This streaming mode has no diarization or word timestamps. Stopping the Babel
-session cancels pending recognition: wait for a pause and the final result when
-you need to save the last sentence. The writer drains only finals already
-received. WAV recording, when enabled, remains a separate path. The
+This streaming mode has no diarization or word timestamps. Babel uses explicit
+speech turns on one persistent ASR connection, finalizing on an input pause,
+exact digital silence, or a bounded continuous segment. It waits up to five
+seconds for each final response. Stopping capture flushes the last turn while
+original routing can restart independently. WAV recording remains a separate path. The
 [official limits](https://ai.google.dev/gemini-api/docs/live-api/live-transcribe#limitations)
 are not a guarantee of lossless continuity across reconnection.
 

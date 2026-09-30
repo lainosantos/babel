@@ -11,13 +11,12 @@ pub(super) async fn run_route(
     io: RouteIo,
 ) -> Result<()> {
     let RouteIo {
-        transcript: mut transcript_tx,
+        recognition,
         audio: mut audio_tx,
         origin,
         mut capture_changes,
         mut playback_changes,
         history,
-        session_origin,
     } = io;
     if capture_changes.borrow().is_empty() || playback_changes.borrow().is_empty() {
         metrics.state("unconfigured");
@@ -27,7 +26,7 @@ pub(super) async fn run_route(
     }
     let translating = route.enabled;
     metrics.original_mode.store(!translating, Ordering::Relaxed);
-    let mut transcribing = transcript_tx.is_some();
+    let transcribing = recognition.is_some();
     let audio_handle = crate::execution::audio_handle()?;
     let processing_handle = crate::execution::processing_handle()?;
     let capture_device = capture_changes.borrow().clone();
@@ -46,7 +45,6 @@ pub(super) async fn run_route(
         .into_iter()
         .find(|ms| (capture_rate * ms) % 1000 == 0)
         .unwrap_or(100);
-    let recognition_cancel = cancel.child_token();
     let playback_rate = if translating {
         OUTPUT_RATE
     } else {
@@ -63,9 +61,6 @@ pub(super) async fn run_route(
     let (input_tx, input_rx) =
         mpsc::channel((cfg.audio.capture_queue_ms / frame_ms).max(1) as usize);
     let (events_tx, mut events_rx) = mpsc::channel(16);
-    let (stt_input_tx, stt_input_rx) =
-        mpsc::channel((cfg.audio.capture_queue_ms / frame_ms).max(1) as usize);
-    let (stt_events_tx, mut stt_events_rx) = mpsc::channel(16);
     let (play_tx, play_rx) = mpsc::channel(
         (playback_queue_ms
             / if translating {
@@ -239,27 +234,6 @@ pub(super) async fn run_route(
             },
         );
     }
-    if transcribing {
-        let recognition = match origin {
-            TranscriptOrigin::Microphone => cfg.transcription.microphone_recognition.clone(),
-            TranscriptOrigin::Speaker => cfg.transcription.speaker_recognition.clone(),
-        };
-        let profiles = cfg.transcription.providers.clone();
-        let stt_cancel = recognition_cancel.clone();
-        spawn_processor(
-            &mut processing_jobs,
-            &processing_handle,
-            Processor::Recognition,
-            async move {
-                let recognizer = provider::stt::create(&recognition, &profiles)?;
-                let session_config = provider::stt::session_config(&recognition, &profiles)?;
-                recognizer
-                    .run(session_config, stt_input_rx, stt_events_tx, stt_cancel)
-                    .await
-                    .context("STT transcription")
-            },
-        );
-    }
     if !translating {
         metrics.state(if transcribing {
             "connecting"
@@ -268,10 +242,15 @@ pub(super) async fn run_route(
         });
     }
     let mut connected = false;
-    let mut stt_connected = false;
-    let mut stt_offset_ms = None;
-    let mut speech = audio::speech::SpeechTap::new();
-    let mut copy_losses = metrics.audio.sidecar_dropped_frames.load(Ordering::Relaxed);
+    let mut originals = OriginalSidecar {
+        speech: audio::speech::SpeechTap::new(),
+        history: &history,
+        recording: &mut audio_tx,
+        recognition: recognition.as_ref(),
+        origin,
+        metrics: &metrics,
+        copy_losses: metrics.audio.sidecar_dropped_frames.load(Ordering::Relaxed),
+    };
     let result: Result<()> = async {
         loop {
             if cancel.is_cancelled() { break Ok(()); }
@@ -287,14 +266,6 @@ pub(super) async fn run_route(
                 completed = processing_jobs.join_next(), if !processing_jobs.is_empty() => {
                     if cancel.is_cancelled() { break Ok(()); }
                     match completed {
-                        Some(Ok((Processor::Recognition, result))) => {
-                            transcribing = false; stt_connected = false;
-                            recognition_cancel.cancel();
-                            metrics.report_processing_error(&format!("Transcription interrupted: {}",
-                                result.err().map_or_else(|| "the recognizer stopped".into(), |error| format!("{error:#}"))));
-                            transcript_tx = None;
-                            if !translating { metrics.state("passthrough"); }
-                        }
                         Some(Ok((Processor::Translation, Err(error)))) => break Err(error),
                         Some(Ok((Processor::Translation, Ok(())))) => bail!("The translator ended unexpectedly"),
                         Some(Err(error)) => break Err(error.into()),
@@ -304,7 +275,7 @@ pub(super) async fn run_route(
                 event = events_rx.recv(), if translating => {
                     if cancel.is_cancelled() { break Ok(()); }
                     let Some(event) = event else {
-                        break translation_result_after_eof(&mut processing_jobs, &cancel, &metrics).await;
+                        break translation_result_after_eof(&mut processing_jobs, &cancel).await;
                     };
                     match event {
                         ProviderEvent::Warning { message } => metrics.report_processing_error(&message),
@@ -335,69 +306,33 @@ pub(super) async fn run_route(
                         ProviderEvent::Transcript { .. } | ProviderEvent::TurnComplete => {}
                     }
                 }
-                event = stt_events_rx.recv(), if transcribing => {
-                    if cancel.is_cancelled() { break Ok(()); }
-                    let Some(event) = event else {
-                        metrics.report_processing_error("The recognizer closed the transcription channel");
-                        transcribing = false; stt_connected = false; transcript_tx = None;
-                        recognition_cancel.cancel();
-                        if !translating { metrics.state("passthrough"); }
-                        continue;
-                    };
-                    match &event {
-                        ProviderEvent::Connected => {
-                            stt_connected = true;
-                            if !translating { metrics.state("transcribing"); }
-                        }
-                        ProviderEvent::Reconnecting { .. } => {
-                            stt_connected = false;
-                            stt_offset_ms = None;
-                            metrics.reconnects.fetch_add(1, Ordering::Relaxed);
-                            if !translating { metrics.state("reconnecting"); }
-                        }
-                        _ => {}
-                    }
-                    if let Err(error) = record_recognition_event_at(event, &transcript_tx, &metrics, stt_offset_ms.unwrap_or(0)) {
-                        metrics.report_processing_error(&format!("Transcription interrupted: {error:#}"));
-                        transcript_tx = None; transcribing = false; stt_connected = false;
-                        recognition_cancel.cancel();
-                        if !translating { metrics.state("passthrough"); }
-                    }
-                }
                 frame = captured_rx.recv() => {
-                    if cancel.is_cancelled() { break Ok(()); }
+                    if cancel.is_cancelled() {
+                        // recv() may already have removed the last original when
+                        // selection changed. It still belongs to the session files.
+                        if let Some(original) = frame { originals.retain(&original, false); }
+                        break Ok(());
+                    }
                     let Some(original) = frame else { bail!("Audio capture ended"); };
-                    // This whole branch runs only on the processing executor. Native-rate,
-                    // full-resolution original audio has already been forwarded independently.
-                    let losses = metrics.audio.sidecar_dropped_frames.load(Ordering::Relaxed);
-                    if losses > copy_losses && (audio_tx.is_some() || transcribing) {
-                        metrics.report_processing_error("Audio processing overloaded; the recording or transcript may contain gaps");
-                    }
-                    copy_losses = losses;
-                    if !translating && !transcribing && audio_tx.is_none() && !history.enabled() {
-                        continue;
-                    }
-                    let frame = speech.convert(&original);
+                    // Device forwarding has already finished on the audio executor.
+                    let Some(frame) = originals.retain(&original, translating) else { continue; };
                     let input_level = rms(&frame.samples);
                     metrics.input_level.store(input_level.to_bits(), Ordering::Relaxed);
-                    if !translating { metrics.output_level.store(input_level.to_bits(), Ordering::Relaxed); }
-                    history.push(match origin { TranscriptOrigin::Microphone => RecordingLane::Microphone, TranscriptOrigin::Speaker => RecordingLane::Speaker }, &frame.samples, frame.captured_at);
-                    if let Some(sender) = &audio_tx
-                        && sender.try_send(AudioRecord { lane: match origin { TranscriptOrigin::Microphone => RecordingLane::Microphone, TranscriptOrigin::Speaker => RecordingLane::Speaker }, samples: frame.samples.clone(), captured_at: frame.captured_at }).is_err() {
-                            metrics.report_processing_error("Audio recording interrupted: destination unavailable or slow; the file may be incomplete");
-                            audio_tx = None;
+                    if !translating {
+                        metrics.output_level.store(input_level.to_bits(), Ordering::Relaxed);
+                        metrics.state(match recognition.as_ref().filter(|recognizer| recognizer.available()) {
+                            Some(recognizer) if recognizer.connected() => "transcribing",
+                            Some(_) => "connecting",
+                            None => "passthrough",
+                        });
                     }
-                    if translating || transcribing {
+                    if translating {
                         if frame.captured_at.elapsed() > Duration::from_millis(u64::from(cfg.audio.max_capture_age_ms)) {
                             metrics.audio.processing_dropped_frames.fetch_add(1, Ordering::Relaxed);
                         } else {
-                            if transcribing && stt_connected && stt_offset_ms.is_none() {
-                                let start = frame.captured_at.checked_sub(Duration::from_secs_f64(frame.samples.len() as f64 / f64::from(INPUT_RATE))).unwrap_or(frame.captured_at);
-                                stt_offset_ms = Some(start.saturating_duration_since(session_origin).as_millis().min(u128::from(u64::MAX)) as u64);
-                            }
                             fanout_original_audio(frame.samples,
                                 (translating && connected).then_some(&input_tx),
-                                (transcribing && stt_connected).then_some(&stt_input_tx), &metrics);
+                                None, &metrics);
                         }
                     }
                 }
@@ -407,12 +342,9 @@ pub(super) async fn run_route(
     cancel.cancel();
     interrupt(&metrics, &play_tx);
     drop(input_tx);
-    drop(stt_input_tx);
     drop(play_tx);
-    drop(audio_tx);
     // Device shutdown cannot wait for a provider or a disk writer. Background
     // work is cancelled separately; stalled processing never owns audio leases.
-    recognition_cancel.cancel();
     processing_jobs.abort_all();
     let mut cleanup_result = Ok(());
     let audio_shutdown = tokio::time::timeout(Duration::from_secs(2), async {
@@ -430,18 +362,13 @@ pub(super) async fn run_route(
         audio_jobs.abort_all();
         cleanup_result = Err(anyhow!("Timed out while stopping audio devices"));
     }
-    // Save finals already delivered before cancellation. Never wait for a model
-    // to finish another turn or replay a result into a later device activation.
-    while let Ok(event) = stt_events_rx.try_recv() {
-        if let Err(error) =
-            record_recognition_event_at(event, &transcript_tx, &metrics, stt_offset_ms.unwrap_or(0))
-        {
-            metrics.report_processing_error(&format!(
-                "Transcription incomplete at shutdown: {error:#}"
-            ));
-        }
-    }
-    drop(transcript_tx);
+    // All device workers have finished or been aborted. Freeze the existing
+    // sidecar queue and retain its bounded tail without translation/playback.
+    originals.drain(&mut captured_rx);
+    drop(originals);
+    drop(audio_tx);
+    // Dropping this capture sender never cancels the session-owned recognizer.
+    drop(recognition);
     metrics.input_level.store(0, Ordering::Relaxed);
     metrics.output_level.store(0, Ordering::Relaxed);
     metrics.state(if result.is_ok() && cleanup_result.is_ok() {
@@ -454,10 +381,110 @@ pub(super) async fn run_route(
         .with_context(|| format!("Stream {name}"))
 }
 
+/// Owns only original side effects. It cannot send translation or playback, so
+/// the same delivery path remains safe after virtual-device selection ends.
+struct OriginalSidecar<'a> {
+    speech: audio::speech::SpeechTap,
+    history: &'a crate::history::HistoryBuffer,
+    recording: &'a mut Option<mpsc::Sender<AudioRecord>>,
+    recognition: Option<&'a recognition::Sink>,
+    origin: TranscriptOrigin,
+    metrics: &'a RouteMetrics,
+    copy_losses: u64,
+}
+
+impl OriginalSidecar<'_> {
+    fn retain(
+        &mut self,
+        original: &audio::OriginalFrame,
+        needs_translation: bool,
+    ) -> Option<audio::PcmFrame> {
+        let losses = self
+            .metrics
+            .audio
+            .sidecar_dropped_frames
+            .load(Ordering::Relaxed);
+        if losses > self.copy_losses && (self.recording.is_some() || self.recognition.is_some()) {
+            self.metrics.report_processing_error(
+                "Audio processing overloaded; the recording or transcript may contain gaps",
+            );
+        }
+        self.copy_losses = losses;
+        if !needs_translation
+            && self.recognition.is_none()
+            && self.recording.is_none()
+            && !self.history.enabled()
+        {
+            return None;
+        }
+        let frame = self.speech.convert(original);
+        let lane = match self.origin {
+            TranscriptOrigin::Microphone => RecordingLane::Microphone,
+            TranscriptOrigin::Speaker => RecordingLane::Speaker,
+        };
+        self.history.push(lane, &frame.samples, frame.captured_at);
+        if let Some(sender) = self.recording.as_ref()
+            && sender
+                .try_send(AudioRecord {
+                    lane,
+                    samples: frame.samples.clone(),
+                    captured_at: frame.captured_at,
+                })
+                .is_err()
+        {
+            self.metrics.report_processing_error(
+                "Audio recording interrupted: destination unavailable or slow; the file may be incomplete",
+            );
+            *self.recording = None;
+        }
+        if let Some(recognizer) = self.recognition
+            && recognizer.available()
+        {
+            recognizer.submit(
+                audio::PcmFrame {
+                    samples: frame.samples.clone(),
+                    sample_rate: frame.sample_rate,
+                    captured_at: frame.captured_at,
+                },
+                self.metrics,
+            );
+        }
+        Some(frame)
+    }
+
+    fn drain(&mut self, captured: &mut mpsc::Receiver<audio::OriginalFrame>) {
+        // Closing rejects new sends even if a malfunctioning device has not
+        // released every task yet. Never await a producer or a model here.
+        captured.close();
+        let count = captured.len();
+        let deadline = Instant::now() + Duration::from_millis(500);
+        for index in 0..count {
+            if Instant::now() >= deadline {
+                let skipped = (count - index) as u64;
+                self.metrics
+                    .audio
+                    .processing_dropped_frames
+                    .fetch_add(skipped, Ordering::Relaxed);
+                self.metrics
+                    .audio
+                    .sidecar_dropped_frames
+                    .fetch_add(skipped, Ordering::Relaxed);
+                self.metrics.report_processing_error(
+                    "Original audio finalization exceeded its bounded drain time; files may be incomplete",
+                );
+                break;
+            }
+            let Ok(original) = captured.try_recv() else {
+                break;
+            };
+            self.retain(&original, false);
+        }
+    }
+}
+
 #[derive(Clone, Copy)]
 enum Processor {
     Translation,
-    Recognition,
 }
 
 /// Dropping a provider's sender can wake the receiver before its task result is
@@ -466,23 +493,18 @@ enum Processor {
 async fn translation_result_after_eof(
     jobs: &mut JoinSet<(Processor, Result<()>)>,
     cancel: &CancellationToken,
-    metrics: &RouteMetrics,
 ) -> Result<()> {
     tokio::select! {
         biased;
         _ = cancel.cancelled() => Ok(()),
         result = tokio::time::timeout(Duration::from_secs(2), async {
-            while let Some(completed) = jobs.join_next().await {
-                match completed.context("Processing task ended unexpectedly")? {
-                    (Processor::Translation, Err(error)) => return Err(error),
+            match jobs.join_next().await {
+                Some(completed) => match completed.context("Processing task ended unexpectedly")? {
+                    (Processor::Translation, Err(error)) => Err(error),
                     (Processor::Translation, Ok(())) => bail!("The translator ended unexpectedly"),
-                    (Processor::Recognition, Err(error)) => {
-                        metrics.report_processing_error(&format!("Transcription interrupted: {error:#}"));
-                    }
-                    (Processor::Recognition, Ok(())) => {}
-                }
+                },
+                None => bail!("Provider closed the audio channel without a completion result"),
             }
-            bail!("Provider closed the audio channel without a completion result")
         }) => result.context("Provider closed the audio channel but did not finish within 2 seconds")?,
     }
 }
@@ -497,8 +519,7 @@ fn spawn_processor<F>(
 {
     jobs.spawn_on(
         async move {
-            // Preserve the processor kind even if an adapter panics. A failed STT
-            // adapter must not tear down the independent original audio transport.
+            // Never expose an adapter panic payload through user-facing diagnostics.
             let result = std::panic::AssertUnwindSafe(future)
                 .catch_unwind()
                 .await
@@ -515,23 +536,206 @@ async fn forward_processing(
     cancel: CancellationToken,
     stats: Arc<AudioStats>,
 ) -> Result<()> {
-    loop {
-        let frame = tokio::select! { biased; _ = cancel.cancelled() => return Ok(()), frame = captured.recv() => frame };
-        let Some(frame) = frame else {
-            return Err(anyhow!("Audio capture ended"));
-        };
+    let forward = |frame| {
         if processing.try_send(frame).is_err() {
             stats
                 .processing_dropped_frames
                 .fetch_add(1, Ordering::Relaxed);
             stats.sidecar_dropped_frames.fetch_add(1, Ordering::Relaxed);
         }
+    };
+    loop {
+        let frame = tokio::select! { biased; _ = cancel.cancelled() => break, frame = captured.recv() => frame };
+        let Some(frame) = frame else {
+            return Err(anyhow!("Audio capture ended"));
+        };
+        forward(frame);
     }
+    // Translated routes have this additional original-only queue. Preserve its
+    // accepted frames for the session sidecar, with no network/playback work.
+    captured.close();
+    for _ in 0..captured.len() {
+        if let Ok(frame) = captured.try_recv() {
+            forward(frame);
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn original(captured_at: Instant) -> audio::OriginalFrame {
+        audio::OriginalFrame {
+            samples: vec![0.125; 160].into(),
+            sample_rate: INPUT_RATE,
+            channels: 1,
+            captured_at,
+        }
+    }
+
+    #[tokio::test]
+    async fn original_tail_reaches_history_recording_and_final_transcription_for_both_sources() {
+        use axum::{Json, Router, body::Bytes, routing::post};
+        let requests = Arc::new(AtomicU64::new(0));
+        let counted = requests.clone();
+        let app = Router::new().route(
+            "/inference",
+            post(move |body: Bytes| {
+                let counted = counted.clone();
+                async move {
+                    let start = body.windows(4).position(|bytes| bytes == b"RIFF").unwrap();
+                    let mut wav =
+                        hound::WavReader::new(std::io::Cursor::new(&body[start..])).unwrap();
+                    let samples: Vec<i16> = wav
+                        .samples()
+                        .collect::<std::result::Result<_, _>>()
+                        .unwrap();
+                    assert_eq!(samples, vec![4096; 480]);
+                    counted.fetch_add(1, Ordering::SeqCst);
+                    Json(serde_json::json!({"text": "Original buffered speech."}))
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = format!("http://{}/inference", listener.local_addr().unwrap());
+        let server = tokio_util::task::AbortOnDropHandle::new(tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        }));
+        for origin in [TranscriptOrigin::Microphone, TranscriptOrigin::Speaker] {
+            let mut config = AppConfig::default();
+            config
+                .transcription
+                .providers
+                .whisper
+                .endpoint
+                .clone_from(&endpoint);
+            config.transcription.microphone_recognition.provider = "whisper".into();
+            config.transcription.speaker_recognition.provider = "whisper".into();
+            let clock = Instant::now() - Duration::from_millis(100);
+            let metrics = Arc::new(RouteMetrics::default());
+            let (text, mut transcripts) = mpsc::channel(8);
+            let (sink, worker) = recognition::start(
+                config,
+                TranscriptSink {
+                    sender: text,
+                    origin,
+                },
+                metrics.clone(),
+                clock,
+            );
+            let worker = tokio_util::task::AbortOnDropHandle::new(tokio::spawn(worker));
+            let history =
+                crate::history::HistoryBuffer::new(&crate::config::HistoryConfig::default());
+            let (recording, mut recorded) = mpsc::channel(8);
+            let mut recording = Some(recording);
+            let (capture, mut captured) = mpsc::channel(4);
+            let mut originals = OriginalSidecar {
+                speech: audio::speech::SpeechTap::new(),
+                history: &history,
+                recording: &mut recording,
+                recognition: Some(&sink),
+                origin,
+                metrics: &metrics,
+                copy_losses: 0,
+            };
+            // The first frame was already dequeued when cancellation was
+            // noticed. The other two remain in the bounded sidecar queue.
+            originals.retain(&original(clock + Duration::from_millis(10)), false);
+            for end in [20, 30] {
+                capture
+                    .send(original(clock + Duration::from_millis(end)))
+                    .await
+                    .unwrap();
+            }
+            originals.drain(&mut captured);
+            assert!(
+                capture.is_closed(),
+                "Draining never waits for this producer to exit"
+            );
+            drop(originals);
+            drop(recording);
+            drop(sink);
+            tokio::time::timeout(Duration::from_secs(3), worker)
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap();
+            let lane = match origin {
+                TranscriptOrigin::Microphone => RecordingLane::Microphone,
+                TranscriptOrigin::Speaker => RecordingLane::Speaker,
+            };
+            for end in [10, 20, 30] {
+                let frame = recorded.try_recv().unwrap();
+                assert_eq!(frame.lane, lane);
+                assert_eq!(frame.samples, vec![4096; 160]);
+                assert_eq!(frame.captured_at, clock + Duration::from_millis(end));
+            }
+            assert!(recorded.try_recv().is_err());
+            let snapshot = history.snapshot(600, Instant::now());
+            assert_eq!(snapshot.frames.len(), 3);
+            assert!(
+                snapshot
+                    .frames
+                    .iter()
+                    .all(|frame| frame.lane == lane && frame.samples() == [4096; 160])
+            );
+            let TranscriptRecord::Routed {
+                origin: source,
+                record,
+            } = transcripts.try_recv().unwrap()
+            else {
+                panic!("expected routed transcript");
+            };
+            assert_eq!(source, origin);
+            assert!(
+                matches!(*record, TranscriptRecord::Text { input: true, text, metadata, .. }
+                if text == "Original buffered speech." && metadata.start_ms == Some(0) && metadata.end_ms == Some(30))
+            );
+            assert_eq!(
+                metrics
+                    .audio
+                    .processing_dropped_frames
+                    .load(Ordering::Relaxed),
+                0
+            );
+        }
+        assert_eq!(requests.load(Ordering::SeqCst), 2);
+        drop(server);
+    }
+
+    #[tokio::test]
+    async fn stopped_capture_forwards_only_the_existing_bounded_original_tail() {
+        for capacity in [1, 4] {
+            let (capture, captured) = mpsc::channel(4);
+            for _ in 0..3 {
+                capture.send(original(Instant::now())).await.unwrap();
+            }
+            let (sidecar, mut received) = mpsc::channel(capacity);
+            let cancel = CancellationToken::new();
+            cancel.cancel();
+            let stats = Arc::new(AudioStats::default());
+            tokio::time::timeout(
+                Duration::from_secs(1),
+                forward_processing(captured, sidecar, cancel, stats.clone()),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+            assert!(capture.is_closed());
+            let mut retained = 0;
+            while let Ok(frame) = received.try_recv() {
+                assert_eq!(frame.samples.as_ref(), &[0.125; 160]);
+                retained += 1;
+            }
+            assert_eq!(retained, capacity.min(3));
+            assert_eq!(
+                stats.sidecar_dropped_frames.load(Ordering::Relaxed),
+                (3 - retained) as u64
+            );
+        }
+    }
 
     #[tokio::test(start_paused = true)]
     async fn provider_eof_preserves_delayed_task_error_and_buffered_events() {
@@ -554,8 +758,7 @@ mod tests {
         assert_eq!(received.recv().await, Some(ProviderEvent::TurnComplete));
         assert_eq!(received.recv().await, None);
         let cancel = CancellationToken::new();
-        let metrics = RouteMetrics::default();
-        let completion = translation_result_after_eof(&mut jobs, &cancel, &metrics);
+        let completion = translation_result_after_eof(&mut jobs, &cancel);
         tokio::pin!(completion);
         assert!(completion.as_mut().now_or_never().is_none());
         finish.send(()).unwrap();
@@ -574,9 +777,8 @@ mod tests {
                 std::future::pending(),
             );
             let cancel = CancellationToken::new();
-            let metrics = RouteMetrics::default();
             let started = tokio::time::Instant::now();
-            let completion = translation_result_after_eof(&mut jobs, &cancel, &metrics);
+            let completion = translation_result_after_eof(&mut jobs, &cancel);
             tokio::pin!(completion);
             assert!(completion.as_mut().now_or_never().is_none());
             if stopping {
@@ -596,12 +798,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn panicking_recognizer_remains_a_processing_failure() {
+    async fn panicking_translator_returns_a_sanitized_processing_failure() {
         let mut jobs = JoinSet::new();
         spawn_processor(
             &mut jobs,
             &tokio::runtime::Handle::current(),
-            Processor::Recognition,
+            Processor::Translation,
             async {
                 panic!("fault injected in speech adapter");
                 #[allow(unreachable_code)]
@@ -613,7 +815,7 @@ mod tests {
             .await
             .unwrap()
             .expect("panic is contained in the adapter");
-        assert!(matches!(kind, Processor::Recognition));
+        assert!(matches!(kind, Processor::Translation));
         assert!(result.unwrap_err().to_string().contains("Processing"));
     }
 }

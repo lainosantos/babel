@@ -4,6 +4,14 @@ use std::collections::VecDeque;
 
 use super::*;
 
+const FINAL_TIMEOUT: Duration = Duration::from_secs(5);
+
+#[derive(Clone, Copy)]
+struct InputFinished {
+    commits: u64,
+    at: Instant,
+}
+
 pub(super) fn validate(config: &SessionConfig) -> Result<()> {
     ensure!(
         (1..=120).contains(&config.connect_timeout_secs) && config.max_reconnect_attempts <= 20,
@@ -170,22 +178,57 @@ impl Gate {
         }
         (output, commit)
     }
-    fn finish(&mut self) -> bool {
-        if self.active < 1600 {
-            return false;
+    fn finish(&mut self) -> Option<usize> {
+        if self.active == 0 {
+            return None;
         }
+        let padding = 1600usize.saturating_sub(self.active);
         self.active = 0;
         self.trailing = 0;
-        true
+        Some(padding)
     }
 }
 
-pub(super) async fn send_audio(
+/// Source EOF ends capture, not recognition. Count submitted commits separately
+/// from server acknowledgements so a delayed acknowledgement cannot make an
+/// empty receive queue look like successful completion.
+pub(super) async fn run_live(
+    socket: Socket,
+    audio: &mut mpsc::Receiver<Vec<i16>>,
+    events: &mpsc::Sender<ProviderEvent>,
+    silence_ms: u32,
+) -> SessionResult<()> {
+    let (writer, reader) = socket.split();
+    let (control_tx, control_rx) = mpsc::channel(8);
+    let (closed_tx, closed_rx) = tokio::sync::watch::channel(None::<InputFinished>);
+    let mut deadline_closed = closed_rx.clone();
+    let final_deadline = async {
+        let finished = *deadline_closed
+            .wait_for(Option::is_some)
+            .await
+            .map_err(|_| Failure::fatal("OpenAI ASR input did not finish"))?;
+        tokio::time::sleep_until(finished.unwrap().at + FINAL_TIMEOUT).await;
+        Err(Failure::fatal(
+            "OpenAI ASR final transcript acknowledgement timed out",
+        ))
+    };
+    tokio::select! {
+        biased;
+        result = final_deadline => result,
+        result = send_audio(writer, audio, control_rx, silence_ms, closed_tx) => result,
+        result = receive_finals(reader, events, control_tx, closed_rx) => result,
+    }
+}
+
+async fn send_audio(
     mut writer: SplitSink<Socket, Message>,
     audio: &mut mpsc::Receiver<Vec<i16>>,
     mut control: mpsc::Receiver<Message>,
     silence_ms: u32,
+    closed: tokio::sync::watch::Sender<Option<InputFinished>>,
 ) -> SessionResult<()> {
+    let mut input_open = true;
+    let mut commits = 0u64;
     let mut gate = Gate::new(silence_ms);
     let mut heartbeat = tokio::time::interval(Duration::from_secs(15));
     heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
@@ -202,8 +245,16 @@ pub(super) async fn send_audio(
             message = control.recv() => {
                 io_deadline(writer.send(message.ok_or_else(||Failure::retry("OpenAI ASR receive loop stopped"))?)).await?;
             }
-            samples = audio.recv() => {
-                let samples = samples.ok_or_else(||Failure::fatal("audio source closed unexpectedly"))?;
+            samples = audio.recv(), if input_open => {
+                let Some(samples) = samples else {
+                    if let Some(padding) = gate.finish() {
+                        finish_audio(&mut writer, &mut resampler, padding).await?;
+                        commits += 1;
+                    }
+                    input_open = false;
+                    closed.send_replace(Some(InputFinished { commits, at: Instant::now() }));
+                    continue;
+                };
                 if samples.len()>16000 { return Err(Failure::fatal("input audio chunk exceeds one second")); }
                 if samples.is_empty() { continue; }
                 last_audio = Instant::now();
@@ -212,23 +263,115 @@ pub(super) async fn send_audio(
                 input.clear(); output.clear(); bytes.clear();
                 input.extend(samples.iter().map(|s| f32::from(*s) / 32768.0));
                 resampler.process(&input,&mut output);
-                if commit { resampler.process(&[0.0;64],&mut output); }
                 bytes.extend(output.iter().flat_map(|sample| ((sample.clamp(-1.0,1.0)*32767.0).round() as i16).to_le_bytes()));
                 if !bytes.is_empty() {
                     io_deadline(writer.send(Message::Text(json!({"type":"input_audio_buffer.append","audio":STANDARD.encode(&bytes)}).to_string().into()))).await?;
                 }
-                if commit { commit_audio(&mut writer).await?; }
+                if commit {
+                    finish_audio(&mut writer, &mut resampler, 0).await?;
+                    commits += 1;
+                }
             }
-            _ = inactivity.tick() => {
-                if last_audio.elapsed() >= Duration::from_millis(u64::from(silence_ms)) && gate.finish() {
-                    output.clear(); bytes.clear();
-                    resampler.process(&[0.0;64],&mut output);
-                    bytes.extend(output.iter().flat_map(|sample| ((sample.clamp(-1.0,1.0)*32767.0).round() as i16).to_le_bytes()));
-                    if !bytes.is_empty() { io_deadline(writer.send(Message::Text(json!({"type":"input_audio_buffer.append","audio":STANDARD.encode(&bytes)}).to_string().into()))).await?; }
-                    commit_audio(&mut writer).await?;
+            _ = inactivity.tick(), if input_open => {
+                if last_audio.elapsed() >= Duration::from_millis(u64::from(silence_ms))
+                    && let Some(padding) = gate.finish()
+                {
+                    finish_audio(&mut writer, &mut resampler, padding).await?;
+                    commits += 1;
                 }
             }
             _ = heartbeat.tick() => { io_deadline(writer.send(Message::Ping(Vec::new().into()))).await?; }
+        }
+    }
+}
+
+async fn finish_audio(
+    writer: &mut SplitSink<Socket, Message>,
+    resampler: &mut Resampler,
+    padding: usize,
+) -> SessionResult<()> {
+    let mut output = Vec::with_capacity((padding + 64) * 3 / 2);
+    // Only an already captured voiced turn is padded to the API's minimum
+    // commit duration; idle silence never creates a new turn.
+    resampler.process(&vec![0.0; padding + 64], &mut output);
+    let bytes: Vec<u8> = output
+        .iter()
+        .flat_map(|sample| ((sample.clamp(-1.0, 1.0) * 32767.0).round() as i16).to_le_bytes())
+        .collect();
+    if !bytes.is_empty() {
+        io_deadline(
+            writer.send(Message::Text(
+                json!({"type":"input_audio_buffer.append","audio":STANDARD.encode(&bytes)})
+                    .to_string()
+                    .into(),
+            )),
+        )
+        .await?;
+    }
+    commit_audio(writer).await?;
+    *resampler = Resampler::new(16000, 24000);
+    Ok(())
+}
+
+async fn receive_finals(
+    mut reader: SplitStream<Socket>,
+    events: &mpsc::Sender<ProviderEvent>,
+    control: mpsc::Sender<Message>,
+    mut closed: tokio::sync::watch::Receiver<Option<InputFinished>>,
+) -> SessionResult<()> {
+    let mut transcription = FinalTranscripts::default();
+    let mut completed = 0u64;
+    loop {
+        let finished = *closed.borrow_and_update();
+        if let Some(finished) = finished {
+            if completed > finished.commits {
+                return Err(Failure::fatal(
+                    "OpenAI ASR returned an unexpected final transcript",
+                ));
+            }
+            if completed == finished.commits
+                && transcription.order.is_empty()
+                && transcription.finals.is_empty()
+            {
+                return Ok(());
+            }
+        }
+        let message = tokio::select! {
+            biased;
+            result = closed.changed(), if finished.is_none() => {
+                result.map_err(|_| Failure::fatal("OpenAI ASR input did not finish"))?;
+                continue;
+            }
+            message = timeout(Duration::from_secs(45), reader.next()) => message
+                .map_err(|_| Failure::retry("OpenAI connection stopped responding"))?
+                .ok_or_else(|| Failure::retry("OpenAI WebSocket closed before transcription completed"))?
+                .map_err(socket_failure)?,
+        };
+        let value = match message {
+            Message::Text(text) => parse_json(text.as_bytes())?,
+            Message::Binary(bytes) => parse_json(&bytes)?,
+            Message::Ping(data) => {
+                control
+                    .try_send(Message::Pong(data))
+                    .map_err(|_| Failure::retry("OpenAI control channel is congested"))?;
+                continue;
+            }
+            Message::Pong(_) => continue,
+            Message::Close(frame) => {
+                return Err(match frame.map(|frame| u16::from(frame.code)) {
+                    Some(1008) => {
+                        Failure::fatal("OpenAI rejected session policy or authentication")
+                    }
+                    _ => Failure::retry("OpenAI WebSocket closed before transcription completed"),
+                });
+            }
+            Message::Frame(_) => return Err(Failure::fatal("invalid raw OpenAI frame")),
+        };
+        for event in transcription.decode(&value)? {
+            if matches!(event, ProviderEvent::TurnComplete) {
+                completed += 1;
+            }
+            emit(events, event).await?;
         }
     }
 }
@@ -346,7 +489,7 @@ mod tests {
         assert!(!gate.push(&[0; 1600]).1);
         assert!(!gate.push(&[0; 1600]).1);
         assert!(gate.push(&[0; 1600]).1);
-        assert!(!gate.finish());
+        assert_eq!(gate.finish(), None);
         let mut gate = Gate::new(300);
         for _ in 0..9 {
             assert!(!gate.push(&[5000; 16000]).1);
@@ -357,5 +500,164 @@ mod tests {
                 .decode(&json!({"type":"response.output_audio.delta","delta":"AAAA"}))
                 .is_err()
         );
+    }
+
+    #[tokio::test]
+    async fn live_idle_flush_then_eof_waits_for_final_acknowledgements() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = format!("ws://{}", listener.local_addr().unwrap());
+        let (last_committed, last_commit) = tokio::sync::oneshot::channel();
+        let (finish, finishing) = tokio::sync::oneshot::channel();
+        let server = tokio::spawn(async move {
+            let mut socket = tokio_tungstenite::accept_async(listener.accept().await.unwrap().0)
+                .await
+                .unwrap();
+            let mut turn = 0;
+            let mut bytes = 0;
+            loop {
+                let message = socket.next().await.unwrap().unwrap();
+                let Message::Text(text) = message else {
+                    panic!("unexpected frame: {message:?}");
+                };
+                let value: Value = serde_json::from_str(&text).unwrap();
+                match value["type"].as_str().unwrap() {
+                    "input_audio_buffer.append" => {
+                        bytes += STANDARD
+                            .decode(value["audio"].as_str().unwrap())
+                            .unwrap()
+                            .len()
+                    }
+                    "input_audio_buffer.commit" => {
+                        assert!(
+                            bytes >= 4800,
+                            "a short tail must meet the minimum commit size"
+                        );
+                        bytes = 0;
+                        if turn == 1 {
+                            // No acknowledgement exists yet; an empty ordering
+                            // queue must not make the provider finish early.
+                            last_committed.send(()).unwrap();
+                            finishing.await.unwrap();
+                            // Completed may arrive before its committed event.
+                            socket.send(Message::Text(json!({"type":"conversation.item.input_audio_transcription.completed","item_id":"last","transcript":"final tail"}).to_string().into())).await.unwrap();
+                            socket
+                                .send(Message::Text(
+                                    json!({"type":"input_audio_buffer.committed","item_id":"last"})
+                                        .to_string()
+                                        .into(),
+                                ))
+                                .await
+                                .unwrap();
+                            return;
+                        }
+                        socket
+                            .send(Message::Text(
+                                json!({"type":"input_audio_buffer.committed","item_id":"first"})
+                                    .to_string()
+                                    .into(),
+                            ))
+                            .await
+                            .unwrap();
+                        socket.send(Message::Text(json!({"type":"conversation.item.input_audio_transcription.completed","item_id":"first","transcript":"before idle"}).to_string().into())).await.unwrap();
+                        turn += 1;
+                    }
+                    other => panic!("unexpected request: {other}"),
+                }
+            }
+        });
+        let (socket, _) = tokio_tungstenite::connect_async(endpoint).await.unwrap();
+        let (audio, mut input) = mpsc::channel(4);
+        let (events, mut output) = mpsc::channel(8);
+        let worker = tokio::spawn(async move { run_live(socket, &mut input, &events, 100).await });
+        audio.send(vec![5000; 1600]).await.unwrap();
+        assert!(
+            matches!(timeout(Duration::from_secs(2), output.recv()).await.unwrap(), Some(ProviderEvent::Transcript { text, .. }) if text == "before idle")
+        );
+        assert_eq!(output.recv().await, Some(ProviderEvent::TurnComplete));
+        assert!(!worker.is_finished());
+        audio.send(vec![5000; 160]).await.unwrap();
+        drop(audio);
+        timeout(Duration::from_secs(2), last_commit)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(!worker.is_finished());
+        finish.send(()).unwrap();
+        timeout(Duration::from_secs(2), worker)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert!(
+            matches!(output.recv().await, Some(ProviderEvent::Transcript { text, .. }) if text == "final tail")
+        );
+        assert_eq!(output.recv().await, Some(ProviderEvent::TurnComplete));
+        assert_eq!(output.recv().await, None);
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn live_silence_eof_does_not_commit_or_wait_for_generated_text() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = format!("ws://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            let socket = tokio_tungstenite::accept_async(listener.accept().await.unwrap().0)
+                .await
+                .unwrap();
+            tokio::time::sleep(Duration::from_secs(5)).await;
+            drop(socket);
+        });
+        let (socket, _) = tokio_tungstenite::connect_async(endpoint).await.unwrap();
+        let (audio, mut input) = mpsc::channel(1);
+        audio.send(vec![0; 1600]).await.unwrap();
+        drop(audio);
+        let (events, mut output) = mpsc::channel(1);
+        timeout(
+            Duration::from_secs(1),
+            run_live(socket, &mut input, &events, 100),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert!(output.try_recv().is_err());
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn live_eof_missing_final_acknowledgement_is_a_bounded_failure() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = format!("ws://{}", listener.local_addr().unwrap());
+        let (committed, commit) = tokio::sync::oneshot::channel();
+        let server = tokio::spawn(async move {
+            let mut socket = tokio_tungstenite::accept_async(listener.accept().await.unwrap().0)
+                .await
+                .unwrap();
+            while let Some(Ok(message)) = socket.next().await {
+                if let Message::Text(text) = message
+                    && serde_json::from_str::<Value>(&text).unwrap()["type"]
+                        == "input_audio_buffer.commit"
+                {
+                    committed.send(()).unwrap();
+                    std::future::pending::<()>().await;
+                    break;
+                }
+            }
+        });
+        let (socket, _) = tokio_tungstenite::connect_async(endpoint).await.unwrap();
+        let (audio, mut input) = mpsc::channel(1);
+        audio.send(vec![5000; 1600]).await.unwrap();
+        drop(audio);
+        let (events, _output) = mpsc::channel(8);
+        let worker = tokio::spawn(async move { run_live(socket, &mut input, &events, 100).await });
+        timeout(Duration::from_secs(2), commit)
+            .await
+            .unwrap()
+            .unwrap();
+        tokio::time::pause();
+        tokio::time::advance(FINAL_TIMEOUT + Duration::from_millis(1)).await;
+        let failure = worker.await.unwrap().unwrap_err();
+        assert!(!failure.retryable);
+        assert!(failure.message.contains("acknowledgement timed out"));
+        server.abort();
     }
 }
