@@ -109,7 +109,7 @@ pub(super) async fn run_route(
                     capture_stats,
                 )
                 .await
-                .context("Captura")
+                .context("Capture")
             },
             &audio_handle,
         );
@@ -126,7 +126,7 @@ pub(super) async fn run_route(
                     playback_stats,
                 )
                 .await
-                .context("Reprodução")
+                .context("Playback")
             },
             &audio_handle,
         );
@@ -229,7 +229,7 @@ pub(super) async fn run_route(
                         provider_cancel,
                     )
                     .await
-                    .context("Tradução + síntese")
+                    .context("Translation + synthesis")
                 } else {
                     provider
                         .run(session_config, input_rx, events_tx, provider_cancel)
@@ -256,7 +256,7 @@ pub(super) async fn run_route(
                 recognizer
                     .run(session_config, stt_input_rx, stt_events_tx, stt_cancel)
                     .await
-                    .context("Transcrição STT")
+                    .context("STT transcription")
             },
         );
     }
@@ -281,7 +281,7 @@ pub(super) async fn run_route(
                     if cancel.is_cancelled() { break Ok(()); }
                     match completed {
                         Some(Ok(Err(error))) => break Err(error),
-                        _ => bail!("Um componente de áudio encerrou inesperadamente"),
+                        _ => bail!("An audio component ended unexpectedly"),
                     }
                 }
                 completed = processing_jobs.join_next(), if !processing_jobs.is_empty() => {
@@ -290,20 +290,20 @@ pub(super) async fn run_route(
                         Some(Ok((Processor::Recognition, result))) => {
                             transcribing = false; stt_connected = false;
                             recognition_cancel.cancel();
-                            metrics.report_processing_error(&format!("Transcrição interrompida: {}",
-                                result.err().map_or_else(|| "o reconhecedor encerrou".into(), |error| format!("{error:#}"))));
+                            metrics.report_processing_error(&format!("Transcription interrupted: {}",
+                                result.err().map_or_else(|| "the recognizer stopped".into(), |error| format!("{error:#}"))));
                             transcript_tx = None;
                             if !translating { metrics.state("passthrough"); }
                         }
                         Some(Ok((Processor::Translation, Err(error)))) => break Err(error),
-                        Some(Ok((Processor::Translation, Ok(())))) => bail!("O tradutor encerrou inesperadamente"),
+                        Some(Ok((Processor::Translation, Ok(())))) => bail!("The translator ended unexpectedly"),
                         Some(Err(error)) => break Err(error.into()),
                         None => {}
                     }
                 }
                 event = events_rx.recv(), if translating => {
                     if cancel.is_cancelled() { break Ok(()); }
-                    let Some(event) = event else { bail!("Provider encerrou o canal de áudio"); };
+                    let Some(event) = event else { bail!("Provider closed the audio channel"); };
                     match event {
                         ProviderEvent::Connected => { connected = true; metrics.state("running"); }
                         ProviderEvent::Reconnecting { .. } => {
@@ -314,8 +314,8 @@ pub(super) async fn run_route(
                         }
                         ProviderEvent::Interrupted => { interrupt(&metrics, &play_tx); }
                         ProviderEvent::Audio { mut samples, sample_rate } => {
-                            ensure!(sample_rate == OUTPUT_RATE, "Provider devolveu taxa de áudio não suportada: {sample_rate}");
-                            ensure!(samples.len() <= OUTPUT_RATE as usize, "Bloco de áudio do provider excede 1 segundo");
+                            ensure!(sample_rate == OUTPUT_RATE, "Provider returned an unsupported audio sample rate: {sample_rate}");
+                            ensure!(samples.len() <= OUTPUT_RATE as usize, "Provider audio chunk exceeds 1 second");
                             apply_gain(&mut samples, route.gain);
                             metrics.output_level.store(rms(&samples).to_bits(), Ordering::Relaxed);
                             metrics.translated_samples.fetch_add(samples.len() as u64, Ordering::Relaxed);
@@ -323,7 +323,7 @@ pub(super) async fn run_route(
                             for chunk in samples.chunks(OUTPUT_FRAME_SAMPLES) {
                                 if play_tx.try_send(PlaybackCommand::Audio { samples: chunk.to_vec(), generation }).is_err() {
                                     metrics.audio.dropped_frames.fetch_add(1, Ordering::Relaxed);
-                                    bail!("Fila de reprodução cheia. O fluxo foi parado para evitar atraso acumulado; aumente playback_queue_ms ou verifique a velocidade do dispositivo/modelo");
+                                    bail!("Playback queue is full. The stream stopped to prevent accumulating delay; increase playback_queue_ms or check device/model speed");
                                 }
                             }
                         }
@@ -335,7 +335,7 @@ pub(super) async fn run_route(
                 event = stt_events_rx.recv(), if transcribing => {
                     if cancel.is_cancelled() { break Ok(()); }
                     let Some(event) = event else {
-                        metrics.report_processing_error("O reconhecedor encerrou o canal de transcrição");
+                        metrics.report_processing_error("The recognizer closed the transcription channel");
                         transcribing = false; stt_connected = false; transcript_tx = None;
                         recognition_cancel.cancel();
                         if !translating { metrics.state("passthrough"); }
@@ -355,7 +355,7 @@ pub(super) async fn run_route(
                         _ => {}
                     }
                     if let Err(error) = record_recognition_event_at(event, &transcript_tx, &metrics, stt_offset_ms.unwrap_or(0)) {
-                        metrics.report_processing_error(&format!("Transcrição interrompida: {error:#}"));
+                        metrics.report_processing_error(&format!("Transcription interrupted: {error:#}"));
                         transcript_tx = None; transcribing = false; stt_connected = false;
                         recognition_cancel.cancel();
                         if !translating { metrics.state("passthrough"); }
@@ -363,12 +363,12 @@ pub(super) async fn run_route(
                 }
                 frame = captured_rx.recv() => {
                     if cancel.is_cancelled() { break Ok(()); }
-                    let Some(original) = frame else { bail!("Captura de áudio foi encerrada"); };
+                    let Some(original) = frame else { bail!("Audio capture ended"); };
                     // This whole branch runs only on the processing executor. Native-rate,
                     // full-resolution original audio has already been forwarded independently.
                     let losses = metrics.audio.sidecar_dropped_frames.load(Ordering::Relaxed);
                     if losses > copy_losses && (audio_tx.is_some() || transcribing) {
-                        metrics.report_processing_error("Processamento de áudio sobrecarregado; a gravação ou transcrição pode conter lacunas");
+                        metrics.report_processing_error("Audio processing overloaded; the recording or transcript may contain gaps");
                     }
                     copy_losses = losses;
                     if !translating && !transcribing && audio_tx.is_none() && !history.enabled() {
@@ -381,7 +381,7 @@ pub(super) async fn run_route(
                     history.push(match origin { TranscriptOrigin::Microphone => RecordingLane::Microphone, TranscriptOrigin::Speaker => RecordingLane::Speaker }, &frame.samples, frame.captured_at);
                     if let Some(sender) = &audio_tx
                         && sender.try_send(AudioRecord { lane: match origin { TranscriptOrigin::Microphone => RecordingLane::Microphone, TranscriptOrigin::Speaker => RecordingLane::Speaker }, samples: frame.samples.clone(), captured_at: frame.captured_at }).is_err() {
-                            metrics.report_processing_error("Gravação de áudio interrompida: destino indisponível ou lento; o arquivo pode estar incompleto");
+                            metrics.report_processing_error("Audio recording interrupted: destination unavailable or slow; the file may be incomplete");
                             audio_tx = None;
                     }
                     if translating || transcribing {
@@ -415,7 +415,7 @@ pub(super) async fn run_route(
     let audio_shutdown = tokio::time::timeout(Duration::from_secs(2), async {
         while let Some(completed) = audio_jobs.join_next().await {
             let completed = completed
-                .context("Tarefa de transporte interrompida")
+                .context("Transport task interrupted")
                 .and_then(|r| r);
             if completed.is_err() && cleanup_result.is_ok() {
                 cleanup_result = completed;
@@ -425,7 +425,7 @@ pub(super) async fn run_route(
     .await;
     if audio_shutdown.is_err() {
         audio_jobs.abort_all();
-        cleanup_result = Err(anyhow!("Tempo limite ao encerrar os dispositivos de áudio"));
+        cleanup_result = Err(anyhow!("Timed out while stopping audio devices"));
     }
     // Save finals already delivered before cancellation. Never wait for a model
     // to finish another turn or replay a result into a later device activation.
@@ -433,8 +433,9 @@ pub(super) async fn run_route(
         if let Err(error) =
             record_recognition_event_at(event, &transcript_tx, &metrics, stt_offset_ms.unwrap_or(0))
         {
-            metrics
-                .report_processing_error(&format!("Transcrição incompleta ao encerrar: {error:#}"));
+            metrics.report_processing_error(&format!(
+                "Transcription incomplete at shutdown: {error:#}"
+            ));
         }
     }
     drop(transcript_tx);
@@ -447,7 +448,7 @@ pub(super) async fn run_route(
     });
     result
         .and(cleanup_result)
-        .with_context(|| format!("Fluxo {name}"))
+        .with_context(|| format!("Stream {name}"))
 }
 
 #[derive(Clone, Copy)]
@@ -471,9 +472,7 @@ fn spawn_processor<F>(
             let result = std::panic::AssertUnwindSafe(future)
                 .catch_unwind()
                 .await
-                .unwrap_or_else(|_| {
-                    Err(anyhow!("O componente de processamento falhou internamente"))
-                });
+                .unwrap_or_else(|_| Err(anyhow!("Processing component failed internally")));
             (kind, result)
         },
         handle,
@@ -489,7 +488,7 @@ async fn forward_processing(
     loop {
         let frame = tokio::select! { biased; _ = cancel.cancelled() => return Ok(()), frame = captured.recv() => frame };
         let Some(frame) = frame else {
-            return Err(anyhow!("Captura de áudio encerrada"));
+            return Err(anyhow!("Audio capture ended"));
         };
         if processing.try_send(frame).is_err() {
             stats
@@ -523,6 +522,6 @@ mod tests {
             .unwrap()
             .expect("panic is contained in the adapter");
         assert!(matches!(kind, Processor::Recognition));
-        assert!(result.unwrap_err().to_string().contains("processamento"));
+        assert!(result.unwrap_err().to_string().contains("Processing"));
     }
 }

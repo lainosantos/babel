@@ -428,7 +428,7 @@ async fn idle_routing_recording_and_transcription_are_independent_without_cloud(
         tokio::time::timeout(Duration::from_secs(5),async {
             loop {
                 let text=tokio::fs::read_to_string(&text_path).await?;
-                if text.contains("[microfone]") && text.contains("[saída recebida]") && text.contains("fala original simulada") {return Ok::<_,anyhow::Error>(());}
+                if text.contains("[microphone]") && text.contains("[received output]") && text.contains("fala original simulada") {return Ok::<_,anyhow::Error>(());}
                 tokio::time::sleep(Duration::from_millis(100)).await;
             }
         }).await.context("Original ASR text from both routes did not reach the merged TXT")??;

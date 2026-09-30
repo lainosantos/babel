@@ -146,24 +146,18 @@ pub(super) async fn oauth_callback(
     } else {
         false
     };
-    let language = state.controller.interface_snapshot().await.0.language;
-    let portuguese = crate::i18n::resolve_language(&language) == "pt";
-    let message = match (success, portuguese) {
-        (true, true) => {
-            "Integração conectada. Volte ao painel do Babel; esta janela pode ser fechada."
-        }
-        (false, true) => {
-            "Não foi possível conectar. Volte ao painel do Babel e reinicie a autorização."
-        }
-        (true, false) => {
-            "Integration connected. Return to the Babel dashboard; you can close this window."
-        }
-        (false, false) => {
-            "Connection failed. Return to the Babel dashboard and restart authorization."
-        }
-    };
+    let language =
+        crate::i18n::resolve_language(&state.controller.interface_snapshot().await.0.language);
+    let message = crate::interface_messages::localize(
+        &language,
+        if success {
+            "Integration connected. Return to the Babel dashboard; you may close this window."
+        } else {
+            "Could not connect. Return to the Babel dashboard and restart authorization."
+        },
+    );
     // Static text only. Never reflect provider errors, codes or tokens into HTML.
-    (if success { StatusCode::OK } else { StatusCode::BAD_REQUEST }, Html(format!("<!doctype html><html lang=\"{}\"><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width\"><title>Babel · MCP</title><h1>Babel · MCP</h1><p>{message}</p></html>", if portuguese {"pt"} else {"en"}))).into_response()
+    (if success { StatusCode::OK } else { StatusCode::BAD_REQUEST }, Html(format!("<!doctype html><html lang=\"{}\"><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width\"><title>Babel · MCP</title><h1>Babel · MCP</h1><p>{message}</p></html>", language))).into_response()
 }
 async fn credential(
     State(state): State<DashboardState>,

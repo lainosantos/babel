@@ -29,7 +29,7 @@ pub async fn status() -> Result<AutostartStatus> {
     let _lock = MUTATION.lock().await;
     tokio::task::spawn_blocking(platform_status)
         .await
-        .context("Falha ao consultar inicialização no login")?
+        .context("Failed to query login startup")?
 }
 
 /// Changes only Babel's owned login entry. Enabling does not start a process.
@@ -38,7 +38,7 @@ pub async fn set_enabled(enabled: bool, config_path: &Path) -> Result<AutostartS
     let config_path = config_path.to_owned();
     tokio::task::spawn_blocking(move || platform_set(enabled, &config_path))
         .await
-        .context("Falha ao configurar inicialização no login")?
+        .context("Failed to configure login startup")?
 }
 
 struct LaunchSpec {
@@ -49,21 +49,20 @@ struct LaunchSpec {
 }
 impl LaunchSpec {
     fn current(config: &Path) -> Result<Self> {
-        let current =
-            std::env::current_exe().context("Não foi possível localizar o executável do Babel")?;
+        let current = std::env::current_exe().context("Could not locate the Babel executable")?;
         #[cfg(target_os = "windows")]
         let executable = current
             .parent()
-            .context("Diretório do executável indisponível")?
+            .context("Executable directory unavailable")?
             .join("babel-tray.exe");
         #[cfg(not(target_os = "windows"))]
         let executable = current;
         ensure!(
             executable.is_file(),
-            "Launcher indisponível; compile/instale babel-tray junto ao Babel e reinicie o aplicativo"
+            "Launcher unavailable; build/install babel-tray alongside Babel and restart the application"
         );
-        let working_dir = std::env::current_dir().context("Diretório de trabalho indisponível")?;
-        let config = std::path::absolute(config).context("Caminho da configuração inválido")?;
+        let working_dir = std::env::current_dir().context("Working directory unavailable")?;
+        let config = std::path::absolute(config).context("Invalid configuration path")?;
         for path in [&executable, &working_dir, &config] {
             path_text(path)?;
         }
@@ -94,10 +93,10 @@ impl LaunchSpec {
 fn path_text(path: &Path) -> Result<&str> {
     let value = path
         .to_str()
-        .context("Inicialização no login exige caminhos Unicode válidos")?;
+        .context("Login startup requires valid Unicode paths")?;
     ensure!(
         !value.is_empty() && !value.chars().any(char::is_control),
-        "Caminho de inicialização vazio ou com caracteres de controle"
+        "Startup path is empty or contains control characters"
     );
     Ok(value)
 }
@@ -122,8 +121,8 @@ fn location() -> Result<PathBuf> {
 fn user_home() -> Result<PathBuf> {
     let home = std::env::var_os("HOME")
         .map(PathBuf::from)
-        .context("Diretório pessoal indisponível")?;
-    ensure!(home.is_absolute(), "Diretório pessoal precisa ser absoluto");
+        .context("Home directory unavailable")?;
+    ensure!(home.is_absolute(), "Home directory must be absolute");
     Ok(home)
 }
 
@@ -133,15 +132,15 @@ fn read_owned_file(path: &Path) -> Result<Option<String>> {
     let metadata = match std::fs::symlink_metadata(path) {
         Ok(metadata) => metadata,
         Err(error) if error.kind() == ErrorKind::NotFound => return Ok(None),
-        Err(error) => return Err(error).context("Não foi possível consultar a entrada de login"),
+        Err(error) => return Err(error).context("Could not inspect the login entry"),
     };
     ensure!(
         metadata.is_file() && !metadata.file_type().is_symlink(),
-        "A entrada de login existente não é um arquivo regular; nada foi alterado"
+        "The existing login entry is not a regular file; nothing was changed"
     );
     ensure!(
         metadata.len() <= MAX_ENTRY_BYTES,
-        "A entrada de login existente excede o limite; nada foi alterado"
+        "The existing login entry exceeds the limit; nothing was changed"
     );
     let mut bytes = Vec::new();
     std::fs::File::open(path)?
@@ -149,13 +148,13 @@ fn read_owned_file(path: &Path) -> Result<Option<String>> {
         .read_to_end(&mut bytes)?;
     ensure!(
         bytes.len() <= MAX_ENTRY_BYTES as usize,
-        "A entrada de login existente excede o limite"
+        "The existing login entry exceeds the limit"
     );
-    let text = String::from_utf8(bytes).context("A entrada de login existente não é UTF-8")?;
+    let text = String::from_utf8(bytes).context("The existing login entry is not UTF-8")?;
     ensure!(
         text.lines()
             .any(|line| line == format!("# {MARKER}") || line == format!("<!-- {MARKER} -->")),
-        "A entrada de login existente não pertence ao Babel; nada foi alterado"
+        "The existing login entry does not belong to Babel; nothing was changed"
     );
     Ok(Some(text))
 }
@@ -164,11 +163,8 @@ fn set_file(path: &Path, content: Option<&str>) -> Result<()> {
     use std::io::Write;
     let existing = read_owned_file(path)?;
     if let Some(content) = content {
-        let parent = path
-            .parent()
-            .context("Diretório da entrada de login indisponível")?;
-        std::fs::create_dir_all(parent)
-            .context("Não foi possível criar o diretório de inicialização")?;
+        let parent = path.parent().context("Login entry directory unavailable")?;
+        std::fs::create_dir_all(parent).context("Could not create the startup directory")?;
         let mut temporary = tempfile::NamedTempFile::new_in(parent)?;
         temporary.write_all(content.as_bytes())?;
         temporary.as_file().sync_all()?;
@@ -177,7 +173,7 @@ fn set_file(path: &Path, content: Option<&str>) -> Result<()> {
         let current = read_owned_file(path)?;
         ensure!(
             current == existing,
-            "A entrada de login mudou durante a operação; tente novamente"
+            "The login entry changed during the operation; try again"
         );
         if existing.is_some() {
             temporary.persist(path).map_err(|e| e.error)?;
@@ -187,10 +183,9 @@ fn set_file(path: &Path, content: Option<&str>) -> Result<()> {
     } else if existing.is_some() {
         ensure!(
             read_owned_file(path)? == existing,
-            "A entrada de login mudou durante a operação; tente novamente"
+            "The login entry changed during the operation; try again"
         );
-        std::fs::remove_file(path)
-            .context("Não foi possível remover a entrada de login do Babel")?;
+        std::fs::remove_file(path).context("Could not remove the Babel login entry")?;
     }
     Ok(())
 }
@@ -224,7 +219,7 @@ fn desktop_arg(value: &str) -> String {
 fn desktop_entry(spec: &LaunchSpec) -> Result<String> {
     ensure!(
         !path_text(&spec.executable)?.contains('='),
-        "O padrão XDG não aceita '=' no caminho do executável; mova o Babel para outro diretório"
+        "The XDG standard does not accept '=' in the executable path; move Babel to another directory"
     );
     let mut args = spec.args()?;
     // GLib resolves argv[0] before expanding %% and therefore cannot directly
@@ -233,7 +228,7 @@ fn desktop_entry(spec: &LaunchSpec) -> Result<String> {
     if path_text(&spec.executable)?.contains('%') {
         ensure!(
             Path::new("/usr/bin/env").is_file(),
-            "O caminho do executável contém '%' e exige /usr/bin/env para inicialização XDG"
+            "The executable path contains '%' and requires /usr/bin/env for XDG startup"
         );
         args.splice(0..0, ["/usr/bin/env".into(), "--".into()]);
     }
@@ -243,7 +238,7 @@ fn desktop_entry(spec: &LaunchSpec) -> Result<String> {
         .collect::<Vec<_>>()
         .join(" ");
     Ok(format!(
-        "[Desktop Entry]\n# {MARKER}\nType=Application\nName=Babel\nComment=Painel de tradução de voz\nExec={command}\nPath={}\nTerminal=false\nHidden=false\nX-GNOME-Autostart-enabled=true\n",
+        "[Desktop Entry]\n# {MARKER}\nType=Application\nName=Babel\nComment=Voice translation dashboard\nExec={command}\nPath={}\nTerminal=false\nHidden=false\nX-GNOME-Autostart-enabled=true\n",
         desktop_string(path_text(&spec.working_dir)?).replace(' ', "\\s")
     ))
 }
@@ -301,9 +296,10 @@ fn file_status() -> Result<AutostartStatus> {
         },
         entry_path: Some(path_text(&path)?.to_owned()),
         description: if enabled {
-            "Bandeja e painel abrirão no próximo login. A tradução permanecerá parada.".into()
+            "The tray and dashboard will start at next login. Translation will remain stopped."
+                .into()
         } else {
-            "Inicialização no login desativada para este usuário.".into()
+            "Login startup is disabled for this user.".into()
         },
     })
 }
@@ -345,7 +341,7 @@ fn windows_arg(value: &str) -> String {
 fn windows_command(spec: &LaunchSpec) -> Result<String> {
     ensure!(
         spec.tray_launcher,
-        "A inicialização Windows exige babel-tray.exe"
+        "Windows startup requires babel-tray.exe"
     );
     let mut args = spec.args()?;
     args.extend([
@@ -361,7 +357,7 @@ fn windows_command(spec: &LaunchSpec) -> Result<String> {
         .join(" ");
     ensure!(
         command.encode_utf16().count() <= 260,
-        "O comando excede o limite Windows Run de 260 caracteres; instale Babel e sua configuração em caminhos mais curtos"
+        "The command exceeds the Windows Run limit of 260 characters; install Babel and its configuration at shorter paths"
     );
     Ok(command)
 }
@@ -384,18 +380,18 @@ fn registry_entry() -> Result<Option<String>> {
     let key = match winreg::HKCU.open_subkey(RUN_KEY) {
         Ok(key) => key,
         Err(error) if error.kind() == ErrorKind::NotFound => return Ok(None),
-        Err(error) => return Err(error).context("Não foi possível ler a inicialização Windows"),
+        Err(error) => return Err(error).context("Could not read Windows startup settings"),
     };
     match key.get_value::<String, _>(RUN_VALUE) {
         Ok(command) => {
             ensure!(
                 owned_windows_command(&command),
-                "A entrada Windows BabelAudio não pertence ao Babel; nada foi alterado"
+                "The Windows BabelAudio entry does not belong to Babel; nothing was changed"
             );
             Ok(Some(command))
         }
         Err(error) if error.kind() == ErrorKind::NotFound => Ok(None),
-        Err(error) => Err(error).context("Não foi possível ler a entrada Windows BabelAudio"),
+        Err(error) => Err(error).context("Could not read the Windows BabelAudio entry"),
     }
 }
 #[cfg(target_os = "windows")]
@@ -407,9 +403,9 @@ fn platform_status() -> Result<AutostartStatus> {
         method: "registry_run",
         entry_path: Some(format!("HKCU\\{RUN_KEY}\\{RUN_VALUE}")),
         description: if enabled {
-            "Bandeja registrada para o próximo login. A tradução permanecerá parada; o Windows pode bloquear aplicativos de inicialização nas Configurações.".into()
+            "The tray is registered for next login. Translation will remain stopped; Windows may block startup applications in Settings.".into()
         } else {
-            "Inicialização no login desativada para este usuário.".into()
+            "Login startup is disabled for this user.".into()
         },
     })
 }
@@ -423,18 +419,18 @@ fn platform_set(enabled: bool, config: &Path) -> Result<AutostartStatus> {
     };
     ensure!(
         registry_entry()? == existing,
-        "A entrada Windows mudou durante a operação; tente novamente"
+        "The Windows entry changed during the operation; try again"
     );
     if let Some(command) = command {
         let (key, _) = winreg::HKCU
             .create_subkey(RUN_KEY)
-            .context("Não foi possível abrir a inicialização Windows para escrita")?;
+            .context("Could not open Windows startup settings for writing")?;
         key.set_value(RUN_VALUE, &command)
-            .context("Não foi possível salvar a inicialização Windows")?;
+            .context("Could not save Windows startup settings")?;
     } else if existing.is_some() {
         let key = winreg::HKCU.open_subkey_with_flags(RUN_KEY, winreg::enums::KEY_SET_VALUE)?;
         key.delete_value(RUN_VALUE)
-            .context("Não foi possível remover a inicialização Windows")?;
+            .context("Could not remove the Windows startup entry")?;
     }
     platform_status()
 }

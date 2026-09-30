@@ -1,344 +1,336 @@
-# Arquitetura, memória e desempenho
+# Architecture, memory and performance
 
-## Componentes
+## Components
 
 ```text
-Em cada direção, enquanto Babel é o dispositivo selecionado/em uso:
-  captura → float32 intercalado, taxa/canais da origem → filas limitadas
-     ├─ tradução desligada → executor de áudio → reprodução original
-     └─ cópia limitada → executor de processamento → PCM16 mono 16 kHz
-        ├─ histórico em memória
-        ├─ sessão + gravação → mistura das origens → um arquivo .wav
-        ├─ sessão + transcrição → STT → um arquivo .txt com origens
-        └─ sessão + tradução → SpeechProvider → PCM16 mono 24 kHz → reprodução
+For each direction, while Babel is selected/in use:
+  capture → interleaved float32, source rate/channels → bounded queues
+     ├─ translation off → audio executor → original playback
+     └─ bounded copy → processing executor → PCM16 mono 16 kHz
+        ├─ in-memory history
+        ├─ session + recording → mix original sources → one .wav file
+        ├─ session + transcription → STT → one .txt file with source labels
+        └─ session + translation → SpeechProvider → PCM16 mono 24 kHz → playback
 
-Modo opcional de voz:
-  texto traduzido em memória → segmentador → TTS em streaming → PCM de reprodução
+Optional voice mode:
+  translated text in memory → segmenter → streaming TTS → playback PCM
 ```
 
-As duas faixas são independentes em termos de provider, idiomas, prompts e voz,
-mas compartilham a configuração do transporte de áudio. Cada faixa de nuvem tem
-sua própria sessão e contexto; os provedores recebem as origens separadamente.
-A flag `enabled` de cada faixa seleciona somente tradução: a rota continua
-encaminhando áudio original quando essa flag está desligada. Transcrição e
-gravação selecionam suas fontes separadamente. Sem tradução, o adaptador de ASR
-produz somente texto original, sem enviar esse áudio ao tradutor ou sintetizador.
-A gravação opcional mistura os originais somente no WAV local. Falha de STT,
-fila de gravação saturada ou erro de escrita fica visível como erro de
-processamento; não cancela as rotas originais nem a outra função independente.
-O arquivo afetado pode estar incompleto. Perdas da cópia de processamento têm
-contador separado das perdas de captura/reprodução. O histórico também pode
-conter lacunas se o processamento não acompanhar a captura.
-Falhas fatais de tradução ou de transporte ainda podem encerrar a sessão. O
-monitor restaura a passagem original após o fechamento dos streams, verificando
-esse estado a cada 250 ms. Isso pode produzir uma lacuna.
-Falhas dos dispositivos físicos têm recuperação própria: o painel mostra o erro
-e permite escolher outro dispositivo pela bandeja sem recriar a sessão de IA.
+Both directions have independent providers, languages, prompts and voices, but
+share audio-transport configuration. Each cloud direction has its own session
+and context; providers receive sources separately. A direction's `enabled`
+flag selects translation only: its route continues forwarding original audio
+when that flag is off. Transcription and recording select their sources
+separately. Without translation, the ASR adapter produces original text only,
+without sending that audio to a translator or synthesizer.
+Optional recording mixes originals only in the local WAV. STT failure, a full
+recording queue or a write error appears as a processing error; it does not
+cancel original routes or the other independent feature. The affected file may
+be incomplete. Processing-copy losses have a counter separate from
+capture/playback losses. History may also contain gaps if processing cannot
+keep up with capture.
+Fatal translation or transport failures can still end the session. The monitor
+restores original routing after streams close, checking that state every
+250 ms. This can produce a gap. Physical-device failures have their own recovery:
+the dashboard shows the error and allows selecting another device through the
+tray without recreating the AI session.
 
-`SpeechProvider` é a interface assíncrona que recebe quadros de PCM e emite
-`ProviderEvent`. Não há rede nem JSON nos callbacks de áudio. Adaptadores novos
-podem produzir metadados reais de locutor/tempo em `TranscriptMetadata`; ausência
-permanece ausência. O catálogo de capacidades deve acompanhar a implementação e
-os modelos efetivamente suportados.
+`SpeechProvider` is the asynchronous interface that receives PCM frames and
+emits `ProviderEvent`. Audio callbacks perform no networking or JSON processing.
+New adapters can supply actual speaker/timing metadata through
+`TranscriptMetadata`; missing data remains missing. The capability catalog must
+match the implementation and models actually supported.
 
-A camada de vozes é separada: enumeração, design, clonagem e síntese pertencem a
-`voices`. O adaptador `revoice` solicita texto de saída ao tradutor, descarta o
-áudio original sintetizado por ele e reproduz a voz selecionada. O segmentador
-prefere pontuação, limita o tamanho de trechos e faz flush por prazo. Sínteses são
-ordenadas para preservar a sequência das falas. Isso pode perder contexto de
-prosódia entre trechos e acrescenta inferência, rede e custo.
-No tradutor local, selecionar um TTS externo pula o Piper: reconhecimento e
-tradução entregam texto diretamente ao sintetizador escolhido.
+The voice layer is separate: enumeration, design, cloning and synthesis belong
+to `voices`. The `revoice` adapter requests output text from the translator,
+discards its natively synthesized audio and plays the selected voice. The
+segmenter prefers punctuation, limits segment length and flushes by deadline.
+Synthesis is ordered to preserve utterance sequence. This can lose prosodic
+context between segments and adds inference, network use and cost. In the local
+translator, selecting external TTS skips Piper: recognition and translation
+send text directly to the selected synthesizer.
 
-## Inferência local gerenciada
+## Managed local inference
 
-`local_runtime` prepara os providers locais selecionados na configuração salva,
-mesmo com a respectiva função desligada. O plano reúne os modelos Whisper
-necessários, o tradutor Qwen via llama.cpp e as vozes Piper usadas pelas rotas.
-O STT continua separado do tradutor: configuração e processamento próprios,
-compartilhando um motor carregado quando o modelo coincide.
+`local_runtime` prepares the local providers selected in saved configuration,
+even when the corresponding feature is off. The plan collects required Whisper
+models, the Qwen translator through llama.cpp and Piper voices used by routes.
+STT remains separate from translation, with its own configuration/processing,
+sharing a loaded engine when the model matches.
 
-O manager verifica os componentes empacotados e baixa pesos ausentes do catálogo
-pinado por tamanho/SHA-256. Os motores nativos são processos filhos persistentes;
-Whisper e llama.cpp anunciam a porta de loopback já reservada por `bind(0)`.
-Piper usa JSON por stdin/stdout, atrás de um gateway HTTP Rust com porta dinâmica.
-Somente o snapshot efetivo recebe esses endpoints; o TOML preserva `auto`.
+The manager verifies packaged components and downloads missing weights from
+the size/SHA-256-pinned catalog. Native engines are persistent child processes;
+Whisper and llama.cpp announce the loopback port already reserved by `bind(0)`.
+Piper uses JSON over stdin/stdout behind a Rust HTTP gateway with a dynamic
+port. Only the effective snapshot receives these endpoints; TOML retains `auto`.
 
-Preparação e progresso aparecem em `EngineStatus.local_runtime`. Iniciar a sessão
-aguarda apenas os recursos das funções ativas. Um Whisper já pronto pode atender
-STT enquanto componentes locais selecionados, mas inativos, ainda são preparados;
-uma falha nessa preparação opcional não invalida o endpoint STT disponível.
-Cancelar o início interrompe a espera da sessão. Alterar a seleção reconcilia o
-plano, cancela a preparação anterior e encerra os filhos que deixam de pertencer
-a ele; sair do Babel encerra os processos gerenciados. Endpoints externos
-explícitos permanecem sob responsabilidade do usuário.
+Preparation and progress appear in `EngineStatus.local_runtime`. Starting a
+session waits only for resources needed by enabled features. A ready Whisper
+can serve STT while selected but inactive local components are still being
+prepared; an optional preparation failure does not invalidate an available STT
+endpoint. Canceling startup interrupts the session's wait. Changing selections
+reconciles the plan, cancels earlier preparation and terminates children no
+longer in the plan; quitting Babel terminates managed processes. Explicit
+external endpoints remain the user's responsibility.
 
-Preparar modelos não abre captura para tradução/transcrição nem cria arquivos
-de sessão. Depois do primeiro download, inferência integrada funciona offline.
-O diretório de pesos é próprio e absoluto, separado dos TXT/WAV; `threads`
-controla Whisper/llama.cpp e é limitado pelo orçamento de CPUs de processamento.
-Variáveis dos filhos limitam bibliotecas de cálculo conhecidas, inclusive as
-usadas pelo Piper, mas não são uma garantia de limite total de CPU de cada motor.
-Veja [modelos locais](local-inference.md) para catálogo, caminhos e limites.
+Preparing models does not open translation/transcription capture or create
+session files. After initial downloads, embedded inference works offline.
+Weights use a dedicated absolute directory, separate from TXT/WAV files;
+`threads` controls Whisper/llama.cpp and is capped by the processing CPU budget.
+Child environment variables limit known compute libraries, including those
+used by Piper, but do not guarantee a total CPU limit for every engine.
+See [local models](local-inference.md) for the catalog, paths and limits.
 
-## Separação do transporte e do processamento
+## Separating transport and processing
 
-O executor `babel-audio` possui workers e pool de tarefas bloqueantes próprios
-para captura, reprodução e operações curtas sobre PCM. Encaminhar original não
-executa inferência, DSP de fala, locks do histórico ou escrita de arquivos. A
-cópia para processamento compartilha amostras imutáveis por `Arc`; o envio usa
-`try_send`, sem esperar espaço no consumidor. O executor `babel-processing`
-executa providers, transcrição, comandos, histórico e writers. O controle de
-seleção dos dispositivos e de início/parada fica no executor de controle:
-revogar uma rota não depende de o modelo atender uma nova tarefa.
+The `babel-audio` executor has its own workers and blocking-task pool for
+capture, playback and short PCM operations. Forwarding originals performs no
+inference, speech DSP, history locking or file writing. The processing copy
+shares immutable samples through `Arc`; delivery uses `try_send`, without
+waiting for consumer capacity. The `babel-processing` executor runs providers,
+transcription, commands, history and writers. Device-selection gates and
+start/stop supervision stay on the control executor: revoking a route does not
+require the model to accept another task.
 
-No Linux e Windows, quando a afinidade e a capacidade disponível permitem,
-workers de áudio usam um conjunto de um ou dois CPUs lógicos separado dos
-workers de controle/processamento. Uma quota de um CPU ou falha de afinidade
-mantém os executores separados, sem impedir áudio. Isso não reserva núcleos
-físicos exclusivamente: SMT, outros processos e largura de banda de memória
-continuam compartilhados. No macOS há executores distintos e o escalonamento
-CoreAudio, sem promessa de pinning de CPU.
+On Linux and Windows, when affinity and available capacity allow, audio workers
+use one or two logical CPUs separate from control/processing workers. A
+single-CPU quota or affinity failure keeps executors separate without preventing
+audio. This does not reserve physical cores exclusively: SMT, other processes
+and memory bandwidth remain shared. macOS uses distinct executors and CoreAudio
+scheduling without a CPU-pinning guarantee.
 
-Helpers gerenciados de inferência e comandos recebem limites de threads das
-bibliotecas conhecidas. Em Unix, `nice` reduz sua prioridade quando disponível;
-no Linux eles herdam a máscara de CPU do worker que os cria. No Windows são
-criados sem console e com prioridade abaixo da normal, mas filhos herdam a
-afinidade do processo, não a máscara do worker. Portanto, não há garantia de
-CPU exclusiva contra esses filhos. O Babel não controla os recursos de
-providers externos já em execução.
+Managed inference/command helpers receive thread limits for known libraries.
+On Unix, `nice` lowers their priority when available; on Linux they inherit the
+spawning worker's CPU mask. On Windows they start without a console and below
+normal priority, but children inherit process affinity, not the worker's mask.
+Therefore, there is no guarantee of exclusive audio CPUs against those children.
+Babel does not control resources of already-running external providers.
 
-Essa separação evita que uma fila ou worker de IA ocupado consuma os workers
-dedicados ao áudio. Não é um sistema de tempo real rígido: carga global do SO,
-drivers, GPU, pressão de memória, tarefas bloqueantes que não cooperam e
-permissões de escalonamento ainda podem afetar áudio e encerramento.
+This separation prevents a busy AI queue or worker from consuming audio's
+dedicated workers. It is not hard real-time scheduling: overall OS load,
+drivers, GPU, memory pressure, uncooperative blocking tasks and scheduling
+permissions can still affect audio and shutdown.
 
-## Sessão, arquivos e troca de dispositivo
+## Sessions, files and device switching
 
-O controlador cria a identidade da sessão uma vez. O nome opcional do usuário
-fica separado do identificador seguro e do padrão de arquivos. `files.name_pattern`
-produz uma base comum para TXT/WAV; `{date}` e `{time}` usam UTC, `{session}` é
-uma versão segura do título limitada a 64 bytes e `{id}` é obrigatório. Os writers
-acrescentam a extensão e criam arquivos novos, sem sobrescrever sessões anteriores.
+The controller creates the session identity once. The optional user-facing name
+is separate from the safe identifier and filename pattern. `files.name_pattern`
+produces a shared TXT/WAV stem; `{date}` and `{time}` use UTC, `{session}` is a
+filename-safe title limited to 64 bytes, and `{id}` is required. Writers append
+the extension and create new files without overwriting previous sessions.
 
-Um writer de transcrição recebe as origens pelo mesmo canal limitado e grava
-um único TXT. Cada fragmento mantém seus metadados e é identificado por
-`[microfone]` ou `[saída recebida]`. A sequência do arquivo é a chegada dos
-fragmentos; conexões independentes podem ter atrasos e bases de timestamps
-diferentes. A união não fornece ordenação perfeita da fala nem diarização.
+One transcript writer receives both sources through the same bounded channel
+and writes a single TXT. Each segment retains its metadata and `[microphone]`
+or `[received output]` source label. File order is segment arrival order; independent
+connections can have different delays and timestamp bases. Merging does not
+provide perfect speech ordering or diarization.
 
-O gravador opcional recebe PCM16 mono a 16 kHz antes da tradução e do ganho de
-reprodução, mistura as origens selecionadas e mantém um único WAV. Transcrição e
-gravação têm seleções de faixas e pastas independentes; ambas ficam desligadas por
-padrão. Habilitar um recurso sem qualquer origem selecionada é erro de
-configuração. A origem precisa estar selecionada e configurada, mas sua tradução
-pode estar desligada. Os writers trabalham fora dos callbacks de áudio.
+The optional recorder receives PCM16 mono at 16 kHz before translation and
+playback gain, mixes selected sources and maintains one WAV. Transcription and
+recording have independent source/folder selections; both are off by default.
+Enabling a feature with no selected source is a configuration error. The source
+must be selected and configured, but its translation may be off. Writers work
+outside audio callbacks.
 
-`EngineStatus.running` representa a sessão de processamento/arquivos; ela pode
-conter só gravação, só reconhecimento ou uma combinação com tradução. Sem sessão,
-`routing_active` e `routing_error` descrevem a passagem original local. Essa
-passagem não envia áudio a provedores nem abre arquivos. Motores locais
-selecionados podem ficar preparados independentemente da sessão. `stop()` encerra a sessão e retoma o
-original; `shutdown()` encerra também esse roteamento quando o aplicativo sai.
-O original usa float32 intercalado com a taxa e os canais da captura, inclusive
-durante uma sessão com tradução desligada. A passagem não reduz estéreo a mono
-nem quantiza as amostras para PCM16. Conversões de taxa/canais necessárias para
-o dispositivo de destino pertencem ao backend; os drivers virtuais e o mixer
-do SO ainda podem impor seu próprio formato. Não há garantia de áudio bit a bit
-idêntico de ponta a ponta. Somente as cópias para histórico, comandos, ASR e WAV
-são convertidas para PCM16 mono a 16 kHz, com filtragem anti-alias. Portanto, o
-WAV misturado continua sendo uma gravação de fala a 16 kHz, não um arquivo
-multicanal de alta resolução. Áudio traduzido mantém seu formato mono a 24 kHz.
-Iniciar/encerrar sessão pode reabrir streams e produzir um breve intervalo, sem
-trocar os dispositivos virtuais selecionados pelos outros aplicativos.
+`EngineStatus.running` represents the processing/file session; it may contain
+recording only, recognition only or a combination with translation. Without a
+session, `routing_active` and `routing_error` describe local original routing.
+That routing sends no audio to providers and opens no files. Selected local
+engines can remain prepared independently of a session. `stop()` ends the
+session and resumes originals; `shutdown()` also ends routing when the app exits.
+Original audio uses interleaved float32 at the capture rate/channel count,
+including during a session with translation off. Forwarding neither downmixes
+stereo to mono nor quantizes samples to PCM16. Rate/channel conversion required
+by the destination belongs to the backend; virtual drivers and the OS mixer
+may still impose their own formats. End-to-end bit-perfect audio is not
+guaranteed. Only copies for history, commands, ASR and WAV are converted to
+PCM16 mono at 16 kHz with anti-alias filtering. The mixed WAV therefore remains
+a 16 kHz speech recording, not a high-resolution multichannel archive.
+Translated audio retains its mono 24 kHz format. Starting/stopping a session
+can reopen streams and produce a brief gap without changing virtual devices
+selected by other apps.
 
-Pastas e arquivos são preparados antes de parar o roteamento original. Após
-fechar os streams anteriores, o controlador fixa a fronteira do histórico e
-ajusta a origem temporal do WAV, evitando silêncio artificial pelo tempo gasto
-na abertura dos arquivos. Na parada, o fechamento das rotas libera a retomada
-do original enquanto os writers ainda finalizam. O supervisor aplica um prazo
-global de três segundos à drenagem; ao excedê-lo aborta as tarefas e informa
-que os arquivos podem estar incompletos. O controlador também limita sua espera.
-Reabrir dispositivos e encerrar tarefas atrasadas pode produzir uma lacuna;
-se um executor ou chamada do SO ficar bloqueado, esse prazo não torna o
-encerramento instantâneo nem garante que uma chamada bloqueante seja preemptada.
+Folders and files are prepared before stopping original routing. After closing
+the previous streams, the controller fixes the history boundary and adjusts the
+WAV time origin, avoiding artificial silence caused by file-opening time. On
+stop, closing routes releases original-routing restart while writers continue
+finalizing. The supervisor applies one global three-second drain deadline;
+if exceeded, it aborts tasks and reports potentially incomplete files. The
+controller also bounds its wait. Reopening devices and ending delayed tasks
+can produce a gap; if an executor or OS call blocks, the deadline does not make
+shutdown instantaneous or guarantee preemption of a blocking call.
 
-Nos três backends, o microfone ativa quando o endpoint virtual Babel é a entrada
-padrão do sistema ou um aplicativo externo o usa explicitamente. A seleção
-como padrão basta para abrir a captura e permitir comandos de voz, sem exigir
-um aplicativo consumidor. A saída permanece condicionada à reprodução de um
-aplicativo externo no endpoint virtual; selecioná-la como padrão, sozinha, não
-abre a rota. Fluxos do próprio Babel não ativam a saída.
+Across all three backends, the microphone activates when the Babel virtual
+endpoint is the system's default input or an external app explicitly uses it.
+Default selection is sufficient to open capture and allow voice commands,
+without a consuming app. Output remains conditional on an external app playing
+through its virtual endpoint; merely making it the default does not open the
+route. Babel's own streams do not activate output.
 
-No Linux, os novos endpoints Babel usam float32 estéreo. A atualização de
-endpoints antigos pertencentes ao Babel exige que nenhum aplicativo os esteja
-usando; caso contrário, a instalação informa que a migração foi adiada. Não move
-aplicativos para outro endpoint para forçar a atualização. O procedimento tem
-rollback e restaura as seleções padrão Babel que existiam antes da migração.
+On Linux, new Babel endpoints use float32 stereo. Updating older Babel-owned
+endpoints requires that no app is using them; otherwise installation reports
+the migration as deferred. It does not move apps to another endpoint to force
+an update. The procedure supports rollback and restores preexisting Babel
+default-device selections.
 
-No Linux, o monitor acompanha o padrão de entrada e eventos do servidor
-PulseAudio/pipewire-pulse e confere snapshots limitados; fluxos internos do Babel
-e do remapeamento não contam como consumidores. Uma aplicação com seleção
-própria continua funcionando quando o padrão do sistema muda para outro
-dispositivo. O estado `waiting_for_app`
-mostra essa espera; `running` continua representando a sessão, enquanto
-`routing_active` só fica ativo se alguma direção estiver processando.
+On Linux, the monitor follows default-input changes and PulseAudio/pipewire-pulse
+server events and checks bounded snapshots; Babel's internal/remapping streams
+do not count as consumers. An app with its own selection continues working when
+the system default changes to another device. `waiting_for_app` describes the
+waiting state; `running` still represents the session, while `routing_active`
+is true only if at least one direction is processing.
 
-Quando a condição de atividade da rota deixa de existir, o supervisor cancela
-captura, reprodução, provedor e
-ativação por voz daquela direção. Fecha os streams e descarta suas filas antes
-de reabrir. A próxima ativação cria novas conexões e canais: eventos de áudio ou
-transcrição da conexão antiga não entram na nova. Epochs separados por direção
-preservam até desativações/reativações rápidas agrupadas pelo canal de controle.
-O nome/ID da sessão e os writers TXT/WAV permanecem; a transcrição recebe uma
-quebra, e o WAV mantém o relógio da sessão. Essa pausa pode interromper uma frase
-em processamento, mas não reproduz a frase atrasada depois de voltar.
-Falha de inspeção fecha as rotas e aparece no painel. No Windows, um worker COM
-MTA consulta o microfone padrão do sistema e inspeciona as sessões WASAPI do
-lado oposto de cada cabo Babel (ou VB-Audio opcional), excluindo
-o PID do Babel. O pareamento usa IDs de endpoints e metadados do driver; pares
-ausentes, ambíguos ou compartilhados entre as duas rotas são recusados. A consulta
-periódica é complementada por callbacks de estado das sessões já descobertas.
-No macOS 14.2+, um worker consulta a entrada padrão e os processos CoreAudio
-a cada 200 ms e cruza
-PID, estado e dispositivos por direção; não usa o estado global do dispositivo,
-que incluiria o próprio Babel. Sistemas anteriores suspendem as rotas com um
-diagnóstico, sem captura contínua como fallback. Essas consultas não capturam
-áudio e não executam nos callbacks de áudio. O período de detecção acrescenta
-uma pequena janela ao iniciar/parar o roteamento; não é uma barreira instantânea.
+When a route's activity condition disappears, its supervisor cancels capture,
+playback, provider and voice activation. It closes streams and discards queues
+before reopening. The next activation creates new connections/channels: audio
+or transcript events from the previous connection cannot enter the new one.
+Separate epochs per direction preserve even rapid off/on changes coalesced by
+the control channel. The session name/ID and TXT/WAV writers remain; the
+transcript gets a break and the WAV retains the session clock. This pause can
+interrupt an utterance in progress but does not replay the delayed utterance
+on return. Inspection failure closes routes and appears in the dashboard.
+On Windows, a COM MTA worker queries the system's default microphone and checks
+WASAPI sessions on the opposite side of each Babel cable (or optional VB-Audio
+cable), excluding Babel's PID. Pairing uses endpoint IDs and driver metadata;
+missing, ambiguous or shared pairs across the two routes are rejected. Periodic
+queries are supplemented by state callbacks from already-discovered sessions.
+On macOS 14.2+, a worker queries default input and CoreAudio processes every
+200 ms, matching PID, state and devices per direction; it does not use global
+device activity, which would include Babel itself. Earlier systems suspend
+routes with a diagnostic rather than falling back to continuous capture.
+These queries do not capture audio or run in audio callbacks. Detection adds a
+small window when starting/stopping routing; it is not an instantaneous barrier.
 
-As seleções de microfone e saída físicos são atualizadas pela bandeja. Na passagem
-original, trocar a captura fecha os streams da direção, consulta a nova taxa e
-os novos canais e reabre captura/reprodução juntos, mantendo a cópia para
-processamento e os arquivos. Trocar somente a saída substitui seu stream, com
-conversão de formato quando necessária. A tradução mantém seu formato de fala;
-uma troca de dispositivo não transforma o formato de saída do provider.
-Identidade da sessão e arquivos são preservados. O stream pode ficar indisponível durante a troca ou após
-uma falha; o erro aparece no painel e uma nova seleção permite recuperação.
-Com ou sem sessão, a camada de dispositivo tenta novamente o mesmo endpoint com
-erro a cada três segundos. A seleção manual de outro dispositivo aciona a troca
-imediatamente. No macOS/Windows, CPAL fornece o UID/ID persistente do sistema;
-mudanças na ordem de enumeração não alteram a seleção. Não há substituição pelo
-dispositivo padrão. Configurações antigas baseadas em índice só são resolvidas
-por nome quando há exatamente um candidato, até serem salvas com o novo ID.
-O caminho não conserva um backlog de áudio antigo para reproduzir ao recuperar.
-Essa continuidade de sessão não significa continuidade acústica sem lacunas.
-Demais alterações de configuração exigem que a sessão esteja encerrada; o áudio
-original continua sendo encaminhado nesse estado.
+Physical microphone/output selections are updated through the tray. In original
+routing, changing capture closes that direction's streams, queries the new rate
+and channel count, and reopens capture/playback together while retaining the
+processing copy and files. Changing output alone replaces its stream, converting
+format when needed. Translation retains its speech format; switching a device
+does not change the provider's output format. Session identity/files remain.
+The stream can be unavailable during a switch or after failure; the dashboard
+shows the error and a new selection allows recovery. With or without a session,
+the device layer retries the same failed endpoint every three seconds. Manually
+selecting another device switches immediately. On macOS/Windows, CPAL supplies
+the OS's persistent UID/ID; enumeration order changes do not change selection.
+There is no substitution with the default device. Legacy index-based settings
+resolve by name only if exactly one candidate exists, until saved with the new
+ID. The path does not retain an old-audio backlog to replay after recovery.
+Session continuity does not imply gapless acoustic continuity. Other configuration
+changes require the session to be stopped; original audio continues routing
+in that state.
 
-Cada alteração salva incrementa a revisão da configuração. O painel lê um
-snapshot atômico com ETag e envia `If-Match` ao salvar ou iniciar; o controlador
-confere a revisão sob o mesmo lock da operação. Uma revisão antiga resulta em
-HTTP 412. O painel acompanha mudanças externas também durante a sessão: atualiza
-ajustes limpos e preserva rascunhos até uma recarga explícita, sem sobrescrever
-silenciosamente uma escolha feita na bandeja.
+Every saved change increments the configuration revision. The dashboard reads
+an atomic snapshot with an ETag and sends `If-Match` when saving/starting;
+the controller checks the revision under the same operation lock. A stale
+revision returns HTTP 412. The dashboard also tracks external changes during a
+session: it updates clean settings and preserves drafts until explicit reload,
+without silently overwriting tray selections.
 
-## Garantias e limites de segurança de memória
+## Memory-safety guarantees and boundaries
 
-O aplicativo principal e os núcleos portáveis de transporte dos drivers usam
-`#![forbid(unsafe_code)]`. A integração HAL/WDK e o instalador têm fronteiras FFI
-separadas, com ponteiros e chamadas ao sistema documentados em `native/`.
-No macOS, uma ponte C usa os layouts do SDK Apple; no Windows, C++ fica na
-integração WaveRT/PortCls e Rust `no_std` transporta o PCM em armazenamento fixo.
-Veja [divisão dos drivers e instalação](native-drivers.md).
-Rust verifica a propriedade dos buffers e os acessos no núcleo seguro.
-Bibliotecas de rede, áudio, sistema, drivers, firmware, whisper.cpp/llama.cpp/Piper/ONNX e modelos externos não herdam uma
-prova de segurança apenas porque o chamador é Rust. Não há afirmação de que todo
-o stack ou todos os drivers sejam livres de `unsafe`/C/C++.
+The main application and portable driver-transport cores use
+`#![forbid(unsafe_code)]`. HAL/WDK integration and the installer have separate
+FFI boundaries, with pointers and OS calls documented under `native/`. On macOS,
+a C bridge uses Apple SDK layouts; on Windows, C++ handles WaveRT/PortCls
+integration and Rust `no_std` transports PCM in fixed storage. See
+[driver boundaries and installation](native-drivers.md).
+Rust checks buffer ownership/access in the safe core. Networking, audio, OS
+libraries, drivers, firmware, whisper.cpp/llama.cpp/Piper/ONNX and external models
+do not inherit a safety proof just because their caller is Rust. There is no
+claim that the whole stack or all drivers are free of `unsafe`/C/C++.
 
-Nos backends nativos, callbacks usam filas lock-free previamente alocadas,
-conversão de amostras e contadores atômicos. Não fazem alocação, locks de mutex,
-rede, escrita de arquivos ou logging. O worker aplica resampling sinc de 64 taps
-com filtro anti-alias e estado separado por canal quando a taxa precisa mudar;
-taxas iguais dispensam filtragem. O downmix para fala acontece na cópia de
-processamento, fora do callback. No Linux, `parec`/`pacat` persistentes
-fazem I/O e conversão pelo servidor existente; não se inicia um subprocesso por
-quadro. `pactl` é usado para administração/listagem, fora do caminho de áudio.
+Native-backend callbacks use preallocated lock-free queues, sample conversion
+and atomic counters. They perform no allocation, mutex locking, networking,
+file writing or logging. The worker applies 64-tap sinc resampling with
+anti-alias filtering and separate per-channel state when rates differ; equal
+rates skip filtering. Speech downmixing occurs in the processing copy, outside
+the callback. On Linux, persistent `parec`/`pacat` clients perform I/O and
+conversion through the existing server; no subprocess starts per frame.
+`pactl` handles administration/listing outside the audio path.
 
-As estruturas de controle usam locks curtos para configuração e estado. O
-supervisor nunca precisa desses locks dentro de um callback CPAL. PCM malformado,
-taxas inesperadas, JSON excessivo, SSE sem término e respostas HTTP incompatíveis
-são rejeitados antes de alimentarem dispositivos.
+Control structures use short configuration/state locks. The supervisor never
+needs those locks inside a CPAL callback. Malformed PCM, unexpected rates,
+oversized JSON, unterminated SSE and incompatible HTTP responses are rejected
+before reaching devices.
 
-## Orçamento de buffers
+## Buffer budgets
 
-As filas têm limites explícitos. O PCM original consome aproximadamente
-`taxa × canais × 4 × duração_em_segundos` bytes por fila; 80 ms a 48 kHz estéreo
-correspondem a 30 KiB de amostras. A cópia compartilha o quadro float imutável
-antes da conversão, mas pode manter referências por uma fila própria limitada.
-Com defaults por faixa, 200 ms de PCM16 mono a 16 kHz correspondem a
-aproximadamente 6,4 KiB por fila de envio ao modelo. A fila de áudio
-traduzido de 2000 ms a 24 kHz comporta aproximadamente 96 KiB de amostras. Há buffers
-adicionais limitados nos backends, eventos de provider, TLS/WebSocket/SSE, pipes e
-no próprio sistema operacional. Esses números não são o RSS total do processo.
+Queues have explicit bounds. Original PCM uses approximately
+`rate × channels × 4 × duration_in_seconds` bytes per queue; 80 ms of 48 kHz
+stereo corresponds to 30 KiB of samples. The copy shares immutable float frames
+before conversion but can retain references through its own bounded queue.
+With per-direction defaults, 200 ms of PCM16 mono at 16 kHz is approximately
+6.4 KiB per model-input queue. The 2000 ms translated-audio queue at 24 kHz
+holds approximately 96 KiB of samples. Additional bounded buffers exist in
+backends, provider events, TLS/WebSocket/SSE, pipes and the OS itself. These
+figures are not total process RSS.
 
-O parser Gemini limita uma mensagem WebSocket a 512 KiB e uma parte de áudio a 1 s.
-Os demais parsers definem limites próprios. As filas carregam valores de tamanho
-validado, evitando que um limite por número de mensagens esconda mensagens
-arbitrariamente grandes. A síntese transmite quadros de 480 amostras ou menores e
-faz pacing pela duração real do PCM, não pelo número de mensagens HTTP.
+The Gemini parser limits a WebSocket message to 512 KiB and an audio part to
+one second. Other parsers define their own limits. Queues carry size-validated
+values, preventing a message-count bound from hiding arbitrarily large
+messages. Synthesis sends frames of 480 samples or fewer and paces by actual
+PCM duration, not by HTTP message count.
 
-Captura original com mais de 100 ms é descartada. Fila de reprodução original
-cheia descarta quadros sem esperar; uma cópia de processamento perdida não
-contabiliza perda de reprodução. Saturação ou falha do writer/STT é reportada
-separadamente, sem parar a passagem original. A fila de reprodução traduzida
-continua limitada e pode encerrar o fluxo de tradução com erro em vez de acumular
-minutos de atraso. Um contador de geração
-invalida o áudio antigo em uma interrupção, inclusive quando a fila está cheia.
-Linux reinicia o stream de reprodução para limpar o buffer no servidor; CPAL
-ignora amostras de gerações antigas. A interrupção não pode desfazer som que já
-chegou fisicamente ao alto-falante.
+Original capture older than 100 ms is dropped. A full original-playback queue
+drops frames without waiting; a lost processing copy does not count as playback
+loss. Writer/STT saturation or failure is reported separately without stopping
+original forwarding. Translated playback remains bounded and can end the
+translation flow with an error instead of accumulating minutes of delay. A
+generation counter invalidates old audio on interruption, including with a full
+queue. Linux restarts playback to clear the server buffer; CPAL ignores samples
+from older generations. An interruption cannot undo sound that has physically
+reached the speaker.
 
-## O que determina a latência
+## What determines latency
 
-A latência total inclui captura, agrupamento de quadros, transporte, inferência,
-necessidade linguística de contexto, retorno da IA, fila de reprodução e driver.
-Uma língua pode exigir esperar pelo fim de uma construção para traduzi-la
-corretamente. Os presets locais não eliminam essa necessidade.
+Total latency includes capture, frame grouping, transport, inference, linguistic
+context requirements, AI responses, playback queues and drivers. A language may
+require waiting for the end of a construction to translate it correctly. Local
+presets do not eliminate that requirement.
 
-Modelos conversacionais podem esperar uma pausa/VAD. O pipeline open source
-segmenta a fala antes de executar STT → tradução → TTS. Modelos dedicados permitem
-fala contínua, mas latência e disponibilidade dependem da conta, região, rede,
-carga do serviço e limites. O modo de voz TTS adiciona outra requisição por trecho.
+Conversational models may wait for a pause/VAD. The open-source pipeline segments
+speech before STT → translation → TTS. Dedicated models allow continuous speech,
+but latency/availability depend on account, region, network, service load and
+limits. TTS voice mode adds another request per segment.
 
-Não há meta de milissegundos garantida. O smoke de inferência local carrega
-modelos reais, mas não mede latência de conversas; benchmarks de serviços de
-nuvem dependem de acesso autenticado. Avalie p50/p95/p99 por idioma e hardware, durante uma sessão longa, além da
-média. O teste virtual local verifica transporte e funcionamento, não qualidade
-semântica, prosódia, diarização ou desempenho de nuvem.
+There is no guaranteed millisecond target. The local inference smoke loads real
+models but does not measure conversational latency; cloud-service benchmarks
+require authenticated access. Measure p50/p95/p99 per language/hardware over a
+long session, not only averages. The local virtual test checks transport and
+operation, not semantic quality, prosody, diarization or cloud performance.
 
-## Falhas, reconexão e privacidade
+## Failures, reconnection and privacy
 
-Conexões e escritas têm deadlines e orçamento de reconexão. Reconectar pode gerar
-lacunas: áudio antigo não é reproduzido/reenviado indefinidamente para tentar
-recuperar tudo. Gemini conversacional usa resumption quando disponível; tradução
-contínua pode abrir uma sessão nova. Uma chave/modelo rejeitado não deve virar um
-loop de reconexões interminável.
+Connections and writes have deadlines and reconnect budgets. Reconnection may
+produce gaps: old audio is not indefinitely replayed/resent to recover everything.
+Conversational Gemini uses resumption when available; continuous translation
+may open a new session. A rejected key/model must not create an endless
+reconnection loop.
 
-Configuração salva contém referências de credenciais; chaves temporárias ficam
-na memória com zeroização na substituição/drop. Cópias necessárias para cabeçalhos
-HTTP/TLS e buffers internos das dependências não são uma garantia de apagamento
-criptográfico de toda memória do processo. Erros remotos são sanitizados para
-não expor cabeçalhos, tokens, áudio ou texto do usuário.
+Saved configuration contains credential references; temporary keys stay in
+memory with zeroization on replacement/drop. Necessary copies in HTTP/TLS
+headers and dependency buffers are not a guarantee of cryptographic erasure
+of all process memory. Remote errors are sanitized so they do not expose
+headers, tokens, user audio or text.
 
-Áudio de uma faixa com tradução ativa é enviado ao tradutor escolhido. Com voz
-externa, texto traduzido também vai ao sintetizador. Com somente transcrição,
-o áudio segue apenas ao reconhecedor escolhido; gravação e passagem original
-não usam IA. O modo local só evita serviços de nuvem se
-os endpoints configurados forem locais. Referências de voz são enviadas quando o
-usuário cria o perfil; perfis persistentes ficam na conta do fornecedor. Consulte
-políticas/retenção do provedor. O Babel não grava PCM das conversas por padrão.
-Um WAV com as origens selecionadas é criado somente quando `recording.enabled`
-está ativo; textos originais só são gravados com `transcription.enabled` ativo.
-Essas duas opções são independentes e não incluem a fala traduzida.
+Audio from a direction with translation enabled goes to its selected translator.
+With an external voice, translated text also goes to the synthesizer. With
+transcription only, audio goes only to the selected recognizer; recording and
+original forwarding use no AI. Local mode avoids cloud services only when
+configured endpoints are local. Voice references are sent when the user creates
+a profile; persistent profiles live in the provider account. Consult provider
+policies/retention. Babel does not record conversation PCM by default. A WAV
+containing selected originals is created only when `recording.enabled` is on;
+original text is saved only when `transcription.enabled` is on. These options
+are independent and do not include translated speech.
 
-## Extensão
+## Extending Babel
 
-Para acrescentar outro tradutor, implemente `SpeechProvider`, valide formatos,
-limites e endpoints, registre a factory e a configuração específica, publique suas
-capacidades e escreva testes de protocolo com servidor simulado. Para outro TTS,
-implemente síntese incremental 24 kHz e operações de biblioteca suportadas. Não
-reutilize o formato de setup de outro fornecedor apenas porque ambos usam JSON.
-Diarização/clonagem automática exigiriam um pipeline próprio com IDs estáveis,
-amostras por participante, enrollment autorizado e alinhamento entre original e
-tradução; mapear a última voz ou um canal a uma pessoa seria incorreto.
+To add a translator, implement `SpeechProvider`, validate formats, bounds and
+endpoints, register its factory/configuration, publish capabilities and write
+protocol tests with a simulated server. For another TTS provider, implement
+incremental 24 kHz synthesis and supported library operations. Do not reuse
+another provider's setup format just because both use JSON. Automatic
+diarization/cloning would require its own pipeline with stable IDs,
+per-participant samples, authorized enrollment and original/translation
+alignment; mapping the last voice or a channel to a person would be incorrect.

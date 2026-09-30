@@ -119,13 +119,13 @@ async fn run_with_synthesizer(
             if cancel.is_cancelled() { break Ok(()); }
             tokio::select! {
                 _ = cancel.cancelled() => break Ok(()),
-                done = jobs.join_next() => { break match done { _ if cancel.is_cancelled() => Ok(()), Some(Ok(Err(e))) => Err(e), _ => Err(anyhow!("Uma etapa da síntese de voz encerrou inesperadamente")) }; }
+                done = jobs.join_next() => { break match done { _ if cancel.is_cancelled() => Ok(()), Some(Ok(Err(e))) => Err(e), _ => Err(anyhow!("A voice synthesis stage ended unexpectedly")) }; }
                 event = provider_rx.recv() => {
                     if cancel.is_cancelled() { break Ok(()); }
-                    match event.context("Canal de tradução encerrado")? {
+                    match event.context("Translation channel closed")? {
                         ProviderEvent::Audio { .. } => {} // The selected synthesizer supplies the final voice.
                         ProviderEvent::Transcript { input: false, text, .. } => {
-                            ensure!(pending.len() + text.len() <= 8192, "Texto traduzido excedeu o limite para síntese");
+                            ensure!(pending.len() + text.len() <= 8192, "Translated text exceeded the synthesis limit");
                             if !text.is_empty() { pending_since.get_or_insert_with(Instant::now); }
                             pending.push_str(&text);
                             enqueue_pending(&text_tx, &mut pending, &mut pending_since, generation, false)?;
@@ -144,7 +144,7 @@ async fn run_with_synthesizer(
                 }
                 packet = synth_rx.recv() => {
                     if cancel.is_cancelled() { break Ok(()); }
-                    let packet = packet.context("Canal da voz sintetizada encerrado")?;
+                    let packet = packet.context("Synthesized voice channel closed")?;
                     if packet.generation == generation { forward(&events, ProviderEvent::Audio { samples: packet.samples, sample_rate: 24_000 }, &cancel).await?; }
                 }
                 _ = tick.tick() => {
@@ -191,7 +191,7 @@ fn enqueue(
     if text.trim().is_empty() {
         return Ok(());
     }
-    sender.try_send(Segment { text, generation, created }).map_err(|_| anyhow!("Síntese de voz não acompanha a fala; fila de texto cheia. Use voz nativa ou um modelo de TTS mais rápido"))
+    sender.try_send(Segment { text, generation, created }).map_err(|_| anyhow!("Voice synthesis cannot keep up with speech; text queue full. Use a native voice or a faster TTS model"))
 }
 async fn forward(
     events: &mpsc::Sender<ProviderEvent>,
@@ -200,7 +200,7 @@ async fn forward(
 ) -> Result<()> {
     tokio::select! {
         _ = cancel.cancelled() => Ok(()),
-        result = tokio::time::timeout(Duration::from_secs(2), events.send(event)) => { result.context("Consumidor de áudio lento")?.context("Consumidor de áudio desconectado") }
+        result = tokio::time::timeout(Duration::from_secs(2), events.send(event)) => { result.context("Audio consumer is slow")?.context("Audio consumer disconnected") }
     }
 }
 
@@ -245,13 +245,13 @@ async fn synthesis_worker(
     // Keep the clock across text segments, including final partial PCM frames.
     let mut next_sample = Instant::now();
     loop {
-        let segment = tokio::select! { biased; _ = cancel.cancelled() => return Ok(()), segment = text.recv() => segment.context("Fila de texto encerrada")? };
+        let segment = tokio::select! { biased; _ = cancel.cancelled() => return Ok(()), segment = text.recv() => segment.context("Text queue closed")? };
         if segment.generation != *generation.borrow() {
             continue;
         }
         ensure!(
             segment.created.elapsed() <= Duration::from_millis(u64::from(queue_ms)),
-            "Síntese de voz atrasada; fila expirou. Use um modelo TTS mais rápido ou a voz nativa"
+            "Voice synthesis is delayed; queue expired. Use a faster TTS model or the native voice"
         );
         let (pcm_tx, mut pcm_rx) = mpsc::channel(2);
         let request_cancel = cancel.child_token();
@@ -268,7 +268,7 @@ async fn synthesis_worker(
                 tokio::select! {
                     biased;
                     _ = cancel.cancelled() => break Ok(()),
-                    changed = generation.changed() => { changed.context("Geração de áudio encerrada")?; if segment.generation != *generation.borrow() { break Ok(()); } }
+                    changed = generation.changed() => { changed.context("Audio generation ended")?; if segment.generation != *generation.borrow() { break Ok(()); } }
                     result = &mut request, if !finished => { finished = true; result?; }
                     packet = pcm_rx.recv(), if !pcm_closed => {
                         let Some(samples) = packet else {
@@ -277,11 +277,11 @@ async fn synthesis_worker(
                             pcm_closed = true;
                             continue;
                         };
-                        ensure!(!samples.is_empty() && samples.len() <= 480, "Sintetizador entregou bloco PCM vazio ou maior que 20 ms");
+                        ensure!(!samples.is_empty() && samples.len() <= 480, "Synthesizer returned an empty PCM chunk or one exceeding 20 ms");
                         tokio::select! {
                             biased;
                             _ = cancel.cancelled() => break Ok(()),
-                            changed = generation.changed() => { changed.context("Geração de áudio encerrada")?; if segment.generation != *generation.borrow() { break Ok(()); } }
+                            changed = generation.changed() => { changed.context("Audio generation ended")?; if segment.generation != *generation.borrow() { break Ok(()); } }
                             _ = tokio::time::sleep_until(next_sample) => {}
                         }
                         if segment.generation != *generation.borrow() { break Ok(()); }
@@ -289,8 +289,8 @@ async fn synthesis_worker(
                         tokio::select! {
                             biased;
                             _ = cancel.cancelled() => break Ok(()),
-                            changed = generation.changed() => { changed.context("Geração de áudio encerrada")?; if segment.generation != *generation.borrow() { break Ok(()); } }
-                            result = output.send(Synthesized { samples, generation: segment.generation }) => result.context("Consumidor da síntese encerrado")?,
+                            changed = generation.changed() => { changed.context("Audio generation ended")?; if segment.generation != *generation.borrow() { break Ok(()); } }
+                            result = output.send(Synthesized { samples, generation: segment.generation }) => result.context("Synthesis consumer closed")?,
                         }
                         // Never catch up by bursting old packets after a slow
                         // consumer. Time the next frame from this actual send.

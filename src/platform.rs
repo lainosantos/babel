@@ -56,11 +56,11 @@ impl PlatformInfo {
             "linux" => "## Linux:",
             "macos" => "## macOS:",
             "windows" => "## Windows:",
-            _ => return "Sistema não suportado. Consulte /help/platforms/all.\n",
+            _ => return "Unsupported operating system. See /help/platforms/all.\n",
         };
         let full_guide = include_str!("../docs/platforms.md");
         let Some(start) = full_guide.find(heading) else {
-            return "Guia indisponível. Consulte /help/platforms/all.\n";
+            return "Guide unavailable. See /help/platforms/all.\n";
         };
         let section = &full_guide[start..];
         let end = section.find("\n## ").unwrap_or(section.len());
@@ -89,7 +89,7 @@ mod tests {
         assert!(
             PlatformInfo::for_os("unrecognized")
                 .device_guide()
-                .contains("não suportado")
+                .contains("Unsupported")
         );
     }
 }

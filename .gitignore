@@ -14,4 +14,6 @@ __pycache__/
 /packaging/**/dist/
 /packaging/**/build/
 /artifacts/
+/_site/
+/.site-venv/
 *.babel-instance.lock

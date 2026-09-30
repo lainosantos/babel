@@ -71,7 +71,7 @@ pub async fn serve(
     // Local audio routing is independent of sessions, credentials, and the panel.
     if let Err(error) = controller.enable_routing().await {
         controller
-            .report_error(format!("Roteamento original indisponível: {error:#}"))
+            .report_error(format!("Original audio routing unavailable: {error:#}"))
             .await;
     }
     let state = DashboardState::bound(controller, &listener)?;
@@ -85,7 +85,7 @@ pub async fn serve(
     axum::serve(listener, app)
         .with_graceful_shutdown(cancel.cancelled_owned())
         .await
-        .context("O servidor do painel local foi interrompido")
+        .context("The local dashboard server was interrupted")
 }
 
 /// Bind and retain the real listener: checking a free port and releasing it
@@ -101,14 +101,14 @@ async fn bind_local(requested_port: u16) -> anyhow::Result<tokio::net::TcpListen
         Err(error) if requested_port != 0 && error.kind() == std::io::ErrorKind::AddrInUse => {
             let listener = tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
                 .await
-                .context("Não foi possível abrir o painel local em uma porta livre")?;
+                .context("Could not open the local dashboard on a free port")?;
             tracing::warn!(
-                "A porta solicitada {requested_port} está ocupada; o painel Babel usará a porta {} escolhida pelo sistema",
+                "The requested port {requested_port} is busy; the Babel dashboard will use port {} selected by the operating system",
                 listener.local_addr()?.port()
             );
             listener
         }
-        Err(error) => return Err(error).context("Não foi possível abrir o painel local"),
+        Err(error) => return Err(error).context("Could not open the local dashboard"),
     };
     Ok(listener)
 }
@@ -385,7 +385,7 @@ async fn localize_response(
     let preference_change = request.method() == axum::http::Method::PUT
         && matches!(request.uri().path(), "/api/interface" | "/api/config");
     let resource_language = if request.uri().path().starts_with("/help/") {
-        Some("pt".to_owned())
+        Some("en".to_owned())
     } else {
         request
             .uri()
@@ -457,7 +457,7 @@ async fn local_origin(
     if !valid_origin(request.headers(), state.port) {
         return api_error(
             StatusCode::FORBIDDEN,
-            "Abra o painel pelo endereço local exibido no terminal.",
+            "Open the dashboard using the local address shown in the terminal.",
         );
     }
     next.run(request).await
@@ -467,7 +467,7 @@ async fn authorize(State(state): State<DashboardState>, request: Request, next: 
     if !valid_token(request.headers(), &state.token) {
         return api_error(
             StatusCode::UNAUTHORIZED,
-            "Sessão inválida. Reabra o link completo do painel exibido no terminal.",
+            "Invalid session. Reopen the complete dashboard link shown in the terminal.",
         );
     }
     next.run(request).await
@@ -511,7 +511,7 @@ fn expected_revision(headers: &HeaderMap) -> Result<Option<u64>, &'static str> {
         .filter(|value| !value.is_empty() && value.bytes().all(|byte| byte.is_ascii_digit()))
         .and_then(|value| value.parse::<u64>().ok());
     if values.next().is_some() || revision.is_none() {
-        return Err("Revisão inválida. Recarregue os ajustes antes de salvar ou iniciar.");
+        return Err("Invalid revision. Reload settings before saving or starting.");
     }
     Ok(revision)
 }
@@ -672,10 +672,10 @@ fn parse_start_request(
     {
         return Err((
             StatusCode::UNSUPPORTED_MEDIA_TYPE,
-            "Envie o nome da sessão como JSON ou inicie sem corpo na requisição.",
+            "Send the session name as JSON, or start with an empty request body.",
         ));
     }
-    serde_json::from_slice::<StartRequest>(body).map_err(|_| (StatusCode::BAD_REQUEST, "JSON inválido para iniciar a sessão. Use name como texto e history_seconds como número inteiro não negativo."))
+    serde_json::from_slice::<StartRequest>(body).map_err(|_| (StatusCode::BAD_REQUEST, "Invalid JSON for starting a session. Use name as text and history_seconds as a non-negative integer."))
 }
 
 async fn start(State(state): State<DashboardState>, headers: HeaderMap, body: Bytes) -> Response {
@@ -762,7 +762,7 @@ async fn design_voice(
     if state.controller.status().await.running {
         return api_error(
             StatusCode::CONFLICT,
-            "Encerre a sessão antes de criar uma voz.",
+            "End the session before creating a voice.",
         );
     }
     match crate::voices::design(request).await {
@@ -779,7 +779,7 @@ async fn clone_voice(
     if state.controller.status().await.running {
         return api_error(
             StatusCode::CONFLICT,
-            "Encerre a sessão antes de clonar uma voz.",
+            "End the session before cloning a voice.",
         );
     }
     match crate::voices::clone_voice(request).await {
@@ -800,7 +800,7 @@ async fn set_credential(
     if state.controller.status().await.running {
         return api_error(
             StatusCode::CONFLICT,
-            "Encerre a sessão antes de alterar a chave de acesso.",
+            "End the session before changing the API key.",
         );
     }
     operation_result(crate::credentials::set(
@@ -817,7 +817,7 @@ async fn clear_credential(
     if state.controller.status().await.running {
         return api_error(
             StatusCode::CONFLICT,
-            "Encerre a sessão antes de remover a chave temporária.",
+            "End the session before removing the temporary key.",
         );
     }
     operation_result(crate::credentials::clear(&request.api_key_env))

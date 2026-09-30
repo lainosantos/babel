@@ -1,17 +1,16 @@
-# Gravação original da sessão
+# Original session recording
 
-A gravação de áudio é opcional e vem desativada. Quando ativada, gera **um único
-arquivo WAV por sessão**, misturando as entradas originais selecionadas:
+Audio recording is optional and off by default. When enabled, it produces
+**one WAV file per session**, mixing the selected original sources:
 
-- **Microfone:** voz capturada antes da tradução.
-- **Áudio recebido:** áudio capturado da saída virtual antes da tradução.
+- **Microphone:** speech captured before translation.
+- **Incoming audio:** audio captured from the virtual output before translation.
 
-As duas entradas compartilham a mesma linha do tempo. Vozes simultâneas aparecem
-sobrepostas no arquivo; intervalos sem áudio são preservados como silêncio.
-As faixas não são concatenadas uma depois da outra e o arquivo não contém a voz
-sintetizada pelo tradutor.
+Both inputs share the same timeline. Simultaneous voices overlap in the file;
+intervals without audio remain silent. Sources are not concatenated one after
+another, and the file does not contain the translator's synthesized voice.
 
-## Configuração
+## Configuration
 
 ```toml
 [recording]
@@ -21,96 +20,91 @@ speaker = true
 directory = "recordings"
 
 [files]
-# Escolha e adapte uma base absoluta para seu sistema:
+# Choose and adapt an absolute base for your OS:
 # base_path = '/home/ana/Babel'
 # base_path = '/Users/ana/Babel'
 # base_path = 'C:\Users\Ana\Babel'
 name_pattern = "{date}-{time}-{session}-{id}"
 ```
 
-`babel init` gera a base na pasta `Babel` dentro da pasta pessoal do usuário.
-Um TOML existente sem `base_path`, como o trecho acima se não for preenchido,
-é tratado como legado: sua base é fixada na pasta do próprio arquivo de configuração.
+`babel init` creates the base as `Babel` inside the user's home directory.
+An existing TOML without `base_path`, including the example above if it is not
+filled in, is treated as legacy: its base becomes the configuration file's directory.
 
-Ative a gravação na página **Gravação** quando quiser guardar áudio. Escolha as entradas e a
-pasta antes de iniciar a sessão. A gravação não é necessária para traduzir.
-Ela também funciona sozinha: desligue a tradução das duas direções e habilite a
-gravação das fontes desejadas. `microphone.enabled` e `speaker.enabled` controlam
-somente a tradução e não limitam as fontes do gravador. Uma sessão só de gravação
-passa o áudio original e não usa IA. **Encerrar sessão** finaliza o WAV e mantém
-o encaminhamento original enquanto o Babel continuar aberto.
-O nome da sessão e o padrão de nomes servem tanto para áudio quanto para texto.
+Enable recording on **Recording** when you want to save audio. Select sources
+and a folder before starting the session. Recording is not required for
+translation. It also works alone: turn off both translation directions and
+record the desired sources. `microphone.enabled` and `speaker.enabled` control
+translation only and do not limit recorder sources. A recording-only session
+passes original audio and uses no AI. **Stop session** finalizes the WAV while
+original routing continues as long as Babel remains open. The session name
+and filename pattern apply to both audio and text.
 
-O áudio é configurado em **Gravação** e o texto em **Transcrição**, cada um com
-suas próprias origens e pasta. As duas páginas têm o atalho **Pasta base e nomes
-de arquivos** para os ajustes comuns. As conexões dos dispositivos ficam em
-**Roteamento**; idiomas, provedores e biblioteca de vozes ficam em **Tradução e vozes**.
+Audio is configured on **Recording** and text on **Transcription**, each with
+its own sources/folder. Both pages link through **Base folder & filenames** to
+shared settings. Device connections live in **Routing**; languages, providers
+and the voice library live in **Translation & voices**.
 
-Em **Ajustes → Arquivos da sessão → Pasta base**, defina a pasta comum dos
-arquivos. Com `base_path = "/home/ana/Babel"` e `directory = "recordings"`, o
-WAV fica em `/home/ana/Babel/recordings`. A base precisa ser absoluta; configurações
-novas usam `Babel` dentro da pasta pessoal (`HOME` ou `USERPROFILE`), sem depender
-do diretório de execução. Uma pasta `directory` relativa usa essa base, e uma
-pasta `directory` absoluta usa seu próprio destino.
-O painel mostra os caminhos completos antes de salvar. A prévia não cria pastas
-nem verifica permissões. No início da gravação, o Babel cria recursivamente a
-pasta de destino e todos os diretórios pais que faltarem, inclusive a pasta base.
-Não é necessário criá-los manualmente: a inexistência não é erro; a impossibilidade
-de criar a pasta ou abrir o arquivo é. Isso vale para Linux, macOS e Windows.
-Alterar a base não move arquivos existentes. Bases relativas antigas são
-convertidas uma vez contra a pasta do TOML e salvas como absolutas. Se o diretório
-de execução antigo era diferente, confira o destino antes de gravar. Veja as
-[regras e exemplos para cada sistema](configuration.md#pasta-base-e-destinos).
+In **Settings → Session files → Base folder**, set the shared file folder.
+With `base_path = "/home/ana/Babel"` and `directory = "recordings"`, the WAV
+lands in `/home/ana/Babel/recordings`. The base must be absolute; new configurations
+use `Babel` inside the home directory (`HOME` or `USERPROFILE`), independently
+of the launch directory. A relative `directory` uses that base; an absolute one
+uses its own destination. The dashboard shows full paths before saving. Preview
+neither creates folders nor checks permissions. At recording start, Babel
+recursively creates missing destination/parent directories, including the base.
+Manual creation is unnecessary: nonexistence is not an error; inability to create
+the folder or open the file is. This applies to Linux, macOS and Windows.
+Changing the base does not move existing files. Legacy relative bases are
+resolved once against the TOML directory and saved as absolute. If the old
+launch directory differed, check the destination before recording. See
+[platform-specific rules and examples](configuration.md#base-folder-and-destinations).
 
-Tokens do padrão:
+Pattern tokens:
 
-| Token | Conteúdo |
+| Token | Contents |
 | --- | --- |
-| `{date}` | Data de início da sessão em UTC (`AAAAMMDD`). |
-| `{time}` | Horário de início em UTC (`HHMMSS`). |
-| `{session}` | Nome da sessão convertido em identificador de até 64 bytes. |
-| `{id}` | Identificador único da sessão. |
+| `{date}` | Session start date in UTC (`YYYYMMDD`). |
+| `{time}` | Start time in UTC (`HHMMSS`). |
+| `{session}` | Session name converted to an identifier of up to 64 bytes. |
+| `{id}` | Unique session identifier. |
 
-A mesma base é usada para o **único WAV misturado** e o **único TXT com as
-transcrições originais das duas entradas**, quando ambos estão habilitados.
-As extensões são adicionadas pelo aplicativo, nas pastas configuradas para cada
-tipo. O token `{id}` é obrigatório para reduzir colisões entre sessões. Arquivos existentes
-nunca são sobrescritos: uma colisão causa erro explícito.
+The same stem is used for the **single mixed WAV** and **single TXT containing
+both sources' original transcripts**, when both are enabled. The app adds
+extensions in each type's configured directory. `{id}` is required to reduce
+session collisions. Existing files are never overwritten: a collision is an
+explicit error.
 
-## Incluir áudio anterior ao início
+## Include audio from before session start
 
-O botão **Iniciar sessão**, o início pela bandeja e `babel run` na CLI sempre
-começam no áudio atual, sem incluir o histórico. A API também começa sem
-histórico quando `history_seconds` é omitido ou vale zero. Para aproveitar
-áudio recente, abra **Opções avançadas de início** ao lado do botão, marque
-**Incluir histórico recente** e informe quantos minutos deseja incluir. O
-padrão é dez minutos, limitado à capacidade configurada. A opção vem desmarcada
-e volta a ficar desmarcada após cada início bem-sucedido.
+The **Start session** button, tray startup and `babel run` CLI start with
+current audio, excluding history by default. The API also excludes history
+when `history_seconds` is omitted or zero. To include recent audio, open
+**Advanced start** beside the button, check **Include recent history**
+and choose how many minutes to include. The default is ten minutes, bounded
+by configured capacity. The option starts unchecked and resets after every
+successful start.
 
-O painel mostra quanto áudio existe para o microfone e para a saída recebida.
-Só entram no WAV as origens selecionadas em **Gravação**; as seleções de
-**Transcrição** são independentes. Se o histórico disponível for menor que o
-intervalo solicitado, o Babel inclui somente o que ainda está disponível. Sem
-histórico em nenhuma origem selecionada, a opção fica indisponível. O histórico
-é colocado antes do áudio ao vivo no mesmo WAV, preservando a sobreposição das
-origens. Ele não é reproduzido nos dispositivos nem enviado à tradução.
+The dashboard shows available microphone/incoming-audio history. Only sources
+selected in **Recording** enter the WAV; **Transcription** selections remain
+independent. If available history is shorter than requested, Babel includes
+only what remains. With no history in any selected source, the option is
+unavailable. History precedes live audio in the same WAV, preserving source
+overlap. It is neither played through devices nor sent to translation.
 
-Em **Ajustes → Histórico de áudio recente**, controle a retenção em memória e
-sua capacidade: dez minutos por padrão, de um segundo a sessenta minutos. O
-atalho **Ajustar retenção do histórico** abre esses controles. Salve para aplicar.
-Reduzir a capacidade descarta a parte mais antiga; desativar apaga o histórico.
-Aumentar a capacidade não recupera áudio já descartado.
+In **Settings → Recent audio history**, control retention and capacity: ten
+minutes by default, from one second to sixty minutes. **History retention settings** opens those controls. Save to apply. Reducing capacity drops the
+oldest audio; disabling clears history. Increasing capacity cannot recover
+already-discarded audio.
 
-A retenção acompanha as rotas ativas. O histórico do microfone se forma quando
-Babel é o microfone padrão do sistema ou um aplicativo usa seu microfone virtual;
-o da saída só se forma enquanto um aplicativo envia áudio ao Babel. Escolher
-o microfone físico como padrão pausa a captura do microfone se nenhum aplicativo
-ainda usa Babel. A retenção não cria arquivos nem envia esse histórico para
-transcrição antes de você
-incluí-lo explicitamente em uma sessão. O áudio continua na memória ao iniciar
-ou encerrar sessões e durante trocas de dispositivos; lacunas de captura não
-são recuperáveis. Fechar o Babel perde todo o histórico. A mesma opção funciona
-no Linux, macOS e Windows.
+Retention follows active routes. Microphone history builds while Babel is the
+system default microphone or an app uses its virtual microphone; output history
+builds only while an app sends audio to Babel. Selecting the physical microphone
+as default pauses microphone capture if no app still uses Babel. Retention
+creates no files and does not send that history to transcription until you
+explicitly include it in a session. Audio remains in memory across session
+start/stop and device switches; capture gaps cannot be recovered. Quitting
+Babel loses all history. This works on Linux, macOS and Windows.
 
 ```toml
 [history]
@@ -118,85 +112,85 @@ enabled = true
 duration_secs = 600
 ```
 
-O PCM ocupa até 38,4 MB para dez minutos com as duas origens (mono PCM16 a
-16 kHz), além dos metadados. Durante a inclusão, o trecho selecionado é
-compartilhado com os gravadores/reconhecedores, sem copiar todo o áudio. Se o
-histórico continuar sendo renovado enquanto a inclusão é processada, esse
-trecho pode manter temporariamente mais uma janela de PCM em memória. Ele é
-liberado assim que os trabalhos que o utilizam terminam.
+PCM uses up to 38.4 MB for ten minutes of both sources (mono PCM16 at 16 kHz),
+plus metadata. During inclusion, selected history is shared with writers/recognizers
+without copying all audio. If retention keeps advancing during processing,
+those references can temporarily retain another PCM window. They are released
+as soon as the jobs using them finish.
 
-## Formato e volume
+## Format and volume
 
-O WAV usa **PCM16 mono a 16 kHz**, sem compressão. É o áudio original que entra no
-pipeline do Babel, já convertido pelo backend de captura para esse formato;
-não é uma cópia multicanal em 48 kHz do hardware. A gravação ocorre antes de
-tradução, sintetização e ganho de saída.
+The WAV uses **PCM16 mono at 16 kHz**, uncompressed. It contains original audio
+from Babel's capture, converted in the separate speech-processing copy; it is
+not a multichannel 48 kHz hardware archive. Original live routing retains its
+negotiated float format independently. Recording precedes translation,
+synthesis and output gain.
 
-Com as duas entradas ativas, cada uma contribui com ganho de 0,5. Isso deixa
-espaço para a soma e evita distorção quando ambas atingem o volume máximo.
-Com apenas uma entrada ativa para gravação, o ganho é 1. O arquivo misturado
-não permite separar perfeitamente as duas vozes depois; para essa finalidade
-seria necessário outro formato de gravação com canais separados.
+With both recording sources enabled, each contributes a gain of 0.5. This
+leaves headroom for summing and prevents clipping when both peak. With one
+recording source enabled, gain is 1. The mixed file cannot perfectly separate
+the two voices afterward; that would require a different recording format
+with separate channels.
 
-O consumo em disco é aproximadamente **115 MB por hora**. O limite do contêiner
-WAV RIFF é de aproximadamente 37 horas neste formato. Ao atingir o limite, a
-sessão retorna um erro em vez de truncar áudio ou criar outro arquivo sem aviso.
+Disk use is approximately **115 MB per hour**. RIFF WAV's container limit is
+about 37 hours in this format. Reaching it reports a recording error instead
+of silently truncating audio or opening another file. Original routing remains
+independent of that recording failure.
 
-## Tempo, troca de dispositivo e continuidade
+## Timing, device switching and continuity
 
-O gravador usa um relógio monotônico comum à sessão. Cada quadro é posicionado
-pelo horário de conclusão da captura menos a duração de suas amostras.
-Pequenas variações de agendamento de até 50 ms são absorvidas pela continuidade
-de cada entrada; descontinuidades maiores geram intervalos de silêncio.
+The recorder uses a session-wide monotonic clock. Each frame is positioned by
+capture-completion time minus its sample duration. Scheduling variations up to
+50 ms are absorbed by each source's continuity; larger discontinuities create
+silent intervals.
 
-Uma troca de dispositivo mantém o arquivo da sessão. O intervalo necessário
-para fechar e abrir a captura pode aparecer como silêncio quando a nova entrada
-retoma. A sincronização é estimada a partir dos horários do pipeline, não de
-relógios de hardware compartilhados: latências próprias dos dispositivos podem
-introduzir deslocamentos entre as duas fontes.
+A device switch keeps the session file. Time needed to close/reopen capture may
+appear as silence when input resumes. Synchronization is estimated from pipeline
+timestamps, not shared hardware clocks: device-specific latency can offset the
+two sources.
 
-O mixer mantém uma janela limitada de dois segundos para receber quadros das
-duas entradas antes de consolidar sua soma. Ele reserva no máximo três segundos
-de amostras de mistura, incluindo espaço para um quadro recebido, e escreve
-intervalos longos em blocos limitados. A fila de entrada também é limitada.
-Uma entrada excessivamente atrasada ou uma falha de escrita é comunicada ao
-supervisor da sessão, evitando perda de áudio silenciosa.
+The mixer keeps a bounded two-second window for both inputs before committing
+their sum. It reserves at most three seconds of mixed samples, including room
+for one incoming frame, and writes long gaps in bounded blocks. Its input queue
+is also bounded. Excessively delayed input or write failure is reported to the
+session supervisor rather than silently losing recording data. Such failures
+are visible without canceling original routing.
 
-## Finalização e privacidade
+## Finalization and privacy
 
-Ao parar normalmente, o Babel deixa o gravador consumir os quadros já enfileirados,
-escreve a parte final e atualiza o cabeçalho WAV antes de encerrar. Cabeçalhos
-intermediários são atualizados periodicamente para os dados já consolidados.
-Uma queda de energia, encerramento forçado ou falha de disco pode perder os
-últimos segundos; uma gravação interrompida não tem a mesma garantia de uma
-parada concluída.
+On normal stop, Babel lets the recorder consume queued frames, writes the tail
+and updates the WAV header before closing. Intermediate headers are periodically
+updated for committed data. Power loss, forced termination or disk failure may
+lose the last seconds; an interrupted recording does not have the guarantees
+of a completed stop. Session shutdown has a bounded drain deadline and reports
+potentially incomplete files if that deadline expires.
 
-Os arquivos usam criação exclusiva e permissão `0600` em Unix: leitura e escrita
-somente pelo usuário. No Windows, seguem as permissões da pasta escolhida.
-O gravador grava localmente e não faz upload. Isso não altera o envio de áudio
-que a própria tradução exige quando um provider remoto está selecionado.
+Files use exclusive creation and Unix mode `0600`: read/write by the user only.
+On Windows, they inherit the chosen folder's permissions. Recording stays local
+and performs no upload. This does not change audio transmission required by
+translation when a remote provider is selected.
 
-## Testes
+## Tests
 
 ```sh
 cargo test --lib recording:: -- --nocapture
 ```
 
-Os testes usam somente PCM sintético e pastas temporárias. Cobrem mistura
-sobreposta em arquivo único, headroom, entrada única, silêncio, compensação de
-jitter, intervalos longos sem crescimento ilimitado da memória, atraso excessivo,
-finalização após erro, drenagem no encerramento, cabeçalhos válidos, privacidade
-e recusa de sobrescrita. Nenhum teste captura voz pessoal ou ativa gravação na
-configuração real.
+Tests use only synthetic PCM and temporary directories. They cover overlapping
+mixes in one file, headroom, one source, silence, jitter compensation, long gaps
+without unbounded memory growth, excessive delay, error finalization, shutdown
+draining, valid headers, privacy and overwrite refusal. No test captures
+personal speech or enables recording in the actual user configuration.
 
-No Linux com PulseAudio/`pipewire-pulse`, há também um teste completo opcional:
+Linux with PulseAudio/`pipewire-pulse` also has an optional full-path test:
 
 ```sh
 cargo test --test recorded_session -- --ignored --nocapture
 ```
 
-Ele cria quatro sinks nulos temporários isolados, passa dois tons pelo Controller
-e verifica um único WAV com ambas as frequências sobrepostas. A execução real
-gerou um arquivo válido de 3,53 s, encerrou sem erro e removeu somente os módulos
-do teste. Os dispositivos Babel já instalados permaneceram intactos. É preciso
-ter `pactl`, `parec` e `pacat` no `PATH`; nenhum dispositivo físico é usado.
+It creates four isolated temporary null sinks, sends two tones through the
+Controller and verifies one WAV with both frequencies overlapping. A previous
+real execution produced a valid 3.53-second file, stopped without error and
+removed only test modules. Existing Babel devices remained intact. `pactl`,
+`parec` and `pacat` must be on `PATH`; no physical device is used. Historical
+results do not replace rerunning the test after transport changes.

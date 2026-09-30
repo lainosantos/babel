@@ -25,7 +25,7 @@ impl SttRouteConfig {
                 self.provider.as_str(),
                 "gemini" | "openai" | "deepgram" | "whisper"
             ),
-            "Provider de transcrição desconhecido"
+            "Unknown transcription provider"
         );
         ensure!(
             !self.language.is_empty()
@@ -34,7 +34,7 @@ impl SttRouteConfig {
                     .language
                     .bytes()
                     .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-'),
-            "Idioma de transcrição inválido; use auto ou um código como pt-BR"
+            "Invalid transcription language; use auto or a code such as pt-BR"
         );
         Ok(())
     }
@@ -197,13 +197,13 @@ impl SttProviderProfiles {
                 if route.provider == "gemini" {
                     ensure!(
                         profile.endpoint == GEMINI_ENDPOINT,
-                        "O adaptador Gemini STT usa o endpoint oficial fixo"
+                        "The Gemini STT adapter uses the fixed official endpoint"
                     );
                 } else if !profile.endpoint.is_empty() {
                     let url = validate_endpoint(&profile.endpoint, true)?;
                     ensure!(
                         !url.path().trim_end_matches('/').ends_with("/translations"),
-                        "OpenAI STT exige um endpoint de reconhecimento; configure /realtime em vez de /translations"
+                        "OpenAI STT requires a recognition endpoint; configure /realtime instead of /translations"
                     );
                 }
             }
@@ -232,21 +232,21 @@ impl SttProviderProfiles {
                 }
                 ensure!(
                     (500..=10_000).contains(&profile.segment_ms),
-                    "Segmento Whisper STT: 500 a 10000 ms"
+                    "Whisper STT segment: 500 to 10000 ms"
                 );
                 ensure!(
                     (100..=2000).contains(&profile.silence_ms)
                         && profile.silence_ms < profile.segment_ms,
-                    "Silêncio Whisper STT: 100 a 2000 ms, menor que o segmento"
+                    "Whisper STT silence: 100 to 2000 ms, shorter than the segment"
                 );
                 ensure!(
                     profile.vad_threshold.is_finite()
                         && (0.0001..=0.5).contains(&profile.vad_threshold),
-                    "Limiar Whisper STT: 0.0001 a 0.5 RMS"
+                    "Whisper STT threshold: 0.0001 to 0.5 RMS"
                 );
                 ensure!(
                     (1..=120).contains(&profile.request_timeout_secs),
-                    "Timeout Whisper STT: 1 a 120 segundos"
+                    "Whisper STT timeout: 1 to 120 seconds"
                 );
             }
             _ => unreachable!("validated STT provider"),
@@ -263,7 +263,7 @@ fn validate_key_name(value: &str) -> Result<()> {
             && value
                 .bytes()
                 .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_'),
-        "Nome de variável de ambiente inválido para STT"
+        "Invalid environment variable name for STT"
     );
     Ok(())
 }
@@ -275,19 +275,18 @@ fn validate_cloud(key: &str, model: &str, timeout: u64, retries: u32) -> Result<
             && model
                 .bytes()
                 .all(|byte| byte.is_ascii_alphanumeric() || b"-._/".contains(&byte)),
-        "Identificador de modelo STT inválido"
+        "Invalid STT model identifier"
     );
     ensure!(
         (1..=120).contains(&timeout),
-        "Timeout STT: 1 a 120 segundos"
+        "STT timeout: 1 to 120 seconds"
     );
-    ensure!(retries <= 20, "Máximo de 20 reconexões para STT");
+    ensure!(retries <= 20, "At most 20 reconnections for STT");
     Ok(())
 }
 fn validate_endpoint(endpoint: &str, websocket: bool) -> Result<reqwest::Url> {
-    ensure!(endpoint.len() <= 2048, "Endpoint STT excede 2048 bytes");
-    let url =
-        reqwest::Url::parse(endpoint).map_err(|_| anyhow::anyhow!("Endpoint STT inválido"))?;
+    ensure!(endpoint.len() <= 2048, "STT endpoint exceeds 2048 bytes");
+    let url = reqwest::Url::parse(endpoint).map_err(|_| anyhow::anyhow!("Invalid STT endpoint"))?;
     let host = url.host_str().unwrap_or("");
     let local = host == "localhost"
         || host
@@ -303,7 +302,7 @@ fn validate_endpoint(endpoint: &str, websocket: bool) -> Result<reqwest::Url> {
             && url.password().is_none()
             && url.query().is_none()
             && url.fragment().is_none(),
-        "Endpoint STT exige conexão segura, exceto localhost, sem credenciais, query ou fragmento"
+        "STT endpoints require a secure connection, except on localhost, with no credentials, query or fragment"
     );
     Ok(url)
 }
@@ -559,7 +558,7 @@ mod tests {
         migrated.transcription.enabled = true;
         migrated.transcription.microphone_recognition.provider = "openai".into();
         let error = migrated.validate().unwrap_err().to_string();
-        assert!(error.contains("STT exige um endpoint de reconhecimento"));
+        assert!(error.contains("STT requires a recognition endpoint"));
         assert!(!error.contains("private.example"));
         config.transcription.microphone_recognition.provider = "deepgram".into();
         config.transcription.microphone_recognition.language = "de-DE".into();

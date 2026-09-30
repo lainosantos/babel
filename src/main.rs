@@ -10,7 +10,7 @@ use tokio_util::sync::CancellationToken;
 #[command(
     name = "babel",
     version,
-    about = "Tradução de voz bidirecional em tempo real com dispositivos virtuais"
+    about = "Real-time bidirectional voice translation with virtual devices"
 )]
 struct Cli {
     #[arg(long, global = true, default_value = "babel.toml")]
@@ -20,30 +20,30 @@ struct Cli {
 }
 #[derive(Subcommand)]
 enum Command {
-    /// Painel local de configuração (padrão).
+    /// Local settings dashboard (default).
     Serve {
-        /// Porta do painel; 0 deixa o sistema escolher uma porta livre.
+        /// Dashboard port; 0 lets the operating system choose a free port.
         #[arg(long, default_value_t = 0)]
         port: u16,
-        /// Executa o painel e roteamento original, sem ícone na bandeja.
+        /// Run the dashboard and original audio routing without a tray icon.
         #[arg(long)]
         no_tray: bool,
     },
-    /// Inicia os fluxos configurados sem interface gráfica.
+    /// Start the configured streams without a graphical interface.
     Run {
-        /// Nome opcional desta sessão (também identifica os arquivos de transcrição).
+        /// Optional session name (also identifies transcript files).
         #[arg(long)]
         session: Option<String>,
     },
-    /// Cria uma configuração inicial; não sobrescreve arquivos existentes.
+    /// Create initial settings without overwriting existing files.
     Init,
-    /// Lista os identificadores exatos de dispositivos.
+    /// List exact device identifiers.
     Devices,
-    /// Verifica configuração, executáveis e disponibilidade dos dispositivos.
+    /// Check settings, executables and device availability.
     Doctor,
-    /// Cria os dispositivos virtuais no Linux; orienta os drivers nos outros SOs.
+    /// Create virtual devices on Linux; provide driver guidance on other operating systems.
     Setup,
-    /// Remove somente dispositivos virtuais criados pelo Babel.
+    /// Remove only virtual devices created by Babel.
     Uninstall,
 }
 
@@ -70,11 +70,11 @@ async fn run(cli: Cli, command: Command) -> Result<()> {
         Command::Init => {
             ensure!(
                 !cli.config.exists(),
-                "{} já existe; edite o arquivo ou use --config com outro caminho",
+                "{} already exists; edit the file or use --config with another path",
                 cli.config.display()
             );
             AppConfig::default().save(&cli.config)?;
-            println!("Configuração criada em {}", cli.config.display());
+            println!("Configuration created at {}", cli.config.display());
         }
         Command::Devices => {
             println!(
@@ -90,13 +90,13 @@ async fn run(cli: Cli, command: Command) -> Result<()> {
         }
         Command::Doctor => {
             println!(
-                "Sistema: {}",
+                "System: {}",
                 babel_audio::platform::PlatformInfo::current().name
             );
             let cfg = load_or_default(&cli.config)?;
             cfg.validate()?;
             println!(
-                "Configuração válida. Microfone: {}; saída: {}",
+                "Configuration valid. Microphone: {}; speaker: {}",
                 cfg.microphone.provider, cfg.speaker.provider
             );
             for (name, profile) in [
@@ -105,30 +105,30 @@ async fn run(cli: Cli, command: Command) -> Result<()> {
                 ("ElevenLabs", &cfg.providers.elevenlabs),
             ] {
                 println!(
-                    "{name}: modelo={}, credencial {}: {}",
+                    "{name}: model={}, credential {}: {}",
                     profile.model,
                     profile.api_key_env,
                     if babel_audio::credentials::configured(&profile.api_key_env) {
-                        "presente (não validada remotamente)"
+                        "present (not validated remotely)"
                     } else {
-                        "ausente"
+                        "missing"
                     }
                 );
             }
             match audio::devices().await {
                 Ok(devices) => println!(
-                    "{} dispositivos disponíveis. Execute `babel devices` para listar.",
+                    "{} devices available. Run `babel devices` to list them.",
                     devices.len()
                 ),
                 Err(error) => {
-                    println!("Áudio indisponível: {error:#}");
+                    println!("Audio unavailable: {error:#}");
                     return Err(error);
                 }
             }
             if let Err(error) = cfg.validate_for_start() {
-                println!("Antes de iniciar: {error:#}");
+                println!("Before starting: {error:#}");
             }
-            println!("Consulte docs/platforms.md. Não foi enviado áudio à nuvem.");
+            println!("See docs/platforms.md. No audio was sent to the cloud.");
         }
         Command::Serve { port, no_tray } => {
             let instance = dashboard::InstanceGuard::acquire(&cli.config)?;
@@ -148,9 +148,7 @@ async fn run(cli: Cli, command: Command) -> Result<()> {
                 match babel_audio::tray::start(controller.clone(), cancel.clone()).await {
                     Ok(tray) => Some(tray),
                     Err(error) => {
-                        tracing::warn!(
-                            "Bandeja indisponível; painel continua disponível: {error:#}"
-                        );
+                        tracing::warn!("Tray unavailable; dashboard remains available: {error:#}");
                         None
                     }
                 }
@@ -169,11 +167,11 @@ async fn run(cli: Cli, command: Command) -> Result<()> {
         Command::Run { session } => {
             let instance = dashboard::InstanceGuard::acquire(&cli.config)?;
             let cfg = AppConfig::load(instance.config_path())
-                .context("Execute `babel init` e configure os dispositivos primeiro")?;
+                .context("Run `babel init` and configure devices first")?;
             let controller = Controller::new(cfg, instance.config_path().to_owned())?;
             controller.start_named(session).await?;
             println!(
-                "Sessão: {}. Ctrl+C para parar.",
+                "Session: {}. Press Ctrl+C to stop.",
                 controller.status().await.session_name.unwrap_or_default()
             );
             loop {

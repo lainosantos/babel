@@ -1,180 +1,179 @@
-# Transcrição dos áudios originais (STT)
+# Original audio transcription (STT)
 
-O menu **Transcrição** tem seus próprios providers, modelos, credenciais e idiomas.
-O reconhecedor STT não depende do tradutor speech-to-speech (STS) nem do
-sintetizador de vozes (TTS). É possível, por exemplo, traduzir com Gemini e
-transcrever com Deepgram, ou usar somente whisper.cpp para transcrever sem
-traduzir. O microfone e a saída recebida podem usar reconhecedores diferentes.
+The **Transcription** menu has its own providers, models, credentials, and languages.
+The STT recognizer does not depend on the speech-to-speech (STS) translator or
+the voice synthesizer (TTS). For example, you can translate with Gemini and
+transcribe with Deepgram, or use only whisper.cpp to transcribe without
+translation. The microphone and incoming output can use different recognizers.
 
-## Configurar no painel
+## Configuring the dashboard
 
-1. Abra **Transcrição** e habilite a transcrição original.
-2. Selecione as origens: **Microfone original**, **Saída original**, ou ambas.
-3. Em cada origem, escolha o provider STT e o idioma original. `auto` depende
-   das capacidades do modelo; um idioma explícito pode melhorar o reconhecimento.
-4. Na seção **Providers de transcrição**, configure cada perfil selecionado:
-   modelo, referência da chave de API, endpoint e opções disponíveis.
-5. Para um serviço em nuvem, adicione a chave no próprio perfil STT ou forneça a
-   variável de ambiente correspondente ao iniciar o Babel. Para whisper.cpp,
-   mantenha **Integrado ao Babel**. Whisper Base Q5_1 é o padrão compacto;
-   Tiny Q5_1 e Small Q5_1 também estão disponíveis. Salvar prepara os arquivos
-   automaticamente. Um servidor externo é opcional.
-6. Configure a pasta base **absoluta**, a pasta de destino, o padrão do nome e,
-   opcionalmente, os tempos dos segmentos. Salve e inicie a sessão com um nome.
+1. Open **Transcription** and enable original transcription.
+2. Select the sources: **Original microphone**, **Original output**, or both.
+3. For each source, choose the STT provider and original language. `auto` depends
+   on the model's capabilities; an explicit language may improve recognition.
+4. In **Transcription providers**, configure each selected profile:
+   model, API key reference, endpoint, and available options.
+5. For a cloud service, add the key in the STT profile itself or provide the
+   corresponding environment variable when starting Babel. For whisper.cpp,
+   keep **Built into Babel**. Whisper Base Q5_1 is the compact default;
+   Tiny Q5_1 and Small Q5_1 are also available. Saving prepares the files
+   automatically. An external server is optional.
+6. Configure the **absolute** base folder, destination folder, filename pattern,
+   and optional segment timestamps. Save and start a named session.
 
-Os perfis são compartilhados pelas duas origens dentro da seção STT. Para usar
-idiomas distintos, configure cada origem; para usar contas distintas do mesmo
-provider por origem, seriam necessários perfis adicionais, ainda não disponíveis.
-As configurações de sessão são aplicadas ao iniciar; a troca do dispositivo
-físico durante a sessão continua disponível no roteamento e na bandeja.
+Profiles are shared by both sources within the STT section. To use different
+languages, configure each source; using separate accounts with the same provider
+per source would require additional profiles, which are not yet available.
+Session settings take effect at startup; changing the physical device during
+a session remains available through routing and the tray.
 
-As chaves inseridas no painel ficam somente na memória do processo e são apagadas
-ao sair. O arquivo TOML armazena a **referência** (`api_key_env`), nunca a chave.
-Por padrão, STT e tradução podem apontar para a mesma variável da conta. Para
-separar credenciais, use nomes diferentes, por exemplo `GEMINI_STT_API_KEY` e
-`GEMINI_TRANSLATION_API_KEY`. Alterar a referência do perfil STT não altera o
-perfil de tradução ou voz.
+Keys entered in the dashboard remain only in process memory and are erased on
+exit. The TOML file stores the **reference** (`api_key_env`), never the key.
+By default, STT and translation may reference the same account variable. To
+separate credentials, use different names, such as `GEMINI_STT_API_KEY` and
+`GEMINI_TRANSLATION_API_KEY`. Changing the STT profile's reference does not change
+the translation or voice profile.
 
-## Transcrever o histórico recente
+## Transcribing recent history
 
-Depois de escolher as origens e os reconhecedores, abra **Opções avançadas de
-início** junto de **Iniciar sessão**. Marque **Incluir histórico recente** e
-informe a duração em minutos. Sem essa escolha, a transcrição começa no áudio
-atual. Esse também é o padrão ao iniciar pela bandeja, por `babel run` na CLI
-ou pela API sem `history_seconds` positivo. A retenção habilitada não inclui
-histórico automaticamente. A escolha é exclusiva desse início e volta a ficar desmarcada após uma
-sessão iniciada com sucesso.
+After choosing sources and recognizers, open **Advanced start options** next to
+**Start session**. Select **Include recent history** and enter the duration in
+minutes. Without this choice, transcription starts with current audio. This is
+also the default when starting from the tray, through `babel run` in the CLI,
+or through the API without a positive `history_seconds`. Enabling retention
+does not automatically include history. This choice applies only to that start
+and returns to unchecked after a session starts successfully.
 
-O histórico usa os reconhecedores, idiomas e origens atualmente selecionados
-em **Transcrição**, mesmo se forem diferentes dos que estavam configurados
-quando o áudio foi capturado. Somente áudio original é reconhecido. Se a
-transcrição estiver desligada, incluir histórico para uma gravação não ativa
-STT nem envia esse áudio a um provider. Com STT em nuvem habilitado, incluir
-histórico envia o trecho solicitado ao serviço escolhido ao iniciar a sessão.
+History uses the recognizers, languages, and sources currently selected in
+**Transcription**, even if they differ from the configuration in effect when
+the audio was captured. Only original audio is recognized. If transcription
+is off, including history for a recording does not activate STT or send that
+audio to a provider. With cloud STT enabled, including history sends the requested
+interval to the selected service when the session starts.
 
-Os resultados do histórico precedem os resultados ao vivo no TXT. O painel
-indica enquanto a transcrição do histórico está pendente; o roteamento, a
-reprodução e a tradução continuam com áudio ao vivo. Reconhecer vários minutos
-pode levar tempo e consumir a cota do provider. Encerrar antes de concluir pode
-interromper resultados pendentes, como ocorre com a transcrição ao vivo.
+History results precede live results in the TXT file. The dashboard indicates
+when history transcription is pending; routing, playback, and translation
+continue with live audio. Recognizing several minutes may take time and consume
+provider quota. Stopping before completion may interrupt pending results, as
+with live transcription.
 
-A capacidade padrão é dez minutos em memória, ajustável em **Ajustes →
-Histórico de áudio recente**. O painel mostra o áudio disponível por origem;
-se houver menos que o solicitado, inclui somente o trecho disponível. O
-histórico só se forma enquanto há captura pelo roteamento, não é persistido
-antes da inclusão explícita e desaparece ao fechar o Babel. Os mesmos controles
-estão disponíveis no Linux, macOS e Windows. Consulte [a retenção e a inclusão
-na gravação](recording.md#incluir-áudio-anterior-ao-início).
+The default in-memory capacity is ten minutes, adjustable under **Settings →
+Recent audio history**. The dashboard shows the audio available per source;
+if less than requested is available, it includes only that interval. History
+accumulates only while routing captures audio, is not persisted before explicit
+inclusion, and disappears when Babel closes. The same controls are available
+on Linux, macOS, and Windows. See [retention and inclusion in recordings](recording.md#include-audio-from-before-session-start).
 
-O reconhecimento do histórico usa uma conexão STT separada da transcrição ao
-vivo. Continuam valendo as cotas, custos e limites de sessão do provider. Se
-uma conexão expirar ou a sessão for encerrada antes da conclusão, o Babel
-informa que o histórico ficou incompleto; não apresenta esse resultado como
-uma recuperação integral. Identificadores de falantes não são associados
-automaticamente entre as conexões histórica e ao vivo.
+History recognition uses a separate STT connection from live transcription.
+Provider quotas, costs, and session limits still apply. If a connection expires
+or the session ends before completion, Babel reports that history is incomplete;
+it does not present the result as full recovery. Speaker identifiers are not
+automatically matched between historical and live connections.
 
-## Providers implementados
+## Implemented providers
 
-| Provider STT | Transporte e modelo | Falantes | Tempos gravados | Requisitos |
+| STT provider | Transport and model | Speakers | Saved times | Requirements |
 | --- | --- | --- | --- | --- |
-| Gemini Live Transcribe | WebSocket; `gemini-3.5-transcribe-live` | Sem diarização confirmada no streaming atual | Recebimento; metadados reais quando presentes | Chave Google com acesso ao modelo |
-| OpenAI Realtime Transcription | WebSocket; `gpt-live-transcribe` por padrão | Sem diarização neste adaptador | Recebimento | Chave OpenAI com acesso ao modelo |
-| Deepgram Listen | WebSocket v1; `nova-3` por padrão, também Nova-2 | Opcional; IDs enviados pela API | Intervalos dos segmentos, derivados das palavras retornadas | Chave Deepgram e modelo/idioma compatíveis |
-| whisper.cpp | Motor integrado; Tiny/Base/Small multilíngues, com variantes compactas Q5_1. Servidor HTTP externo opcional | Sem diarização neste adaptador | Limites dos segmentos enviados ao reconhecedor | Instalador com runtimes; internet apenas para preparar pesos ausentes |
+| Gemini Live Transcribe | WebSocket; `gemini-3.5-transcribe-live` | No confirmed diarization in current streaming | Receipt time; actual metadata when present | Google key with access to the model |
+| OpenAI Realtime Transcription | WebSocket; `gpt-live-transcribe` by default | No diarization in this adapter | Receipt time | OpenAI key with access to the model |
+| Deepgram Listen | WebSocket v1; `nova-3` by default, also Nova-2 | Optional; IDs supplied by the API | Segment intervals derived from returned words | Deepgram key and compatible model/language |
+| whisper.cpp | Embedded engine; multilingual Tiny/Base/Small, with compact Q5_1 variants. Optional external HTTP server | No diarization in this adapter | Boundaries of segments sent to the recognizer | Installer with runtimes; internet only to prepare missing weights |
 
-Suporte implementado não garante disponibilidade do modelo para toda conta,
-região ou idioma. Testes automatizados usam servidores simulados locais e não
-medem a qualidade das APIs com áudio real. A configuração e os adaptadores Rust
-são comuns ao Linux, macOS e Windows; a instalação do servidor whisper.cpp é
-específica do sistema.
+Implemented support does not guarantee model availability for every account,
+region, or language. Automated tests use local simulated servers and do not
+measure API quality with real audio. The configuration and Rust adapters are
+shared across Linux, macOS, and Windows; whisper.cpp server installation is
+specific to the operating system.
 
 ### Gemini Live Transcribe
 
-Selecione **Gemini** na origem e configure o perfil em Transcrição. O endpoint
-oficial é fixo; o modelo STT é `gemini-3.5-transcribe-live`, separado do modelo de
-tradução. A entrada é PCM16 mono a 16 kHz. A sessão solicita saída de texto e
-preserva a fala original, sem idioma de destino, prompt de tradução ou voz TTS.
+Select **Gemini** for the source and configure its profile in Transcription.
+The official endpoint is fixed; the STT model is `gemini-3.5-transcribe-live`,
+separate from the translation model. Input is mono PCM16 at 16 kHz. The session
+requests text output and preserves the original speech, without a target language,
+translation prompt, or TTS voice.
 
-O Babel salva os segmentos finais de `inputTranscription`; hipóteses
-especulativas de `interimInputTranscription` não são gravadas como texto final.
-`auto` omite a restrição de idioma; um código explícito é enviado em
-`languageCodes`. O streaming atual não oferece diarização nem timestamps por
-palavra garantidos. Os recursos da API de **arquivos** não devem ser confundidos
-com os do Live Transcribe. A duração máxima documentada da sessão Live é de dez
-minutos; reconexões podem produzir uma lacuna e reiniciar o relógio do provider.
+Babel saves final `inputTranscription` segments; speculative
+`interimInputTranscription` hypotheses are not saved as final text.
+`auto` omits the language restriction; an explicit code is sent in
+`languageCodes`. Current streaming does not guarantee diarization or word-level
+timestamps. Features of the **file** API should not be confused with Live
+Transcribe features. The documented maximum Live session duration is ten
+minutes; reconnecting may create a gap and reset the provider's clock.
 
-Fontes: [Live Transcribe](https://ai.google.dev/gemini-api/docs/live-api/live-transcribe)
-e [capacidades do modelo](https://ai.google.dev/gemini-api/docs/models/gemini-3.5-transcribe).
+Sources: [Live Transcribe](https://ai.google.dev/gemini-api/docs/live-api/live-transcribe)
+and [model capabilities](https://ai.google.dev/gemini-api/docs/models/gemini-3.5-transcribe).
 
 ### OpenAI Realtime Transcription
 
-O perfil STT usa `gpt-live-transcribe` por padrão. Famílias adicionais aceitas pelo
-adaptador são `gpt-transcribe` e `gpt-realtime-whisper`, incluindo snapshots
-datados válidos. Modelos de conversa ou tradução de áudio não são modelos STT.
+The STT profile uses `gpt-live-transcribe` by default. Additional families accepted
+by the adapter are `gpt-transcribe` and `gpt-realtime-whisper`, including valid
+dated snapshots. Audio conversation or translation models are not STT models.
 
-Deixe o endpoint vazio para usar o endereço oficial de Realtime transcription.
-Um endereço explícito deve falar o mesmo protocolo WebSocket; `/translations`
-é recusado. O Babel abre uma sessão `type: transcription`, converte o PCM de
-16 para 24 kHz e envia segmentos com commit por VAD local (400 ms de silêncio).
-Salva apenas os eventos finais, respeitando a ordem dos segmentos enviados.
+Leave the endpoint empty to use the official Realtime transcription address.
+An explicit address must implement the same WebSocket protocol; `/translations`
+is rejected. Babel opens a `type: transcription` session, converts PCM from
+16 to 24 kHz, and sends segments committed by local VAD (400 ms of silence).
+It saves only final events, respecting the order of submitted segments.
 
-O idioma explícito configura o reconhecimento; `auto` deixa o modelo decidir
-quando suportado. `gpt-realtime-whisper` exige idioma explícito. Este adaptador
-não solicita diarização nem gera timestamps por palavra; a opção de tempos do
-Babel registra o recebimento quando não há alinhamento fornecido pelo serviço.
-Campos como prompt de tradução, voz e idioma de destino não são enviados.
+An explicit language configures recognition; `auto` lets the model decide when
+supported. `gpt-realtime-whisper` requires an explicit language. This adapter
+does not request diarization or generate word-level timestamps; Babel's timestamp
+option records receipt time when the service provides no alignment.
+Fields such as translation prompt, voice, and target language are not sent.
 
-Fonte: [Realtime transcription](https://developers.openai.com/api/docs/guides/realtime-transcription).
+Source: [Realtime transcription](https://developers.openai.com/api/docs/guides/realtime-transcription).
 
 ### Deepgram
 
-O endpoint padrão é `wss://api.deepgram.com/v1/listen`, com modelo `nova-3` e chave
-referenciada por `DEEPGRAM_API_KEY`. O adaptador aceita modelos da família
-Nova-2/Nova-3 compatíveis com **Listen v1**; Flux usa outro protocolo e não está
-implementado aqui. A entrada é PCM16 mono a 16 kHz enviada em binário.
+The default endpoint is `wss://api.deepgram.com/v1/listen`, using model `nova-3`
+and a key referenced by `DEEPGRAM_API_KEY`. The adapter accepts Nova-2/Nova-3
+family models compatible with **Listen v1**; Flux uses another protocol and is
+not implemented here. Input is mono PCM16 at 16 kHz, sent as binary data.
 
-O idioma `auto` usa `language=multi` nos modelos gerais compatíveis. Isso permite
-reconhecimento multilíngue dentro dos idiomas suportados pelo modelo, não detecção
-universal de qualquer idioma. Para modelos especializados, escolha um idioma
-explícito compatível. A opção de pontuação envia `punctuate` ao serviço.
+Language `auto` uses `language=multi` on compatible general models. This enables
+multilingual recognition within the model's supported languages, not universal
+detection of any language. For specialized models, select a compatible explicit
+language. The punctuation option sends `punctuate` to the service.
 
-Com **Identificar falantes** habilitado, o Babel envia `diarize_model=v1`, agrupa
-palavras consecutivas pelo ID de falante retornado e grava os tempos reais de
-início/fim desses grupos. Com a opção desligada, não pede diarização. IDs numéricos como
-`0` identificam agrupamentos da API, não pessoas verificadas; podem mudar
-após uma reconexão ou entre as duas origens. Esta opção não clona vozes e não
-altera a voz da tradução.
+With **Identify speakers** enabled, Babel sends `diarize_model=v1`, groups
+consecutive words by the returned speaker ID, and records the actual start/end
+times of those groups. With the option off, it does not request diarization.
+Numeric IDs such as `0` identify API groupings, not verified people; they may
+change after reconnection or between the two sources. This option does not
+clone voices or change the translation voice.
 
-Apenas resultados `is_final` são persistidos. `speech_final` encerra o turno sem
-duplicar texto. Durante o silêncio, o cliente envia keepalive a cada três
-segundos. Falhas transitórias usam o orçamento de reconexões configurado;
-autenticação recusada não fica em repetição infinita.
+Only `is_final` results are persisted. `speech_final` ends the turn without
+duplicating text. During silence, the client sends a keepalive every three
+seconds. Transient failures use the configured reconnection budget;
+rejected authentication does not trigger endless retries.
 
-Fontes: [Listen v1](https://developers.deepgram.com/reference/speech-to-text/listen-streaming),
-[diarização](https://developers.deepgram.com/docs/diarization),
-[multilíngue](https://developers.deepgram.com/docs/multilingual-code-switching)
-e [keepalive](https://developers.deepgram.com/docs/audio-keep-alive).
+Sources: [Listen v1](https://developers.deepgram.com/reference/speech-to-text/listen-streaming),
+[diarization](https://developers.deepgram.com/docs/diarization),
+[multilingual recognition](https://developers.deepgram.com/docs/multilingual-code-switching),
+and [keepalive](https://developers.deepgram.com/docs/audio-keep-alive).
 
-### whisper.cpp local
+### Local whisper.cpp
 
-Selecione `whisper.cpp` no reconhecimento da origem e mantenha **Integrado ao
-Babel** no perfil. Ao salvar, o Babel baixa e verifica os pesos multilíngues
-escolhidos, quando ainda não estiverem no cache. O motor só ocupa RAM quando
-uma sessão com transcrição habilitada precisa dele. Não é
-necessário instalar Python, CMake, Ollama ou iniciar um servidor separado. O
-painel mostra preparação, progresso de download, disponibilidade e falhas.
+Select `whisper.cpp` for the source's recognition and keep **Built into Babel**
+in the profile. On save, Babel downloads and verifies the selected multilingual
+weights if they are not already cached. The engine occupies RAM only when a
+session with transcription enabled needs it. You do not need to install Python,
+CMake, or Ollama, or start a separate server. The dashboard shows preparation,
+download progress, availability, and failures.
 
-Escolha `tiny-q5_1` (32,2 MB), `base-q5_1` (padrão, 59,7 MB) ou `small-q5_1`
-(190,1 MB). São tamanhos dos pesos, não da RAM total. As opções originais
-`tiny`, `base` e `small` continuam válidas, inclusive em configurações existentes.
-Tiny prioriza baixo consumo e pode perder precisão; Small usa mais recursos.
-O resultado depende do hardware, do idioma, do sotaque e do ruído.
-A pasta de modelos, threads de CPU e prazo de liberação de memória ficam em
-**Ajustes → Modelos locais**. O padrão usa até dois threads; após a última
-sessão liberar o motor, ele é encerrado depois de 60 segundos por padrão.
-Os pesos permanecem em disco. O prazo `idle_unload_secs` aceita 1–3600 segundos.
-Depois da preparação, esse reconhecimento funciona sem internet. O motor usa
-uma porta local dinâmica: nenhuma porta padrão é presumida ou salva no perfil.
+Choose `tiny-q5_1` (32.2 MB), `base-q5_1` (default, 59.7 MB), or `small-q5_1`
+(190.1 MB). These are weight sizes, not total RAM usage. The original options
+`tiny`, `base`, and `small` remain valid, including in existing configurations.
+Tiny prioritizes low resource use and may lose accuracy; Small uses more resources.
+Results depend on hardware, language, accent, and noise.
+The models folder, CPU threads, and memory release delay are under **Settings →
+Local models**. The default uses up to two threads; after the last session releases
+the engine, it shuts down after 60 seconds by default. Weights remain on disk.
+The `idle_unload_secs` delay accepts 1–3600 seconds.
+After preparation, this recognition works without internet. The engine uses
+a dynamic local port: no default port is assumed or saved in the profile.
 
 ```toml
 [transcription.microphone_recognition]
@@ -191,41 +190,41 @@ vad_threshold = 0.01
 request_timeout_secs = 30
 
 [local_runtime]
-directory = "" # Cache da conta, ou caminho absoluto escolhido pelo usuário.
+directory = "" # Account cache, or an absolute path chosen by the user.
 threads = 2
 idle_unload_secs = 60
 ```
 
-Esse perfil reconhece somente o áudio original. Não chama o modelo tradutor,
-Piper ou um serviço de voz. `auto` no **idioma** pede detecção ao Whisper e códigos
-como `pt-BR` são reduzidos a `pt`; `translate` é sempre falso. `endpoint = "auto"`
-seleciona o processo gerenciado, não o idioma.
+This profile recognizes only original audio. It does not call the translator
+model, Piper, or a voice service. `auto` in the **language** field requests Whisper
+language detection, and codes such as `pt-BR` are reduced to `pt`; `translate`
+is always false. `endpoint = "auto"` selects the managed process, not the language.
 
-O áudio é segmentado por VAD de energia, com duração máxima, silêncio, limiar RMS
-e timeout configuráveis. Segmentos menores reduzem espera, mas podem reduzir
-contexto. Modelos lentos aumentam latência; não se trata de streaming neural
-contínuo. Os tempos correspondem aos limites do áudio enviado, sem alinhamento
-de palavras nem identificação de falantes.
+Audio is segmented by energy VAD, with configurable maximum duration, silence,
+RMS threshold, and timeout. Shorter segments reduce waiting but may reduce
+context. Slow models increase latency; this is not continuous neural streaming.
+Times correspond to the boundaries of the submitted audio, without word alignment
+or speaker identification.
 
-**Servidor externo (avançado)** continua disponível para uma instalação própria.
-Informe a URL completa de inferência com a porta real. Nesse modo, o modelo é
-carregado pelo seu servidor, e a escolha de modelo Whisper do Babel não o altera.
-O prazo de liberação de memória do Babel não encerra esse servidor externo.
-Autenticação Bearer é opcional somente no modo externo: informe uma referência
-de chave quando o servidor/proxy exigir. HTTP sem TLS é aceito apenas em
-loopback; endereços remotos exigem HTTPS. Redirecionamentos e URLs com
-credenciais, query ou fragmento não são aceitos.
+**External server (advanced)** remains available for your own installation.
+Enter the full inference URL with its actual port. In this mode, your server loads
+the model, and Babel's Whisper model selection does not change it. Babel's memory
+release delay does not stop that external server.
+Optional Bearer authentication is available only in external mode: enter a key
+reference when required by the server/proxy. HTTP without TLS is accepted only
+on loopback; remote addresses require HTTPS. Redirects and URLs containing
+credentials, queries, or fragments are not accepted.
 
-Leia [Modelos locais integrados](local-inference.md) para armazenamento,
-preparação, instalação e limites. Referência do protocolo externo:
-[servidor whisper.cpp](https://github.com/ggml-org/whisper.cpp/tree/master/examples/server).
+Read [Embedded local models](local-inference.md) for storage, preparation,
+installation, and limits. External protocol reference:
+[whisper.cpp server](https://github.com/ggml-org/whisper.cpp/tree/master/examples/server).
 
-## Exemplo TOML independente
+## Independent TOML example
 
-Este trecho usa Gemini para reconhecer o microfone e Deepgram para reconhecer
-as falas recebidas. Os tradutores continuam configurados separadamente em
-`microphone`, `speaker` e `providers`. Omita os perfis não utilizados ou mantenha
-seus defaults; nenhuma chave de provider inativo é exigida.
+This excerpt uses Gemini to recognize the microphone and Deepgram to recognize
+incoming speech. Translators remain configured separately in `microphone`,
+`speaker`, and `providers`. Omit unused profiles or keep their defaults;
+no key is required for an inactive provider.
 
 ```toml
 [transcription]
@@ -259,56 +258,57 @@ connect_timeout_secs = 15
 max_reconnect_attempts = 3
 ```
 
-Configure também `files.base_path` com um caminho absoluto válido no sistema,
-por exemplo `/home/usuario/Babel`, `/Users/usuario/Babel` ou `C:\Users\usuario\Babel`.
-Consulte [configuração](configuration.md) para o padrão do nome e a resolução de
-pastas; o destino não depende de onde o aplicativo foi iniciado.
-O caminho não precisa existir previamente. Ao iniciar uma sessão com transcrição,
-o Babel cria recursivamente a pasta de destino e todos os diretórios pais que
-faltarem, inclusive a base, no Linux, macOS e Windows. Isso também funciona com
-gravação de áudio desligada. Só há erro de acesso ao destino quando não é possível
-criar a pasta ou abrir o arquivo; a simples inexistência da pasta não impede a sessão.
+Also configure `files.base_path` with a valid absolute path for the system,
+such as `/home/user/Babel`, `/Users/user/Babel`, or `C:\Users\user\Babel`.
+See [configuration](configuration.md) for the filename pattern and folder
+resolution; the destination does not depend on where the application started.
+The path does not need to exist beforehand. When starting a session with
+transcription, Babel recursively creates the destination folder and any missing
+parent directories, including the base, on Linux, macOS, and Windows. This also
+works with audio recording off. A destination access error occurs only when
+Babel cannot create the folder or open the file; a missing folder alone does
+not prevent the session.
 
-## Arquivo, roteamento e limites
+## Files, routing, and limits
 
-- Uma sessão produz **um TXT** com as origens selecionadas, identificadas como
-  microfone ou saída recebida, e somente no idioma original. Com ambas ativas,
-  resultados entram no arquivo conforme são recebidos; atrasos distintos entre
-  providers não garantem uma ordenação global exata das falas.
-- O reconhecedor recebe o áudio original, antes da tradução e da voz gerada.
-  Mesmo quando STS fornece texto auxiliar, esse texto não substitui nem duplica
-  a transcrição do STT selecionado.
-- As marcações temporais são opcionais. Quando há metadados, preservam offsets
-  da sessão de áudio do provider; caso contrário indicam recebimento. Não são
-  garantia de timestamps por palavra nem de uma linha do tempo única após
-  reconexões. Lacunas são assinaladas no TXT.
-- Transcrição, tradução e gravação são habilitadas separadamente. Gravar somente
-  áudio não abre STT. Se ambas as direções forem selecionadas para transcrição,
-  haverá duas conexões/requisições independentes, mesmo usando o mesmo provider.
-  Tradução e STT em nuvem simultâneos também podem ter cobranças separadas.
-- O microfone é processado enquanto Babel é o microfone padrão do sistema ou
-  um aplicativo usa seu microfone virtual. A saída exige um aplicativo enviando
-  áudio ao Babel. Ao desativar uma rota, o Babel cancela seus processadores e
-  descarta áudio antigo das filas.
-  A ativação de comandos por voz continua restrita ao microfone e usa sua própria
-  configuração, sem depender do STT de arquivo.
-- Filas são limitadas e o roteamento não aguarda uma chamada STT. Congestionamento
-  pode descartar frames de processamento para evitar atraso ilimitado. Erros
-  fatais de um processador encerram a sessão e retornam ao roteamento original;
-  a independência das opções não significa recuperação isolada de toda falha.
+- A session produces **one TXT file** with the selected sources, identified as
+  microphone or incoming output, and only in the original language. With both
+  active, results enter the file as received; different provider delays do not
+  guarantee exact global ordering of speech.
+- The recognizer receives original audio, before translation and generated voice.
+  Even when STS supplies auxiliary text, that text neither replaces nor duplicates
+  transcription from the selected STT provider.
+- Timestamps are optional. When metadata exists, they preserve offsets from the
+  provider's audio session; otherwise, they indicate receipt time. They do not
+  guarantee word-level timestamps or a single timeline after reconnections.
+  Gaps are marked in the TXT file.
+- Transcription, translation, and recording are enabled separately. Recording
+  audio alone does not open STT. If both directions are selected for transcription,
+  there will be two independent connections/requests, even with the same provider.
+  Simultaneous cloud translation and STT may also incur separate charges.
+- The microphone is processed while Babel is the system's default microphone
+  or an application uses its virtual microphone. Output requires an application
+  sending audio to Babel. When a route is deactivated, Babel cancels its processors
+  and discards old queued audio.
+  Voice-command activation remains limited to the microphone and uses its own
+  configuration, independently of file transcription STT.
+- Queues are bounded, and routing does not wait for an STT call. Congestion may
+  drop processing frames to prevent unlimited delay. Fatal processor errors end
+  the session and return to original routing; independent options do not imply
+  isolated recovery from every failure.
 
-## Configurações antigas
+## Older configurations
 
-Ao carregar um TOML anterior a essa separação, o Babel migra os campos ausentes:
-copia o provider e idioma originais de cada rota, converte `local` para
-`whisper`, e copia referências de chave e modelos ASR para os novos perfis STT.
-Campos STT já definidos são preservados. A migração não ativa funcionalidades
-que estavam desligadas. A partir daí, alterações de tradução não alteram STT.
+When loading TOML from before this separation, Babel migrates missing fields:
+it copies each route's original provider and language, converts `local` to
+`whisper`, and copies key references and ASR models into the new STT profiles.
+Existing STT fields are preserved. Migration does not activate features that
+were off. From then on, translation changes do not change STT.
 
-O endpoint oficial OpenAI `/realtime/translations` é convertido para
-`/realtime` dentro do novo perfil de reconhecimento. Um endpoint personalizado
-de tradução exige configuração STT explícita, evitando adivinhar outro destino.
-Endereços Whisper personalizados são preservados. Perfis locais vazios ou
-com os defaults antigos reconhecidos migram para preparação integrada;
-portas fixas antigas não são reaproveitadas automaticamente. Não existe provider de diagnóstico
-`loopback`: para passagem original, basta desligar a tradução.
+The official OpenAI `/realtime/translations` endpoint is converted to `/realtime`
+in the new recognition profile. A custom translation endpoint requires explicit
+STT configuration, avoiding guesses about another destination.
+Custom Whisper addresses are preserved. Empty local profiles or those with
+recognized old defaults migrate to embedded preparation; old fixed ports are
+not automatically reused. There is no `loopback` diagnostic provider: simply
+turn translation off for original passthrough.

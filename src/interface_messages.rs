@@ -1,9 +1,9 @@
 //! Localization of Babel-owned diagnostics at the presentation boundary.
 //!
-//! The core keeps stable diagnostic strings (some historically Portuguese, some
-//! English). Catalog keys join their translations; only whole known messages or
-//! known context prefixes are matched. `{{value}}` captures are copied verbatim,
-//! and `{{error}}` explicitly marks a nested diagnostic. Never use this function
+//! The core emits stable English diagnostic strings. Catalog keys join their
+//! translations, and legacy Portuguese diagnostics remain recognized. Only whole
+//! known messages or known context prefixes are matched. `{{value}}` captures are
+//! copied verbatim, and `{{error}}` explicitly marks a nested diagnostic. Never use this function
 //! on transcript text, user names, prompts, or arbitrary JSON values.
 //!
 //! To add a language, add its JSON catalog here with the same keys. A template may

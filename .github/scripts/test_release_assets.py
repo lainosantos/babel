@@ -1,0 +1,81 @@
+from pathlib import Path
+import json
+import tempfile
+import unittest
+
+import release_assets as release
+
+
+class ReleaseAssetsTests(unittest.TestCase):
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temporary.cleanup)
+        self.root = Path(self.temporary.name)
+        self.cargo = self.root / "Cargo.toml"
+        self.cargo.write_text('[package]\nversion = "1.2.3"\n')
+
+    def test_semver_and_manifest_must_match(self):
+        self.assertEqual(release.validate_tag("v1.2.3", self.cargo), ("1.2.3", False))
+        for tag in ["v1.2", "1.2.3", "v01.2.3", "v1.2.3-01", "v1.2.3-", "v1.2.4", "v1.2.3\n", "v1.2.3;evil"]:
+            with self.subTest(tag=tag), self.assertRaises(ValueError):
+                release.validate_tag(tag, self.cargo)
+
+    def test_prerelease_and_build_metadata_fail_before_native_builds(self):
+        for version in ["1.2.3-rc.1", "1.2.3+build.01", "1.2.3-beta+sha.abc"]:
+            self.cargo.write_text(f'[package]\nversion = "{version}"\n')
+            with self.subTest(version=version), self.assertRaisesRegex(ValueError, "Native installers currently require"):
+                release.validate_tag("v" + version, self.cargo)
+
+    def test_windows_numeric_version_limits(self):
+        self.cargo.write_text('[package]\nversion = "65536.0.0"\n')
+        with self.assertRaisesRegex(ValueError, "must be <= 65535"):
+            release.validate_tag("v65536.0.0", self.cargo)
+
+    def fixtures(self):
+        source = self.root / "download"
+        for name in release.EXPECTED:
+            folder = source / name
+            folder.mkdir(parents=True)
+            for suffix in release.required_formats(name):
+                (folder / (name + suffix)).write_bytes(b"test artifact")
+            (folder / "manifest.json").write_text('{"test":true}')
+        return source
+
+    def test_every_artifact_and_duplicate_metadata_are_preserved(self):
+        source = self.fixtures()
+        (source / next(iter(release.EXPECTED)) / "SHA256SUMS.txt").write_text("existing checksum")
+        output = self.root / "release"
+        self.assertEqual(release.collect(source, output, "v1.2.3"), 23)
+        manifest = json.loads((output / "release-manifest.json").read_text())
+        self.assertEqual(len(manifest["files"]), 23)
+        self.assertEqual(len({file["asset"] for file in manifest["files"]}), 23)
+        self.assertEqual(len((output / "SHA256SUMS.txt").read_text().splitlines()), 24)
+
+    def test_missing_or_empty_platform_aborts(self):
+        source = self.fixtures()
+        one = source / next(iter(release.EXPECTED))
+        for file in one.iterdir():
+            file.unlink()
+        with self.assertRaisesRegex(ValueError, "Empty release artifact"):
+            release.collect(source, self.root / "release", "v1.2.3")
+        one.rmdir()
+        with self.assertRaisesRegex(ValueError, "Missing release artifacts"):
+            release.collect(source, self.root / "release", "v1.2.3")
+
+    def test_symlink_is_not_uploaded(self):
+        source = self.fixtures()
+        link = source / next(iter(release.EXPECTED)) / "external"
+        link.symlink_to(self.cargo)
+        with self.assertRaisesRegex(ValueError, "symlinks"):
+            release.collect(source, self.root / "release", "v1.2.3")
+
+    def test_metadata_alone_does_not_count_as_an_installer(self):
+        source = self.fixtures()
+        rpm = next((source / "babel-installers-linux-amd64").glob("*.rpm"))
+        rpm.unlink()
+        with self.assertRaisesRegex(ValueError, "Missing .rpm package"):
+            release.collect(source, self.root / "release", "v1.2.3")
+
+
+if __name__ == "__main__":
+    unittest.main()

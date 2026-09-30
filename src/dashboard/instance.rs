@@ -16,37 +16,33 @@ pub struct InstanceGuard {
 
 impl InstanceGuard {
     pub fn acquire(config: &Path) -> Result<Self> {
-        let absolute = std::path::absolute(config).context("Caminho da configuração inválido")?;
+        let absolute = std::path::absolute(config).context("Invalid configuration path")?;
         let config = if absolute.exists() {
             absolute
                 .canonicalize()
-                .context("Não foi possível localizar a configuração")?
+                .context("Could not locate the configuration")?
         } else {
             let parent = absolute
                 .parent()
-                .context("Diretório da configuração indisponível")?
+                .context("Configuration directory unavailable")?
                 .canonicalize()
-                .context("Diretório da configuração indisponível")?;
-            parent.join(
-                absolute
-                    .file_name()
-                    .context("Nome da configuração inválido")?,
-            )
+                .context("Configuration directory unavailable")?;
+            parent.join(absolute.file_name().context("Invalid configuration name")?)
         };
         let mut name = config
             .file_name()
-            .context("Nome da configuração inválido")?
+            .context("Invalid configuration name")?
             .to_os_string();
         name.push(".babel-instance.lock");
         let path = config.with_file_name(name);
         match std::fs::symlink_metadata(&path) {
             Ok(metadata) => ensure!(
                 metadata.is_file() && !metadata.is_symlink(),
-                "O bloqueio da instância não é um arquivo regular"
+                "The instance lock is not a regular file"
             ),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
             Err(error) => {
-                return Err(error).context("Não foi possível consultar o bloqueio da instância");
+                return Err(error).context("Could not inspect the instance lock");
             }
         }
         let mut options = std::fs::OpenOptions::new();
@@ -58,10 +54,10 @@ impl InstanceGuard {
         }
         let lock = options
             .open(&path)
-            .context("Não foi possível criar o bloqueio da instância ao lado da configuração")?;
+            .context("Could not create the instance lock alongside the configuration")?;
         ensure!(
             lock.metadata()?.is_file(),
-            "O bloqueio da instância não é um arquivo regular"
+            "The instance lock is not a regular file"
         );
         match lock.try_lock() {
             Ok(()) => Ok(Self {
@@ -69,10 +65,10 @@ impl InstanceGuard {
                 config_path: config,
             }),
             Err(std::fs::TryLockError::WouldBlock) => anyhow::bail!(
-                "Babel já está em execução com esta configuração. Use o ícone na bandeja para abrir Configurações ou encerre a instância atual antes de iniciar outra."
+                "Babel is already running with this configuration. Use the tray icon to open Settings or close the current instance before starting another."
             ),
             Err(std::fs::TryLockError::Error(error)) => {
-                Err(error).context("Não foi possível bloquear a instância do Babel")
+                Err(error).context("Could not lock the Babel instance")
             }
         }
     }

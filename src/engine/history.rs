@@ -13,15 +13,15 @@ pub(super) fn validate_request(config: &AppConfig, seconds: u32) -> Result<()> {
     }
     ensure!(
         config.history.enabled,
-        "Habilite o histórico em memória antes de incluí-lo na sessão"
+        "Enable in-memory history before including it in a session"
     );
     ensure!(
         seconds <= config.history.duration_secs,
-        "O trecho solicitado excede a duração configurada do histórico"
+        "The requested portion exceeds the configured history duration"
     );
     ensure!(
         config.recording.enabled || config.transcription.enabled,
-        "O histórico só pode ser incluído em sessões com gravação ou transcrição habilitada"
+        "History can only be included in sessions with recording or transcription enabled"
     );
     Ok(())
 }
@@ -108,20 +108,20 @@ pub(super) async fn write_transcript(
     let mut history_open = true;
     let result = async {
         output.send(TranscriptRecord::Section(format!(
-            "Histórico recuperado: {seconds:.1} s. Origem do áudio: {}", captured_at.to_rfc3339()
-        ))).await.context("Arquivo de transcrição fechado")?;
+            "Recovered history: {seconds:.1} s. Audio origin: {}", captured_at.to_rfc3339()
+        ))).await.context("Transcript file closed")?;
         let replay_result = loop {
             tokio::select! {
                 result = &mut replay => break result,
                 record = history_rx.recv(), if history_open => match record {
-                    Some(record) => output.send(record).await.context("Arquivo de transcrição fechado")?,
+                    Some(record) => output.send(record).await.context("Transcript file closed")?,
                     None => history_open = false,
                 },
                 record = live.recv(), if live_open => match record {
                     Some(record) => {
                         backlog_bytes += record_size(&record)?;
                         ensure!(backlog_bytes <= MAX_PENDING_TEXT_BYTES && backlog.len() < MAX_PENDING_RECORDS,
-                            "Transcrição do histórico lenta: o texto ao vivo atingiu o limite de memória; sessão interrompida sem descartar trechos silenciosamente");
+                            "History transcription is too slow: live text reached the memory limit; the session stopped without silently discarding passages");
                         backlog.push_back(record);
                     }
                     None => live_open = false,
@@ -129,25 +129,25 @@ pub(super) async fn write_transcript(
             }
         };
         while let Ok(record) = history_rx.try_recv() {
-            output.send(record).await.context("Arquivo de transcrição fechado")?;
+            output.send(record).await.context("Transcript file closed")?;
         }
         drop(guard);
         if let Err(error) = &replay_result {
-            output.send(TranscriptRecord::Section(format!("Histórico incompleto: {error:#}")))
-                .await.context("Arquivo de transcrição fechado")?;
+            output.send(TranscriptRecord::Section(format!("Incomplete history: {error:#}")))
+                .await.context("Transcript file closed")?;
         }
-        output.send(TranscriptRecord::Section("A partir do início da sessão".into()))
-            .await.context("Arquivo de transcrição fechado")?;
-        for record in backlog { output.send(record).await.context("Arquivo de transcrição fechado")?; }
+        output.send(TranscriptRecord::Section("From the session start".into()))
+            .await.context("Transcript file closed")?;
+        for record in backlog { output.send(record).await.context("Transcript file closed")?; }
         if replay_result.is_err() {
             // Preserve live results already accepted when Stop cancels replay.
             while let Ok(record) = live.try_recv() {
-                output.send(record).await.context("Arquivo de transcrição fechado")?;
+                output.send(record).await.context("Transcript file closed")?;
             }
         }
         replay_result?;
         while let Some(record) = live.recv().await {
-            output.send(record).await.context("Arquivo de transcrição fechado")?;
+            output.send(record).await.context("Transcript file closed")?;
         }
         Ok(())
     }.await;
@@ -155,7 +155,7 @@ pub(super) async fn write_transcript(
     drop(output);
     let finalized = (&mut writer_task)
         .await
-        .context("Arquivo de transcrição interrompido")?;
+        .context("Transcript file interrupted")?;
     result.and(finalized)
 }
 
@@ -167,13 +167,13 @@ fn record_size(record: &TranscriptRecord) -> Result<usize> {
             received_at,
             ..
         } => {
-            ensure!(text.len() <= 32768, "Trecho de transcrição excede 32 KiB");
+            ensure!(text.len() <= 32768, "Transcript segment exceeds 32 KiB");
             128 + text.len() + received_at.len() + metadata.speaker.as_ref().map_or(0, String::len)
         }
         TranscriptRecord::Routed { record, .. } => {
             ensure!(
                 !matches!(**record, TranscriptRecord::Routed { .. }),
-                "Origem de transcrição aninhada inválida"
+                "Invalid nested transcript source"
             );
             32 + record_size(record)?
         }
@@ -241,7 +241,7 @@ async fn replay(
                         },
                         ProviderEvent::TurnComplete => TranscriptRecord::TurnComplete,
                         ProviderEvent::Reconnecting { .. } | ProviderEvent::Interrupted => {
-                            bail!("A conexão de transcrição do histórico foi interrompida")
+                            bail!("The history transcription connection was interrupted")
                         }
                         _ => continue,
                     };
@@ -252,20 +252,20 @@ async fn replay(
                             record: Box::new(record),
                         })
                         .await
-                        .context("Transcrição do histórico indisponível")?;
+                        .context("History transcription unavailable")?;
                 }
                 Ok(())
             };
             tokio::try_join!(input, model, forward)?;
             ensure!(
                 !route_cancel.is_cancelled(),
-                "Transcrição do histórico interrompida antes da conclusão"
+                "History transcription stopped before completion"
             );
             Ok::<_, anyhow::Error>(())
         });
     }
     while let Some(result) = routes.join_next().await {
-        result.context("Transcrição do histórico interrompida")??;
+        result.context("History transcription interrupted")??;
     }
     Ok(())
 }
@@ -311,8 +311,8 @@ async fn send_audio(
 ) -> Result<()> {
     tokio::select! {
         biased;
-        _ = cancel.cancelled() => bail!("Transcrição do histórico interrompida antes da conclusão"),
-        sent = sender.send(samples) => sent.context("Provider encerrou a entrada do histórico"),
+        _ = cancel.cancelled() => bail!("History transcription stopped before completion"),
+        sent = sender.send(samples) => sent.context("The provider closed the history input"),
     }
 }
 
@@ -557,11 +557,11 @@ mod tests {
         assert!(pcm[16000..].iter().all(|&sample| sample == 5000));
         let text = tokio::fs::read_to_string(text_path).await.unwrap();
         let lines = [
-            "[microfone] [áudio +0.000–0.500s] microfone histórico 1",
-            "[saída recebida] [áudio +0.000–0.500s] saída histórica",
-            "[microfone] [áudio +0.500–1.000s] microfone histórico 2",
-            "[microfone] [áudio +1.000–1.500s] microfone ao vivo",
-            "[saída recebida] [áudio +1.000–1.500s] saída ao vivo",
+            "[microphone] [audio +0.000–0.500s] microfone histórico 1",
+            "[received output] [audio +0.000–0.500s] saída histórica",
+            "[microphone] [audio +0.500–1.000s] microfone histórico 2",
+            "[microphone] [audio +1.000–1.500s] microfone ao vivo",
+            "[received output] [audio +1.000–1.500s] saída ao vivo",
         ];
         let positions = lines.map(|line| {
             assert_eq!(
@@ -697,7 +697,7 @@ mod tests {
         assert!(result.is_err());
         assert!(!pending.load(Ordering::Acquire));
         let text = std::fs::read_to_string(directory.path().join("cancelled.txt")).unwrap();
-        assert!(text.contains("Histórico incompleto:"));
+        assert!(text.contains("Incomplete history:"));
         assert!(text.contains("resultado ao vivo já aceito"));
     }
 
@@ -792,8 +792,8 @@ mod tests {
         assert!(!pending.load(Ordering::Acquire));
         let text = std::fs::read_to_string(directory.path().join("history.txt")).unwrap();
         assert!(text.find("fala recuperada").unwrap() < text.find("fala ao vivo").unwrap());
-        assert!(text.contains("[áudio +0.000–0.500s]"));
-        assert!(text.contains("[áudio +1.500–1.800s]"));
+        assert!(text.contains("[audio +0.000–0.500s]"));
+        assert!(text.contains("[audio +1.500–1.800s]"));
         assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 1);
         server.abort();
     }

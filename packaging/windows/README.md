@@ -1,8 +1,8 @@
-# Instalador Windows
+# Windows installer
 
-O GitHub Actions executa este empacotador em `windows-2022`, com Python 3.12,
-Inno Setup 6.3+ (incluído na imagem) e os binários já compilados. O setup do WDK
-é descrito em [native/windows](../../native/windows/README.md).
+The release workflow runs this packager on `windows-2022`, with Python 3.12,
+Inno Setup 6.3+ (included in the runner image), and previously built binaries.
+WDK setup is documented in [native/windows](../../native/windows/README.md).
 
 ```powershell
 python packaging/windows/build.py --architecture x64 `
@@ -11,52 +11,53 @@ python packaging/windows/build.py --architecture x64 `
   --driver-dir native/windows/dist/x64 --output artifacts/installers
 ```
 
-Para ARM64 use `--architecture ARM64`, target `aarch64-pc-windows-msvc` e driver
-`dist/ARM64`. `--iscc` permite indicar o caminho do compilador Inno Setup.
-`--version` aceita três componentes numéricos; por padrão vem de `Cargo.toml`.
+For ARM64, use `--architecture ARM64`, target `aarch64-pc-windows-msvc`, and
+`dist/ARM64` for the driver. `--iscc` selects the Inno Setup compiler path.
+`--version` accepts three numeric components and defaults to `Cargo.toml`.
 
-São gerados `Babel-<versão>-windows-<arquitetura>-development.exe`, `.zip`,
-`-manifest.json` e `-SHA256SUMS.txt`. A pasta de saída não pode conter um pacote
-com os mesmos nomes. O ZIP preserva o layout esperado pelo app, incluindo
-`drivers/windows/{BabelAudio.inf,BabelAudio.sys,BabelAudio.cat,...}`. Não misture
-componentes de builds distintos. A checagem de PE verifica a arquitetura dos dois
-executáveis do app, do helper e do driver antes de empacotar.
+Outputs are `Babel-<version>-windows-<architecture>-development.exe`, `.zip`,
+`-manifest.json`, and `-SHA256SUMS.txt`. The output directory must not already
+contain packages with the same names. The ZIP preserves the application's
+expected layout, including `drivers/windows/{BabelAudio.inf,BabelAudio.sys,BabelAudio.cat,...}`.
+Do not mix components from different builds. PE checks verify the architecture
+of both application executables, the helper, and the driver before packaging.
 
-Estes são artefatos de desenvolvimento sem assinatura de distribuição. A presença
-do CAT não significa que ele esteja assinado. O instalador deixa o driver disponível
-para a etapa administrativa explícita; não tenta carregar o kernel driver sem
-assinatura. Consulte o texto mostrado pelo próprio instalador em
+These are development artifacts without distribution signing. A CAT file's
+presence does not mean it is signed. The installer makes the driver available
+for an explicit administrative step; it does not try to load an unsigned kernel
+driver. See the text displayed by the installer in
 [INSTALLATION.txt](INSTALLATION.txt).
 
-O aplicativo usa `%APPDATA%\Babel\babel.toml`, não grava em Program Files e não
-inicia durante o setup. O app não habilita autostart por padrão. A desinstalação
-consulta `check-absent` do helper (somente leitura) antes de prosseguir: se o driver
-foi instalado, é preciso removê-lo com `uninstall.ps1` primeiro. Assim não remove
-um driver antes da confirmação do desinstalador nem apaga o helper necessário.
+The application uses `%APPDATA%\Babel\babel.toml`, does not write to Program Files,
+and does not start during setup. Autostart is disabled by default. Before
+uninstalling, the uninstaller calls the helper's read-only `check-absent`: if
+the driver is installed, remove it with `uninstall.ps1` first. This avoids
+removing a driver before uninstaller confirmation or deleting its required helper.
 
-Os motores locais acompanham `local-runtime/windows-x86_64` ou
-`local-runtime/windows-aarch64`: Whisper, llama.cpp, Piper, ONNX Runtime,
-dados eSpeak e DLLs de runtime C++ privadas. O usuário não instala Python,
-Ollama, Piper ou redistribuível VC++ separadamente. A primeira seleção pode
-baixar os pesos verificados pelo Babel; os binários já estão no instalador.
-O manifesto valida todos os hashes, executáveis e DLLs da arquitetura correta.
-Fontes correspondentes do processo GPL Piper/eSpeak e seus patches acompanham
-`sources/`, com licenças em `licenses/`.
+Local engines ship in `local-runtime/windows-x86_64` or
+`local-runtime/windows-aarch64`: Whisper, llama.cpp, Piper, ONNX Runtime, eSpeak
+data, and private C++ runtime DLLs. Users do not separately install Python,
+Ollama, Piper, or the VC++ redistributable. The first selection can download
+Babel-verified model weights; engine binaries are already in the installer.
+The manifest validates all hashes, executables, and DLL architectures.
+Corresponding source for the GPL Piper/eSpeak processes and their patches ships
+in `sources/`, with licenses in `licenses/`.
 
-O CI compila esses motores em runners nativos Windows x64 e ARM64 antes de
-montar os instaladores. Para reproduzir, execute
+Release builds compile these engines on native Windows x64 and ARM64 runners
+before assembling installers. To reproduce this, run
 `python scripts/build_local_runtime.py --output artifacts/local-runtime`
-num host da arquitetura desejada com Python 3.11+, Git, CMake 3.26+ e MSVC.
-São requisitos de desenvolvimento; o aplicativo instalado não precisa deles.
+on the desired architecture with Python 3.11+, Git, CMake 3.26+, and MSVC.
+These are development requirements, not installed-application dependencies.
 
-Testes portáveis de montagem/validação:
+Portable assembly/validation tests:
 
 ```sh
 python3 -m unittest discover -s packaging/windows -p 'test_*.py' -v
 ```
 
-O CI x64 usa `.github/scripts/test-windows-package.ps1` para instalar/remover o
-**aplicativo** em um runner descartável, comparar hashes do payload e executar
-`--version`. O script recusa execução fora do ambiente GitHub Actions e não
-instala o driver. O driver e o app ARM64 são inspecionados/compilados no host x64; os motores
-ARM64 são compilados e executam `--help` num runner Windows ARM64 nativo.
+The x64 release job uses `.github/scripts/test-windows-package.ps1` to install
+and remove the **application** in a disposable runner, compare payload hashes,
+and run `--version`. The script refuses to run outside GitHub Actions and does
+not install the driver. ARM64 application and driver binaries are inspected and
+compiled on x64; ARM64 inference engines compile and run `--help` on a native
+Windows ARM64 runner.

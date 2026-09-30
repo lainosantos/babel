@@ -1,68 +1,69 @@
-# Integrações MCP para comandos por voz
+# MCP integrations for voice commands
 
-O Babel pode conectar vários servidores MCP registrados nas configurações do agente. O reconhecedor local identifica o nome de ativação e a instrução; o decisor recebe somente o catálogo das integrações habilitadas. A execução confere novamente a ferramenta e seu JSON Schema no servidor antes de chamá-la. Texto devolvido por ferramentas é conteúdo, não uma autorização para executar instruções adicionais.
+Babel can connect to multiple MCP servers registered in the agent settings. The local recognizer identifies the wake name and instruction; the decision model receives only the catalog of enabled integrations. Before execution, Babel checks the tool and its JSON Schema against the server again. Text returned by tools is content, not authorization to execute additional instructions.
 
-Nenhuma integração é adicionada automaticamente. Escolha servidores e credenciais que correspondam às ações que deseja permitir ao agente. Desabilitar uma integração impede novas chamadas. A lista `allowed_tools` restringe as ferramentas de um servidor; vazia, permite todo o catálogo anunciado por esse servidor. A seleção pode afetar serviços externos: um servidor de arquivos, por exemplo, pode disponibilizar ferramentas de escrita além de leitura.
+No integration is added automatically. Choose servers and credentials that match the actions you want to allow the agent to perform. Disabling an integration prevents new calls. The `allowed_tools` list restricts a server's tools; an empty list allows the entire catalog advertised by that server. Your selection can affect external services: a file server, for example, may expose write tools as well as read tools.
 
-Whisper e Needle são os serviços locais de reconhecimento e decisão, separados
-dos servidores MCP deste guia. Seus endpoints padrão são `auto`: depois da
-instalação explícita, o Babel inicia os helpers em portas escolhidas pelo sistema
-operacional e mostra os endpoints efetivos no status de **Comandos**. A pasta
-dos serviços fica nessa página; vazia, usa a pasta absoluta do TOML carregado.
-Consulte [instalação e operação dos comandos de voz](voice-commands.md).
-Esse gerenciamento não instala, autentica nem seleciona integrações MCP.
+Whisper and Needle are the local recognition and decision services, separate
+from the MCP servers in this guide. Their default endpoints are `auto`: after
+explicit installation, Babel starts the helpers on ports chosen by the operating
+system and shows the effective endpoints in the **Commands** status. The services
+folder is configured on that page; when empty, it uses the absolute directory of
+the loaded TOML file.
+See [installing and operating voice commands](voice-commands.md).
+This management does not install, authenticate, or select MCP integrations.
 
-## Transportes
+## Transports
 
-| Transporte | Configuração | Autenticação | Observações |
+| Transport | Configuration | Authentication | Notes |
 |---|---|---|---|
-| `stdio` | Executável, argumentos separados, diretório opcional | Variáveis de ambiente, incluindo referências a segredos | Babel inicia o processo diretamente, sem montar um comando de shell |
-| `http` | URL completa do endpoint Streamable HTTP, geralmente `/mcp` | Sem autenticação, Bearer, cabeçalhos personalizados ou OAuth | HTTPS obrigatório; HTTP aceito para loopback (`localhost`/`127.0.0.1`) |
+| `stdio` | Executable, separate arguments, optional directory | Environment variables, including secret references | Babel starts the process directly, without building a shell command |
+| `http` | Full Streamable HTTP endpoint URL, usually `/mcp` | No authentication, Bearer, custom headers, or OAuth | HTTPS required; HTTP accepted for loopback (`localhost`/`127.0.0.1`) |
 
-O transporte SSE antigo, normalmente exposto em `/sse` com um endpoint separado para mensagens, não é implementado. Use o endpoint Streamable HTTP. Respostas SSE do próprio Streamable HTTP são suportadas.
+The legacy SSE transport, usually exposed at `/sse` with a separate message endpoint, is not implemented. Use the Streamable HTTP endpoint. SSE responses from Streamable HTTP itself are supported.
 
-O cliente usa o SDK Rust oficial `rmcp` 3.5.0 para negociação, `initialize`/`notifications/initialized`, sessões, correlação JSON-RPC e descoberta de ferramentas. A versão preferida de protocolo é `2025-11-25`, mantendo compatibilidade com o ciclo de inicialização amplamente usado. Recursos exclusivos do ciclo sem `initialize` de revisões mais recentes não são prometidos.
+The client uses the official Rust SDK `rmcp` 3.5.0 for negotiation, `initialize`/`notifications/initialized`, sessions, JSON-RPC correlation, and tool discovery. The preferred protocol version is `2025-11-25`, maintaining compatibility with the widely used initialization lifecycle. Features exclusive to the lifecycle without `initialize` in newer revisions are not promised.
 
-## Adicionar uma integração
+## Adding an integration
 
-1. Instale e configure o servidor MCP conforme a documentação dele, ou obtenha a URL remota.
-2. Adicione uma integração nas configurações do agente. O `id` é único e estável; o nome é somente para apresentação.
-3. Escolha o transporte e preencha seus parâmetros.
-4. Configure as referências de credenciais necessárias. Cadastre os valores na área de credenciais ou forneça variáveis de ambiente ao processo Babel.
-5. Se for OAuth, salve a integração e use a ação de conectar/autenticar para abrir o login no navegador.
-6. Teste a conexão. O teste inicializa o MCP e lista as ferramentas; não executa uma ferramenta de negócio.
-7. Restrinja `allowed_tools` quando quiser expor somente parte do catálogo ao agente.
+1. Install and configure the MCP server according to its documentation, or obtain its remote URL.
+2. Add an integration in the agent settings. The `id` is unique and stable; the name is only for display.
+3. Choose the transport and fill in its parameters.
+4. Configure the required credential references. Enter their values in the credentials section or provide environment variables to the Babel process.
+5. For OAuth, save the integration and use the connect/authenticate action to open browser login.
+6. Test the connection. The test initializes MCP and lists tools; it does not execute a business tool.
+7. Restrict `allowed_tools` when you want to expose only part of the catalog to the agent.
 
-Uma integração mal configurada retorna uma falha visível. Os erros da camada de transporte não reproduzem corpos HTTP, tokens, códigos de autorização ou a saída de erro de subprocessos.
+A misconfigured integration returns a visible failure. Transport errors do not reproduce HTTP bodies, tokens, authorization codes, or subprocess error output.
 
-## Exemplo local com stdio
+## Local stdio example
 
-Na interface, abra **Comandos → Integrações MCP → Adicionar integração** e
-selecione **Conexão → Processo local · stdio**. Preencha:
+In the interface, open **Commands → MCP integrations → Add integration** and
+select **Connection → Local process · stdio**. Fill in:
 
-- **Caminho do executável ou comando:** somente o executável do servidor, ou seu
-  runtime, como `node`, `python3` ou o caminho completo de `node.exe` no Windows.
-- **Argumentos:** um argumento por linha. Um caminho com espaços ocupa uma única
-  linha; não adicione aspas de shell ao redor dele.
-- **Diretório de trabalho:** opcional, usado como pasta de execução do processo.
-- **Valores públicos de ambiente:** uma entrada `NOME=valor` por linha. Para
-  chaves e tokens, use o mapa em **Referências secretas de ambiente (NOME=REFERÊNCIA)**.
+- **Executable path or command:** only the server executable or its runtime,
+  such as `node`, `python3`, or the full path to `node.exe` on Windows.
+- **Arguments:** one argument per line. A path with spaces occupies a single
+  line; do not surround it with shell quotes.
+- **Working directory:** optional; used as the process's execution folder.
+- **Public environment values:** one `NAME=value` entry per line. For keys and
+  tokens, use the map under **Secret environment references (NAME=REFERENCE)**.
 
-Salve os ajustes do agente e clique em **Descobrir ferramentas** para testar a conexão e listar as
-ferramentas. O Babel inicia o servidor local automaticamente ao usá-lo; stdio
-não requer URL nem porta. Essa opção está disponível em Linux, macOS e Windows.
+Save the agent settings and click **Discover tools** to test the connection and
+list tools. Babel starts the local server automatically when using it; stdio
+does not require a URL or port. This option is available on Linux, macOS, and Windows.
 
-Trecho de `babel.toml`; adapte os caminhos para o pacote MCP instalado. Executável e argumentos são campos separados; não escreva uma linha de shell em `command`.
+Excerpt from `babel.toml`; adapt the paths to the installed MCP package. Executable and arguments are separate fields; do not write a shell command line in `command`.
 
 ```toml
 [[agent.integrations]]
-id = "arquivos"
-name = "Arquivos de trabalho"
+id = "files"
+name = "Work files"
 enabled = true
 transport = "stdio"
 command = "/usr/bin/node"
-args = ["/caminho/servidor-mcp/dist/index.js", "/caminho/pasta-permitida"]
-cwd = "/caminho/servidor-mcp"
+args = ["/path/to/mcp-server/dist/index.js", "/path/to/allowed-folder"]
+cwd = "/path/to/mcp-server"
 auth = "none"
 timeout_secs = 30
 allowed_tools = ["list_directory", "read_text_file"]
@@ -71,133 +72,133 @@ allowed_tools = ["list_directory", "read_text_file"]
 LOG_LEVEL = "error"
 
 [agent.integrations.secret_env]
-SERVICE_API_KEY = "BABEL_ARQUIVOS_SERVICE_KEY"
+SERVICE_API_KEY = "BABEL_FILES_SERVICE_KEY"
 ```
 
-`secret_env` mapeia o nome recebido pelo servidor para o nome da credencial no Babel. O exemplo injeta o segredo de `BABEL_ARQUIVOS_SERVICE_KEY` como `SERVICE_API_KEY` no processo filho. `env` contém valores comuns, persistidos em texto no TOML; coloque segredos em `secret_env`.
+`secret_env` maps the name received by the server to the credential name in Babel. This example injects the `BABEL_FILES_SERVICE_KEY` secret as `SERVICE_API_KEY` in the child process. `env` contains ordinary values, persisted as text in TOML; place secrets in `secret_env`.
 
-No Windows, use um executável real, por exemplo o caminho completo de `node.exe` ou `python.exe`. Um shim `.cmd` de um gerenciador de pacotes pode não ser executável diretamente; prefira o runtime mais o arquivo JavaScript/Python instalado. Não é necessário usar `cmd.exe` ou PowerShell.
+On Windows, use a real executable, such as the full path to `node.exe` or `python.exe`. A package manager's `.cmd` shim may not be directly executable; prefer the runtime plus the installed JavaScript/Python file. Using `cmd.exe` or PowerShell is unnecessary.
 
-O processo recebe um conjunto pequeno de variáveis do sistema, incluindo caminhos do runtime, diretório pessoal e temporários, além das variáveis explicitamente configuradas. O ambiente inteiro do Babel, com eventuais chaves de outros provedores, não é herdado. O servidor roda com as permissões do usuário; o transporte não é uma sandbox. `stderr` é descartado para não expor segredos no painel/log. Para investigar erros do próprio servidor, execute-o separadamente com a configuração indicada pelo fornecedor.
+The process receives a small set of system variables, including runtime paths, the home directory, and temporary directories, plus explicitly configured variables. Babel's entire environment, potentially containing other providers' keys, is not inherited. The server runs with the user's permissions; the transport is not a sandbox. `stderr` is discarded to avoid exposing secrets in the dashboard/log. To investigate errors in the server itself, run it separately with the configuration specified by its vendor.
 
-Cada operação abre uma conexão e termina o subprocesso ao concluir. Servidores que guardam estado exclusivamente na memória do processo não mantêm esse estado entre comandos. O Babel não instala pacotes nem baixa executáveis ao adicionar uma integração; se você configurar um comando que faz isso, será comportamento desse comando.
+Each operation opens a connection and terminates the subprocess on completion. Servers that keep state exclusively in process memory do not retain that state between commands. Babel does not install packages or download executables when adding an integration; if you configure a command that does so, that is the command's behavior.
 
-## HTTP com Bearer
+## HTTP with Bearer authentication
 
 ```toml
 [[agent.integrations]]
-id = "servico"
-name = "Serviço remoto"
+id = "service"
+name = "Remote service"
 enabled = true
 transport = "http"
-url = "https://mcp.seu-servico.example/mcp"
+url = "https://mcp.your-service.example/mcp"
 auth = "bearer"
-token_env = "BABEL_MCP_SERVICO_TOKEN"
+token_env = "BABEL_MCP_SERVICE_TOKEN"
 timeout_secs = 30
 allowed_tools = []
 
 [agent.integrations.headers]
-x-tenant-id = "minha-organizacao"
+x-tenant-id = "my-organization"
 
 [agent.integrations.secret_headers]
-x-api-key = "BABEL_MCP_SERVICO_API_KEY"
+x-api-key = "BABEL_MCP_SERVICE_API_KEY"
 ```
 
-O campo `token_env` guarda o nome da credencial, não seu conteúdo. O valor é enviado em `Authorization: Bearer …` em cada requisição da conexão. Não inclua o prefixo `Bearer` no segredo.
+The `token_env` field stores the credential name, not its contents. The value is sent as `Authorization: Bearer …` in every request on the connection. Do not include the `Bearer` prefix in the secret.
 
-Cabeçalhos comuns são persistidos em `headers`. `secret_headers` mapeia o nome de um cabeçalho para uma credencial do Babel. Uma API que usa somente `x-api-key` pode usar `auth = "none"` e preencher `secret_headers`.
+Ordinary headers are persisted in `headers`. `secret_headers` maps a header name to a Babel credential. An API that uses only `x-api-key` can use `auth = "none"` and populate `secret_headers`.
 
-Cabeçalhos do transporte (`Host`, `Content-Length`, `Content-Type`, `Accept`, `Mcp-*`, entre outros), `Authorization`, `Cookie` e `Proxy-Authorization` são reservados e não podem ser sobrescritos pelos mapas. Para autorização Bearer, use o campo dedicado. Autenticação Basic, cookies de navegador, certificados de cliente/mTLS e proxy autenticado não têm campos próprios nesta versão.
+Transport headers (`Host`, `Content-Length`, `Content-Type`, `Accept`, `Mcp-*`, among others), `Authorization`, `Cookie`, and `Proxy-Authorization` are reserved and cannot be overridden by these maps. Use the dedicated field for Bearer authorization. Basic authentication, browser cookies, client certificates/mTLS, and authenticated proxies have no dedicated fields in this version.
 
-A URL MCP não aceita usuário/senha embutidos, fragmento ou query string; forneça tokens por credenciais. Redirecionamentos HTTP não são seguidos pela conexão MCP, evitando reenviar cabeçalhos para outra URL. Configure o endpoint final correto.
+The MCP URL does not accept embedded usernames/passwords, fragments, or query strings; provide tokens through credentials. The MCP connection does not follow HTTP redirects, preventing headers from being forwarded to another URL. Configure the correct final endpoint.
 
-Credenciais informadas no painel permanecem somente na memória do processo Babel; reiniciar o aplicativo exige fornecê-las novamente. Alternativamente, configure as variáveis de ambiente do usuário antes de abrir o Babel. Nunca coloque o valor do segredo no campo que solicita o nome da credencial.
+Credentials entered in the dashboard remain only in the Babel process's memory; restarting the application requires entering them again. Alternatively, configure the user's environment variables before opening Babel. Never put the secret value in a field that asks for the credential name.
 
-## OAuth: login no navegador
+## OAuth: browser login
 
-OAuth é implementado para servidores HTTP que publicam metadados de autorização. Inclui descoberta do recurso protegido, descoberta RFC 8414/OpenID Connect, PKCE S256, código de autorização, validação de `state`/`iss`, vínculo de recurso e renovação do token quando o servidor fornece um refresh token.
+OAuth is implemented for HTTP servers that publish authorization metadata. It includes protected resource discovery, RFC 8414/OpenID Connect discovery, PKCE S256, authorization code flow, `state`/`iss` validation, resource binding, and token renewal when the server supplies a refresh token.
 
 ```toml
 [[agent.integrations]]
-id = "conta"
-name = "Minha conta"
+id = "account"
+name = "My account"
 enabled = true
 transport = "http"
-url = "https://mcp.seu-servico.example/mcp"
+url = "https://mcp.your-service.example/mcp"
 auth = "oauth"
 timeout_secs = 60
 allowed_tools = []
 
 [agent.integrations.oauth]
-client_id = "id-do-cliente-registrado"
+client_id = "registered-client-id"
 client_secret_env = ""
 scopes = ["tools:read"]
 ```
 
-Os scopes variam por fornecedor; `tools:read` é ilustrativo. Copie os nomes exigidos pelo serviço. Se deixar a lista vazia, o SDK seleciona os scopes publicados pelo servidor. O SDK também pode solicitar `offline_access` quando anunciado, para permitir renovação.
+Scopes vary by provider; `tools:read` is illustrative. Copy the names required by the service. If you leave the list empty, the SDK selects the scopes published by the server. The SDK may also request `offline_access` when advertised, to allow renewal.
 
-- **Cliente já registrado:** informe `client_id`. Use o callback `http://127.0.0.1:<porta-real-do-painel>/api/agent/oauth/callback`, substituindo o marcador pela porta da execução atual, informada pelo Babel. Não suponha uma porta padrão. O registro do provedor precisa aceitar o callback usado na autorização; uma porta dinâmica pode exigir registro dinâmico ou suporte do provedor a portas variáveis de loopback.
-- **Cliente confidencial:** se o registro exige segredo, use `client_secret_env` para referenciar uma credencial já configurada. O segredo não vai para a URL de autorização.
-- **Registro dinâmico:** deixe `client_id` vazio. Funciona somente se o servidor anuncia e permite Dynamic Client Registration. Caso contrário, registre um cliente no fornecedor e preencha seu ID.
-- **Consentimento:** conectar abre o fluxo do fornecedor; o usuário faz login e concede as permissões no navegador. Adicionar a integração não autentica uma conta silenciosamente.
+- **Previously registered client:** enter `client_id`. Use the callback `http://127.0.0.1:<actual-dashboard-port>/api/agent/oauth/callback`, replacing the placeholder with the current instance's port reported by Babel. Do not assume a default port. The provider registration must accept the callback used during authorization; a dynamic port may require dynamic registration or provider support for variable loopback ports.
+- **Confidential client:** if registration requires a secret, use `client_secret_env` to reference an existing credential. The secret is not placed in the authorization URL.
+- **Dynamic registration:** leave `client_id` empty. This works only if the server advertises and allows Dynamic Client Registration. Otherwise, register a client with the provider and enter its ID.
+- **Consent:** connecting opens the provider's flow; the user signs in and grants permissions in the browser. Adding an integration does not silently authenticate an account.
 
-O login deve ser concluído em até dez minutos. O callback é de uso único e vinculado à configuração da integração. Alterar URL, scopes, credenciais, ferramentas permitidas ou outro campo invalida a autorização local; conecte novamente. Desconectar apaga tokens e logins pendentes da memória. A revogação no próprio fornecedor é uma operação separada.
+Login must finish within ten minutes. The callback is single-use and bound to the integration configuration. Changing the URL, scopes, credentials, allowed tools, or another field invalidates the local authorization; connect again. Disconnecting removes tokens and pending logins from memory. Revocation at the provider itself is a separate operation.
 
-Access token, refresh token e material PKCE não são gravados no TOML nem em arquivos pelo Babel. OAuth é válido durante a execução atual do aplicativo. Ao reiniciar, conecte novamente. O SDK mantém seu material de autenticação em memória; não há promessa de limpeza criptográfica de todas as cópias internas dessas dependências.
+Babel does not write access tokens, refresh tokens, or PKCE material to TOML or files. OAuth is valid during the current application run. After restarting, connect again. The SDK keeps its authentication material in memory; cryptographic erasure of every internal copy held by these dependencies is not promised.
 
-A renovação ocorre antes de abrir uma nova conexão MCP, quando necessária. Se o servidor revogar ou rejeitar o token antes de expirar, a operação falha e é necessário reconectar; o Babel não repete uma ferramenta automaticamente após um erro de autenticação. Permissões adicionais também exigem nova conexão com os scopes ajustados.
+Renewal occurs before opening a new MCP connection, when needed. If the server revokes or rejects the token before expiry, the operation fails and reconnection is required; Babel does not automatically repeat a tool after an authentication error. Additional permissions also require reconnecting with adjusted scopes.
 
-Requisitos e limites do OAuth:
+OAuth requirements and limits:
 
-- Metadados publicados e PKCE `S256` são obrigatórios; o Babel não tenta adivinhar endpoints `/authorize` ou `/token`.
-- Endpoints OAuth usam HTTPS. HTTP é permitido somente para integrações locais com endpoints de loopback, útil para servidores locais e testes.
-- O cliente oficial limita o tamanho das respostas OAuth e controla os redirecionamentos de descoberta. Tokens e cabeçalhos MCP não são enviados para a descoberta de metadados.
-- O callback precisa alcançar o mesmo computador que executa o Babel. Abrir a autorização em outro computador não conclui o callback local.
-- Não há suporte nesta interface a Client ID Metadata Documents, device-code flow, client-credentials grant, autenticação empresarial EMA/XAA, DPoP ou mTLS.
-- Serviços que exigem aprovação de aplicativo, organização, scopes especiais ou registro manual continuam exigindo esses passos no fornecedor. O Babel não contorna requisitos da conta.
+- Published metadata and PKCE `S256` are required; Babel does not guess `/authorize` or `/token` endpoints.
+- OAuth endpoints use HTTPS. HTTP is allowed only for local integrations with loopback endpoints, which is useful for local servers and tests.
+- The official client limits OAuth response sizes and controls discovery redirects. MCP tokens and headers are not sent during metadata discovery.
+- The callback must reach the same computer running Babel. Opening authorization on another computer does not complete the local callback.
+- This interface does not support Client ID Metadata Documents, device-code flow, client-credentials grants, enterprise EMA/XAA authentication, DPoP, or mTLS.
+- Services requiring application or organization approval, special scopes, or manual registration still require those provider-side steps. Babel does not bypass account requirements.
 
-## Limites de execução
+## Execution limits
 
-| Limite | Valor |
+| Limit | Value |
 |---|---:|
-| Integrações registradas | 32 |
-| Operações MCP/OAuth simultâneas por aplicativo | 4; novas tentativas recebem “ocupado”, sem fila ilimitada |
-| Logins OAuth pendentes simultâneos | 16 |
-| Prazo para concluir login | 10 minutos |
-| Timeout por operação, incluindo inicialização e descoberta | 1–300 segundos; padrão 30 |
-| Ferramentas anunciadas por servidor | 256 |
-| Páginas de `tools/list` | 16 |
-| JSON Schema de uma ferramenta | 64 KiB |
-| Total de schemas de um servidor | 512 KiB |
-| Argumentos de uma chamada | 64 KiB |
-| Linha stdio, corpo JSON HTTP ou corpo SSE de uma operação | 1 MiB |
-| Descrição de ferramenta entregue ao decisor | Até 4.096 caracteres |
+| Registered integrations | 32 |
+| Simultaneous MCP/OAuth operations per application | 4; new attempts receive “busy”, without an unbounded queue |
+| Simultaneous pending OAuth logins | 16 |
+| Login completion deadline | 10 minutes |
+| Operation timeout, including initialization and discovery | 1–300 seconds; default 30 |
+| Tools advertised per server | 256 |
+| `tools/list` pages | 16 |
+| Individual tool JSON Schema | 64 KiB |
+| Total schemas per server | 512 KiB |
+| Call arguments | 64 KiB |
+| stdio line, HTTP JSON body, or SSE body for an operation | 1 MiB |
+| Tool description delivered to the decision model | Up to 4,096 characters |
 
-O decisor pode impor limites menores ao catálogo agregado de vários servidores. Um servidor acima dos limites deve oferecer um catálogo mais estreito. A lista `allowed_tools` filtra o catálogo exposto ao agente, mas a resposta bruta do servidor ainda precisa respeitar os limites de transporte.
+The decision model may impose lower limits on the combined catalog from multiple servers. A server exceeding these limits must offer a narrower catalog. The `allowed_tools` list filters the catalog exposed to the agent, but the server's raw response must still respect transport limits.
 
-Argumentos devem ser objetos JSON válidos e corresponder ao schema anunciado. Referências de schema a arquivos ou URLs externas são rejeitadas; referências a fragmentos locais (`#/$defs/...`) funcionam. Isso impede que a validação de argumentos faça acesso a arquivos ou redes indicado por um servidor.
+Arguments must be valid JSON objects matching the advertised schema. Schema references to files or external URLs are rejected; local fragment references (`#/$defs/...`) work. This prevents argument validation from accessing files or networks specified by a server.
 
-Chamadas a ferramentas não são repetidas automaticamente em caso de timeout, cancelamento, expiração de sessão ou falha HTTP. Uma falha de rede depois do envio pode ocorrer depois de o serviço realizar a ação. Verifique o resultado no serviço antes de repetir uma operação que cria, envia, exclui ou altera dados.
+Tool calls are not automatically repeated after a timeout, cancellation, session expiry, or HTTP failure. A network failure after sending a request may occur after the service has performed the action. Check the result in the service before repeating an operation that creates, sends, deletes, or changes data.
 
-`isError: true` é tratado como falha da ferramenta mesmo quando o transporte respondeu com sucesso. Fluxos que exigem elicitation/sampling, entrada interativa adicional ou tarefas MCP em segundo plano são recusados nesta versão; o Babel não fornece respostas inventadas nem reenvia a chamada para tentar concluir esses fluxos.
+`isError: true` is treated as a tool failure even when the transport succeeds. Flows requiring elicitation/sampling, additional interactive input, or background MCP tasks are refused in this version; Babel neither invents responses nor resends the call to try to complete these flows.
 
-As filas e mensagens são limitadas; não há I/O MCP no callback de áudio. Cada operação fecha sua sessão e a próxima abre uma nova. A conexão HTTP não recupera a sessão nem refaz POSTs de ferramentas automaticamente.
+Queues and messages are bounded; no MCP I/O occurs in the audio callback. Each operation closes its session, and the next opens a new one. The HTTP connection does not recover sessions or automatically retry tool POSTs.
 
-## Diagnóstico
+## Troubleshooting
 
-- **Executável não inicia:** verifique caminho, permissão de execução, runtime, argumentos e diretório. Use o runtime real no Windows quando houver um `.cmd` intermediário.
-- **Credencial ausente:** o nome do campo deve apontar para uma credencial cadastrada ou variável de ambiente disponível ao processo Babel.
-- **Falha HTTP de inicialização:** confira endpoint Streamable HTTP, TLS e autenticação. Uma URL de página web ou de SSE legado não serve como endpoint MCP.
-- **OAuth não prepara o login:** confirme metadados publicados, suporte a PKCE S256 e registro do cliente. Um ID vazio requer registro dinâmico permitido pelo fornecedor.
-- **Callback recusado:** use o mesmo computador, confira a URI/porta registrada e inicie novo login após dez minutos, alterações de configuração ou callback já utilizado.
-- **Ferramenta indisponível:** revise `allowed_tools`, integração habilitada e catálogo atual. Ferramentas não anunciadas no servidor não podem ser chamadas só porque o modelo sugeriu o nome.
-- **Argumentos recusados:** verifique o schema que o servidor anuncia. O decisor precisa gerar os tipos e campos exigidos.
-- **Comando falhou após envio:** não presuma que nada ocorreu; consulte o serviço antes de repetir.
+- **Executable does not start:** check the path, execution permission, runtime, arguments, and directory. Use the real runtime on Windows when a `.cmd` wrapper is involved.
+- **Missing credential:** the field's name must point to a registered credential or an environment variable available to the Babel process.
+- **HTTP initialization failure:** check the Streamable HTTP endpoint, TLS, and authentication. A web page or legacy SSE URL is not an MCP endpoint.
+- **OAuth does not prepare login:** confirm published metadata, PKCE S256 support, and client registration. An empty ID requires dynamic registration allowed by the provider.
+- **Callback rejected:** use the same computer, check the registered URI/port, and start a new login after ten minutes, configuration changes, or an already-used callback.
+- **Tool unavailable:** review `allowed_tools`, the enabled integration, and the current catalog. Tools not advertised by the server cannot be called merely because the model suggested a name.
+- **Arguments rejected:** check the schema advertised by the server. The decision model must generate the required types and fields.
+- **Command failed after sending:** do not assume nothing happened; check the service before repeating it.
 
-## Validação desta implementação
+## Validation of this implementation
 
-Os testes usam servidores locais controlados. Cobrem inicialização e descoberta, autenticação Bearer e cabeçalho secreto, subprocesso stdio com segredo mapeado, respostas JSON/SSE, paginação e limites de tamanho, rejeição de schemas/argumentos inválidos, flag `isError`, cancelamento e ausência de repetição de chamadas com sessão expirada. O fixture OAuth exercita metadados, PKCE S256, estado, callback, renovação e invalidação de configuração.
+Tests use controlled local servers. They cover initialization and discovery, Bearer and secret-header authentication, stdio subprocesses with mapped secrets, JSON/SSE responses, pagination and size limits, rejection of invalid schemas/arguments, the `isError` flag, cancellation, and no repeated calls after session expiry. The OAuth fixture exercises metadata, PKCE S256, state, callback, renewal, and configuration invalidation.
 
-Esses testes não autenticam contas de usuários nem certificam todos os servidores MCP comerciais. A compatibilidade de um serviço depende do protocolo, autenticação, permissões e schemas que ele publica.
+These tests do not authenticate user accounts or certify every commercial MCP server. Service compatibility depends on the protocol, authentication, permissions, and schemas it publishes.
 
-Fontes primárias: [SDK Rust oficial](https://github.com/modelcontextprotocol/rust-sdk), [autorização no SDK](https://github.com/modelcontextprotocol/rust-sdk/blob/main/docs/OAUTH_SUPPORT.md), [transporte MCP 2025-11-25](https://modelcontextprotocol.io/specification/2025-11-25/basic/transports), [autorização MCP 2025-11-25](https://modelcontextprotocol.io/specification/2025-11-25/basic/authorization).
+Primary sources: [official Rust SDK](https://github.com/modelcontextprotocol/rust-sdk), [SDK authorization](https://github.com/modelcontextprotocol/rust-sdk/blob/main/docs/OAUTH_SUPPORT.md), [MCP 2025-11-25 transport](https://modelcontextprotocol.io/specification/2025-11-25/basic/transports), [MCP 2025-11-25 authorization](https://modelcontextprotocol.io/specification/2025-11-25/basic/authorization).

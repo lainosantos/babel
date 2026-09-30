@@ -130,7 +130,7 @@ async fn stop_backend<F: Future<Output = Result<()>> + Unpin>(
         // A stuck OS driver is an explicit fatal shutdown error, not overlapping workers.
         let _ = tokio::time::timeout(Duration::from_secs(2), request)
             .await
-            .context("O dispositivo anterior não encerrou a tempo para a troca")?;
+            .context("The previous device did not stop in time for the switch")?;
     }
     Ok(())
 }
@@ -263,7 +263,7 @@ async fn capture_with(
                 }
                 result = &mut request => {
                     finished = true;
-                    break End::Failed(result.err().unwrap_or_else(|| anyhow!("A captura do dispositivo encerrou inesperadamente")));
+                    break End::Failed(result.err().unwrap_or_else(|| anyhow!("Device capture ended unexpectedly")));
                 }
                 frame = incoming.recv(), if frame_channel_open => {
                     let Some(frame) = frame else { frame_channel_open = false; continue; };
@@ -288,13 +288,13 @@ async fn capture_with(
         match end {
             End::Cancelled => return Ok(()),
             End::Disconnected if cancel.is_cancelled() => return Ok(()),
-            End::Disconnected => bail!("Consumidor da captura encerrou inesperadamente"),
+            End::Disconnected => bail!("Capture consumer ended unexpectedly"),
             End::Changed => {
                 selected = devices.borrow_and_update().clone();
             }
             End::Failed(error) => {
                 tracing::warn!(
-                    "Captura indisponível, aguardando reconexão ou seleção de dispositivo: {error:#}"
+                    "Capture unavailable, waiting for reconnection or device selection: {error:#}"
                 );
                 capture_error(&stats, Some(error_text(&error)));
                 // Keep `output` owned here. A failed microphone must not close the
@@ -305,7 +305,7 @@ async fn capture_with(
                     tokio::select! {
                         biased;
                         _ = cancel.cancelled() => return Ok(()),
-                        _ = output.closed() => bail!("Consumidor da captura encerrou inesperadamente"),
+                        _ = output.closed() => bail!("Capture consumer ended unexpectedly"),
                         changed = devices.changed(), if watch_open => {
                             if changed.is_ok() { selected = devices.borrow_and_update().clone(); break; }
                             watch_open = false;
@@ -391,10 +391,10 @@ async fn playback_with(
                 }
                 result = &mut request => {
                     finished = true;
-                    break End::Failed(result.err().unwrap_or_else(|| anyhow!("A reprodução do dispositivo encerrou inesperadamente")));
+                    break End::Failed(result.err().unwrap_or_else(|| anyhow!("Device playback ended unexpectedly")));
                 }
                 permit = commands.reserve(), if pending.is_some() => {
-                    let Ok(permit) = permit else { break End::Failed(anyhow!("O dispositivo encerrou a fila de reprodução")); };
+                    let Ok(permit) = permit else { break End::Failed(anyhow!("The device closed the playback queue")); };
                     let command = pending.take().expect("guarded pending command");
                     if is_current(&command, &stats) { permit.send(command); } else { discard_audio(command, &stats); }
                 }
@@ -410,7 +410,7 @@ async fn playback_with(
         match end {
             End::Cancelled => return Ok(()),
             End::Disconnected if cancel.is_cancelled() => return Ok(()),
-            End::Disconnected => bail!("Fonte da reprodução encerrou inesperadamente"),
+            End::Disconnected => bail!("Playback source ended unexpectedly"),
             End::Changed => {
                 invalidate_playback(&mut input, pending, &stats);
                 selected = devices.borrow_and_update().clone();
@@ -418,7 +418,7 @@ async fn playback_with(
             End::Failed(error) => {
                 invalidate_playback(&mut input, pending, &stats);
                 tracing::warn!(
-                    "Saída indisponível, aguardando reconexão ou seleção de dispositivo: {error:#}"
+                    "Output unavailable, waiting for reconnection or device selection: {error:#}"
                 );
                 playback_error(&stats, Some(error_text(&error)));
                 let reconnect = tokio::time::sleep(RECONNECT_DELAY);
@@ -440,7 +440,7 @@ async fn playback_with(
                             break;
                         }
                         command = input.recv() => {
-                            let Some(command) = command else { bail!("Fonte da reprodução encerrou inesperadamente"); };
+                            let Some(command) = command else { bail!("Playback source ended unexpectedly"); };
                             discard_audio(command, &stats);
                         }
                     }

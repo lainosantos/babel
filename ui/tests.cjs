@@ -92,7 +92,7 @@ async function page(t, options = {}) {
     const body = options.body ? JSON.parse(options.body) : undefined;
     calls.push({ path: parsed.pathname, options, body });
     assert.equal(options.headers.Authorization, `Bearer ${'a'.repeat(64)}`);
-    if (options.headers['If-Match'] !== undefined && options.headers['If-Match'] !== `"${revision}"`) return new Response(JSON.stringify({ error: 'A configuração mudou. Recarregue os ajustes.' }), { status: 412, headers: { 'Content-Type': 'application/json' } });
+    if (options.headers['If-Match'] !== undefined && options.headers['If-Match'] !== `"${revision}"`) return new Response(JSON.stringify({ error: 'The configuration changed. Reload settings.' }), { status: 412, headers: { 'Content-Type': 'application/json' } });
     let value = { ok: true };
     if (parsed.pathname === '/api/interface') { if (options.method === 'PUT') { config.interface.language = body.language; revision++; } value = interfaceMetadata(); }
     else if (parsed.pathname === '/api/platform') { if (platformFailure) return new Response(JSON.stringify({error:'Host metadata unavailable'}), {status:503,headers:{'Content-Type':'application/json'}}); value = platform; }
@@ -111,7 +111,7 @@ async function page(t, options = {}) {
       const route = name => ({ ...metrics, state: running && config[name].enabled ? 'streaming' : routingActive || running ? 'passthrough' : 'stopped', ...routeStatuses[name] });
       value = { ...historySession, history: audioHistory, local_runtime: localRuntime, running, routing_active: routingActive, routing_error: routingError, config_revision: revision, session_name: sessionName, session_id: sessionId, microphone: route('microphone'), speaker: route('speaker'), last_error: null };
     }
-    else if (parsed.pathname === '/api/start') { if (startRequest) { const response = await startRequest(); if (response instanceof Response) return response; } running = true; sessionName = body?.name || 'Sessão automática'; sessionId = 'fixture-session-id'; }
+    else if (parsed.pathname === '/api/start') { if (startRequest) { const response = await startRequest(); if (response instanceof Response) return response; } running = true; sessionName = body?.name || 'Automatic session'; sessionId = 'fixture-session-id'; }
     else if (parsed.pathname === '/api/stop') running = false;
     else if (parsed.pathname === '/api/autostart') { if (options.method === 'POST') autostart = body.enabled; value = { ...autostartMetadata, enabled: autostart, supported: true, description: autostart ? 'Início automático ativado; tradução parada.' : 'Início automático desativado.' }; }
     else if (parsed.pathname === '/api/credentials' && options.method === 'GET') value = { configured: credentials.has(parsed.searchParams.get('api_key_env')) };
@@ -1039,7 +1039,7 @@ test('system interface locale comes from the server with English fallback, indep
   assert.equal(p.byId('microphone-target_language').value, 'en-US');
   assert.equal(p.byId('microphone-prompt').placeholder, 'e.g. Use natural language and preserve technical terms.');
   assert.equal(p.doc.querySelector('.brand').getAttribute('aria-label'), 'Babel, home');
-  assert.equal(p.doc.querySelector('a[href="/help/configuration"]').hreflang, 'pt');
+  assert.equal(p.doc.querySelector('a[href="/help/configuration"]').hreflang, 'en');
   assert.equal(p.calls.filter(call => call.path === '/api/interface' && call.options.method === 'PUT').length, 0);
   assert.equal(p.config().interface.language, 'system', 'locale detection must not save an explicit language');
 });

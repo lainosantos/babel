@@ -149,10 +149,10 @@ speaker = true
 directory = "recordings"
 
 [files]
-# Defina uma base absoluta; escolha e adapte uma das opções abaixo.
-# babel init gera HOME/Babel (Linux/macOS) ou USERPROFILE\Babel (Windows).
-# Sem este campo, um TOML existente é legado: ao carregar, Babel fixa a pasta
-# do próprio arquivo de configuração como base e salva o caminho absoluto.
+# Set an absolute base folder; choose and adapt one of the examples below.
+# babel init uses HOME/Babel (Linux/macOS) or USERPROFILE\Babel (Windows).
+# Existing TOML files without this field are migrated on load: Babel uses the
+# configuration file’s directory as the base and saves its absolute path.
 # base_path = '/home/ana/Babel'
 # base_path = '/Users/ana/Babel'
 # base_path = 'C:\Users\Ana\Babel'

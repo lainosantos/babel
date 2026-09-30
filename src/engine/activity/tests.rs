@@ -257,7 +257,7 @@ async fn reactivation_waits_for_previous_devices_to_close() {
         .unwrap()
         .unwrap()
         .unwrap_err();
-    assert!(error.to_string().contains("Monitor"));
+    assert!(error.to_string().contains("monitor"));
     closing.recv().await.unwrap();
 }
 

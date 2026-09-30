@@ -15,7 +15,7 @@ fn validate_name(name: &str) -> Result<()> {
         !name.is_empty()
             && name.len() <= 128
             && name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_'),
-        "Nome da credencial inválido"
+        "Invalid credential name"
     );
     Ok(())
 }
@@ -24,7 +24,7 @@ pub fn set(env: &str, key: String) -> Result<()> {
     validate_name(env)?;
     ensure!(
         !key.trim().is_empty() && key.len() <= 4096 && !key.contains(['\n', '\r', '\0']),
-        "Chave inválida"
+        "Invalid key"
     );
     keys()
         .lock()
@@ -44,10 +44,10 @@ pub fn get(env: &str) -> Result<Zeroizing<String>> {
     }
     let value = Zeroizing::new(std::env::var(env).map_err(|_| {
         anyhow::anyhow!(
-            "Credencial {env} ausente; configure a chave no painel ou na variável de ambiente"
+            "Credential {env} is missing; set the key in the dashboard or environment variable"
         )
     })?);
-    ensure!(!value.trim().is_empty(), "Credencial {env} está vazia");
+    ensure!(!value.trim().is_empty(), "Credential {env} is empty");
     Ok(value)
 }
 pub fn configured(env: &str) -> bool {

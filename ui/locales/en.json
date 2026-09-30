@@ -321,7 +321,7 @@
   "interface.using": "Using {language}. This only changes the interface.",
   "interface.saved": "Interface language saved.",
   "interface.unavailable": "Could not load the interface language: {error}",
-  "help.portuguese": "Documentation in Portuguese",
+  "help.documentation": "Documentation in English",
   "error.http": "The operation failed (HTTP {status}).",
   "device.virtual": "{name} · virtual",
   "device.unavailable": "{name} · unavailable",

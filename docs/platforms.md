@@ -1,327 +1,329 @@
-# Dispositivos virtuais e roteamento por sistema
+# Virtual devices and routing by operating system
 
-O processo de tradução é Rust em espaço de usuário. No Linux, o Babel cria os
-dispositivos selecionáveis por meio do servidor de áudio existente. No macOS e
-Windows, o backend usa CoreAudio/WASAPI via CPAL e se conecta aos dois percursos
-do **driver nativo Babel**. O código-fonte e os scripts de compilação estão em
-`native/macos` e `native/windows`; BlackHole e VB-CABLE não são dependências desses
-drivers. **Os pacotes de distribuição assinados e a validação dos drivers em
-hardware macOS/Windows ainda estão pendentes.** Consulte o
-[guia dos drivers nativos](native-drivers.md) para compilação e instalação explícita.
+The translation process runs in Rust in user space. On Linux, Babel creates
+selectable devices through the existing audio server. On macOS and Windows,
+the backend uses CoreAudio/WASAPI through CPAL and connects to the two paths
+provided by the **native Babel driver**. Source and build scripts live in
+`native/macos` and `native/windows`; BlackHole and VB-CABLE are not dependencies
+of these drivers. **Signed distribution packages and driver validation on real
+macOS/Windows hardware are still pending.** See the
+[native driver guide](native-drivers.md) for building and explicit installation.
 
-O Babel identifica o sistema operacional em que seu processo está executando.
-O painel e a bandeja mostram esse sistema, independentemente do navegador usado
-para abrir o painel. A identificação não usa o user-agent nem a preferência de
-idioma. O painel mostra as instruções, nomes de dispositivos e ações disponíveis
-para esse sistema: criação e remoção pelo Babel no Linux; orientação para instalar
-o pacote Babel e selecionar seus dispositivos no macOS e Windows. **Atualizar dispositivos** está disponível
-nos três sistemas.
+Babel identifies the operating system running its process. The dashboard and
+tray use that host information regardless of the browser opening the dashboard.
+Detection does not rely on the user agent or language preference. The dashboard
+shows instructions, device names, and actions for that system: creating and
+removing devices on Linux, or installing the Babel package and selecting its
+devices on macOS and Windows. **Refresh devices** is available on all three.
 
-A ajuda de dispositivos aberta pelo painel em `/help/platforms` contém apenas
-as instruções do sistema atual. A versão completa
-fica em `/help/platforms/all` e neste documento. O guia de compilação e pacotes
-dos drivers próprios abre em `/help/native-drivers`. Isso permite consultar outros
-sistemas de forma explícita, sem misturar seus passos na configuração atual.
+The device help opened at `/help/platforms` contains only instructions for the
+current system. The full version is available at `/help/platforms/all` and in
+this document. The native driver build and packaging guide opens at
+`/help/native-drivers`. This lets users consult another system explicitly without
+mixing its setup steps into their current configuration.
 
-Os dois percursos precisam ser independentes:
+The two paths must remain independent:
 
 ```text
-Microfone físico → captura Babel → tradução → cabo M → microfone da chamada
-Saída da chamada → cabo S → captura Babel → tradução → fone/alto-falante físico
+Physical microphone → Babel capture → translation → cable M → call microphone
+Call output → cable S → Babel capture → translation → physical headphones/speaker
 ```
 
-Selecione dispositivos físicos explícitos no Babel antes de iniciar. Não use o
-mesmo cabo nas duas direções: isso pode alimentar novamente a tradução com sua
-própria saída. Fones reduzem o retorno acústico entre o alto-falante e o mic real.
-O Babel não muda os dispositivos padrão globais do sistema.
+Select explicit physical devices in Babel before starting. Do not use the same
+cable in both directions: that can feed translated output back into translation.
+Headphones reduce acoustic feedback between speakers and the real microphone.
+Babel does not change the system's global default devices.
 
-Os comandos de voz possuem um painel de estados que funciona mesmo com as
-configurações fechadas. Ele usa uma janela nativa discreta, sem tomar foco, em
-Windows, macOS e Linux com X11/XWayland. Wayland sem XWayland e falhas de abertura
-usam as notificações do sistema. **Mostrar notificações no desktop**, em Comandos,
-controla esse retorno; nenhuma notificação ativa captura ou executa ferramentas.
-O helper gráfico acompanha os pacotes e inicia sob demanda. Consulte
-[retorno visual dos comandos](voice-commands.md#retorno-visual-dos-comandos) para
-estados, movimento reduzido, privacidade e limites por desktop.
+Voice commands have a status overlay that works even with settings closed. It
+uses a discreet native window without taking focus on Windows, macOS, and Linux
+with X11/XWayland. Wayland without XWayland and window creation failures fall
+back to system notifications. **Show desktop notifications**, in Commands,
+controls this feedback; notifications never activate capture or execute tools.
+The graphical helper ships with the packages and starts on demand. See
+[command visual feedback](voice-commands.md#visual-command-feedback) for states,
+reduced motion, privacy, and desktop limitations.
 
-## Linux: PipeWire com pipewire-pulse ou PulseAudio
+## Linux: PipeWire with pipewire-pulse or PulseAudio
 
-Dependências de execução: `pactl`, `parec` e `pacat`, normalmente fornecidos por
-`pulseaudio-utils` (Debian/Ubuntu) ou pelo pacote de ferramentas PulseAudio da
-distribuição. O servidor precisa estar acessível na sessão do usuário; não execute
-o Babel com `sudo`. ALSA puro sem servidor PulseAudio/pipewire-pulse não é suficiente
-para este backend.
+<a id="linux"></a>
 
-A bandeja Linux usa StatusNotifier/AppIndicator. Se o serviço do desktop estiver
-ausente durante o login ou bloqueio da tela, o Babel mantém painel e áudio
-independentes da bandeja e tenta registrá-la novamente a cada três segundos.
-O ícone aparece quando o desktop disponibiliza esse suporte, sem reiniciar o
-Babel. Em GNOME, o suporte AppIndicator precisa estar instalado e habilitado.
-O programa não desbloqueia a tela nem altera extensões automaticamente.
+Runtime dependencies: `pactl`, `parec`, and `pacat`, usually provided by
+`pulseaudio-utils` on Debian/Ubuntu or the distribution's PulseAudio tools
+package. The server must be accessible in the user's session; do not run Babel
+with `sudo`. Plain ALSA without PulseAudio/pipewire-pulse is insufficient for
+this backend.
 
-A ação **criar dispositivos virtuais** carrega módulos do servidor em execução:
+The Linux tray uses StatusNotifier/AppIndicator. If the desktop service is
+unavailable during login or screen lock, Babel keeps the dashboard and audio
+independent of the tray and retries registration every three seconds. The icon
+appears when desktop support becomes available, without restarting Babel. GNOME
+requires installed and enabled AppIndicator support. Babel does not unlock the
+screen or change extensions automatically.
 
-| ID | Tipo | Uso |
+The **create virtual devices** action loads modules into the running server:
+
+| ID | Type | Use |
 |---|---|---|
-| `babel_microphone` | entrada selecionável, “Babel_Microphone” | Microfone no Zoom/Meet/Discord/etc. |
-| `babel_mic_bus` | saída interna, “Babel_Microphone_Bus” | Destino de reprodução da rota de microfone do Babel |
-| `babel_speaker` | saída selecionável, “Babel_Speaker” | Alto-falante no aplicativo da chamada |
-| `babel_speaker.monitor` | entrada de monitor | Origem de captura da rota de saída do Babel |
+| `babel_microphone` | Selectable input, “Babel_Microphone” | Microphone in Zoom/Meet/Discord/etc. |
+| `babel_mic_bus` | Internal output, “Babel_Microphone_Bus” | Playback destination for Babel's microphone route |
+| `babel_speaker` | Selectable output, “Babel_Speaker” | Speaker in the call application |
+| `babel_speaker.monitor` | Monitor input | Capture source for Babel's output route |
 
-O `babel_mic_bus` é um `module-null-sink` mono; `babel_microphone` é um
-`module-remap-source` ligado ao monitor desse sink. O `babel_speaker` é outro
-`module-null-sink`, estéreo. A captura entregue à IA é mono. O servidor faz a
-conversão entre as taxas dos dispositivos e os fluxos PCM16 de cada rota.
+`babel_mic_bus` is a mono `module-null-sink`; `babel_microphone` is a
+`module-remap-source` connected to that sink's monitor. `babel_speaker` is a
+separate stereo `module-null-sink`. Original routing uses float PCM at the
+selected route format. Audio copies sent for speech processing are converted
+separately to the model's required format, including mono where needed.
 
-A criação é idempotente e recupera módulos parcialmente criados. Um marcador de
-propriedade identifica os módulos do Babel; a remoção valida novamente o marcador,
-tipo e nome antes de descarregar cada módulo. Dispositivos homônimos de terceiros
-causam um erro, em vez de serem substituídos. Os módulos são da sessão atual:
-depois de reiniciar o servidor de áudio, crie-os novamente. Encerrar uma tradução
-não remove os dispositivos, para não quebrar a seleção da aplicação de chamada.
+Creation is idempotent and recovers partially created modules. An ownership
+marker identifies Babel's modules; removal revalidates the marker, type, and
+name before unloading each module. Third-party devices with the same names
+cause an error instead of being replaced. Modules belong to the current audio
+server session: recreate them after restarting the server. Ending translation
+does not remove devices or break the call application's device selection.
 
-Se não aparecerem imediatamente no navegador/aplicativo, atualize a lista de
-dispositivos ou reabra suas configurações de áudio. Escolha a saída virtual no
-aplicativo específico. Aplicativos que só aceitam a saída padrão exigem a escolha
-manual do usuário no sistema.
+If devices do not appear immediately in a browser or application, refresh its
+device list or reopen its audio settings. Select the virtual output in the
+specific application. Applications that only accept the default output require
+the user to select it manually in the system.
 
-Escolher **Babel_Microphone como microfone padrão do sistema** abre a rota
-do microfone e permite comandos de voz habilitados, mesmo sem um aplicativo
-capturando áudio. Uma captura explícita de outro aplicativo em `babel_microphone`
-também abre essa rota. Para pausá-la, escolha o microfone físico como padrão e
-encerre qualquer captura explícita do Babel nos aplicativos.
+Choosing **Babel_Microphone as the system's default microphone** opens the
+microphone route and enables configured voice commands even when no application
+is capturing audio. An explicit capture by another application on
+`babel_microphone` also opens the route. To pause it, choose the physical
+microphone as the default and stop any explicit Babel captures in applications.
 
-A saída só abre quando um aplicativo reproduz em `babel_speaker`; escolher a
-saída como padrão sem reproduzir áudio não basta. Trocar a saída do aplicativo
-para o alto-falante real fecha essa rota; o microfone continua independente.
-Rotas sem essas condições mostram **Roteamento inativo**. Voltar a ativá-las
-retoma o áudio sem encerrar a sessão nem criar novos arquivos. Mudar apenas
-o padrão do sistema não desativa aplicativos que escolheram explicitamente Babel.
+The output opens only while an application plays to `babel_speaker`; selecting
+it as the default without playing audio is insufficient. Switching the
+application's output to the real speaker closes that route; the microphone
+remains independent. Routes without these conditions show **Routing inactive**.
+Reactivating them resumes audio without ending the session or creating new files.
+Changing only the system default does not deactivate applications that explicitly
+selected Babel.
 
-Em PipeWire, os streams do Babel usam `node.dont-move`, `node.dont-reconnect` e
-`node.dont-fallback` para evitar que uma troca de padrão os desvie para outro
-dispositivo. A seleção do físico pela bandeja continua funcionando: o Babel
-fecha o stream anterior e abre outro no destino escolhido. Em PulseAudio puro,
-o monitor detecta desvio do destino e suspende a rota para reabri-la corretamente;
-as propriedades específicas do PipeWire não são uma garantia no PulseAudio.
-Se o servidor ficar inacessível, as rotas são suspensas e o erro aparece no painel.
+On PipeWire, Babel streams use `node.dont-move`, `node.dont-reconnect`, and
+`node.dont-fallback` to prevent a default-device change from redirecting them.
+Selecting a physical device from the tray still works: Babel closes the previous
+stream and opens another at the chosen destination. On plain PulseAudio, the
+monitor detects destination drift and suspends the route to reopen it correctly;
+PipeWire-specific properties provide no guarantee on PulseAudio. If the server
+becomes unreachable, routes suspend and the dashboard displays the error.
 
-Referências oficiais: [módulos PulseAudio](https://wiki.freedesktop.org/www/Software/PulseAudio/Documentation/User/Modules/),
-[null sink no PipeWire](https://docs.pipewire.org/page_pulse_module_null_sink.html),
-[remap source no PipeWire](https://docs.pipewire.org/page_pulse_module_remap_source.html).
-As propriedades de vínculo estão descritas na
-[política oficial do WirePlumber](https://pipewire.pages.freedesktop.org/wireplumber/policies/linking.html).
+Official references: [PulseAudio modules](https://wiki.freedesktop.org/www/Software/PulseAudio/Documentation/User/Modules/),
+[PipeWire null sink](https://docs.pipewire.org/page_pulse_module_null_sink.html),
+and [PipeWire remap source](https://docs.pipewire.org/page_pulse_module_remap_source.html).
+Linking properties are described in the
+[official WirePlumber policy](https://pipewire.pages.freedesktop.org/wireplumber/policies/linking.html).
 
-## macOS: driver Babel com dois dispositivos duplex
+## macOS: Babel driver with two duplex devices
 
-O pacote **BabelAudio.pkg** instala o AudioServerPlugIn próprio, com dois
-percursos separados: **Babel Microphone** e **Babel Speaker**. Cada dispositivo
-tem um lado de entrada e um de saída. O código e as instruções de compilação
-ficam em [native/macos](../native/macos/README.md); a distribuição usa
-`drivers/macos/BabelAudio.pkg` ao lado do aplicativo. Há código-fonte e build,
-mas não há um pacote assinado e validado em hardware disponibilizado por este
-repositório neste momento. Consulte [preparação dos drivers](native-drivers.md).
+<a id="macos"></a>
 
-O monitor de uso do Babel exige **macOS 14.2 ou posterior**. Instale o pacote
-explicitamente e siga a autorização do sistema e as instruções de reinício do
-pacote. O painel não executa instaladores nem solicita elevação. Os dispositivos
-aparecem nas configurações de som e em Configuração de Áudio e MIDI; não são
-aplicativos na pasta Aplicativos. Use **Atualizar dispositivos** após instalar.
+**BabelAudio.pkg** installs Babel's AudioServerPlugIn with two separate paths:
+**Babel Microphone** and **Babel Speaker**. Each device has an input and an output
+side. Source and build instructions are in
+[native/macos](../native/macos/README.md); the distribution places
+`drivers/macos/BabelAudio.pkg` beside the application. Source and a build path
+are available, but this repository does not currently provide a signed package
+validated on hardware. See [driver preparation](native-drivers.md).
 
-Autorize o microfone para o aplicativo/terminal que executa o Babel em
-Configurações do Sistema → Privacidade e Segurança → Microfone. A disponibilidade
-de captura depende dessa autorização. Reabra o aplicativo se o macOS solicitar.
+Babel's usage monitor requires **macOS 14.2 or later**. Install the package
+explicitly and follow the system authorization and package restart instructions.
+The dashboard does not run installers or request elevation. Devices appear in
+Sound settings and Audio MIDI Setup, not as applications in the Applications
+folder. Use **Refresh devices** after installation.
 
-| Campo/aplicativo | Dispositivo |
+Authorize microphone access for the application or terminal running Babel under
+System Settings → Privacy & Security → Microphone. Capture availability depends
+on that permission. Reopen the application if macOS requests it.
+
+| Field/application | Device |
 |---|---|
-| Babel, captura do microfone | seu microfone físico |
-| Babel, reprodução do microfone traduzido | saída **Babel Microphone** |
-| Aplicativo da chamada, microfone | entrada **Babel Microphone** |
-| Aplicativo da chamada, alto-falante | saída **Babel Speaker** |
-| Babel, captura da saída para tradução | entrada **Babel Speaker** |
-| Babel, reprodução da saída traduzida | seu fone/alto-falante físico |
+| Babel microphone capture | Your physical microphone |
+| Babel translated microphone playback | **Babel Microphone** output |
+| Call application microphone | **Babel Microphone** input |
+| Call application speaker | **Babel Speaker** output |
+| Babel output capture for translation | **Babel Speaker** input |
+| Babel translated output playback | Your physical headphones/speaker |
 
-Os UIDs fixos são `org.babel.audio.microphone.v1` e
-`org.babel.audio.speaker.v1`. A seleção usa o UID do dispositivo e a direção;
-renomear uma descrição visível não cria outro cabo. Use os IDs mostrados pela
-lista do Babel. Os dispositivos próprios oferecem estéreo a 48 kHz; o backend
-converte para o formato do percurso de tradução. Não é necessário criar um
-dispositivo agregado ou Multi-Output.
+Fixed UIDs are `org.babel.audio.microphone.v1` and
+`org.babel.audio.speaker.v1`. Selection uses device UID and direction; renaming
+a visible description does not create another cable. Use the IDs listed by
+Babel. The native devices offer stereo at 48 kHz; speech processing converts a
+separate copy to the translation format. No Aggregate or Multi-Output device
+is required.
 
-O monitor CoreAudio consulta processos externos que usam o **UID selecionado**,
-distinguindo captura e reprodução e excluindo o próprio Babel. Escolher Babel
-Microphone como entrada padrão do macOS abre a rota do microfone físico e
-permite comandos de voz habilitados, mesmo sem captura por outro aplicativo.
-Uma captura explícita de Babel Microphone também abre essa rota. Escolher o
-microfone físico como padrão só a fecha se nenhum aplicativo ainda usa Babel.
+The CoreAudio monitor queries external processes using the **selected UID**,
+distinguishes capture from playback, and excludes Babel itself. Choosing Babel
+Microphone as the default macOS input opens the physical microphone route and
+enables configured voice commands even without another application's capture.
+Explicit capture of Babel Microphone also opens the route. Selecting the
+physical microphone as default closes it only if no application still uses Babel.
 
-Reproduzir em Babel Speaker abre a rota para os fones; apenas escolhê-lo como
-saída padrão não basta. Quando a condição de atividade deixa de existir, a rota
-mostra **Roteamento inativo**, fecha seus streams e descarta o áudio pendente.
-A outra direção e os arquivos da sessão continuam.
+Playback to Babel Speaker opens the route to the headphones; merely selecting
+it as default output is insufficient. When activity ends, the route shows
+**Routing inactive**, closes its streams, and discards queued audio. The other
+direction and session files continue.
 
-Selecione os dispositivos diretamente nos aplicativos: o monitor não expande
-automaticamente Aggregate/Multi-Output. Sistemas anteriores a 14.2, APIs
-indisponíveis e erros de consulta mantêm as rotas afetadas fechadas com diagnóstico.
-A consulta de processos é periódica, portanto a suspensão não é instantânea.
-A compilação e os testes do núcleo do driver não substituem a validação em uma
-máquina macOS real, inclusive das permissões e do uso por aplicativos de chamada.
+Select devices directly in applications: the monitor does not automatically
+expand Aggregate/Multi-Output devices. Systems older than 14.2, unavailable APIs,
+and query errors keep affected routes closed with a diagnostic. Process queries
+are periodic, so suspension is not instantaneous. Compilation and driver core
+tests do not replace validation on a real Mac, including permissions and use
+by call applications.
 
-A remoção do driver Babel segue o `uninstall.sh` do pacote, acionado explicitamente
-com a autorização necessária. `babel setup` e `babel uninstall` indicam o pacote
-ou helper local quando encontrado; não executam esses arquivos nem afirmam ter
-instalado/removido dispositivos.
+Babel driver removal uses the package's `uninstall.sh`, explicitly invoked with
+the required authorization. `babel setup` and `babel uninstall` identify the
+local package or helper when found; they neither execute those files nor claim
+to have installed or removed devices.
 
-**Alternativa opcional:** duas instalações independentes de BlackHole, por exemplo
-2ch e 16ch, continuam compatíveis. Nesse caso, substitua Babel Microphone pelo
-BlackHole 2ch e Babel Speaker pelo BlackHole 16ch na tabela. Os canais 1/2 são
-utilizados; aplicativos que não aceitem 16 canais precisam de outro loopback
-independente compatível. Obtenha e instale os pacotes pelo
-[projeto BlackHole](https://github.com/ExistentialAudio/BlackHole), observando sua
-[licença e termos de integração](https://github.com/ExistentialAudio/BlackHole#can-i-integrate-blackhole-into-my-app).
-O Babel não redistribui BlackHole, e seu driver próprio dispensa essa alternativa.
+**Optional alternative:** two independent BlackHole installations, such as 2ch
+and 16ch, remain compatible. Substitute BlackHole 2ch for Babel Microphone and
+BlackHole 16ch for Babel Speaker in the table. Channels 1/2 are used; applications
+that reject 16 channels need another compatible independent loopback. Obtain
+and install packages from the
+[BlackHole project](https://github.com/ExistentialAudio/BlackHole), respecting its
+[license and integration terms](https://github.com/ExistentialAudio/BlackHole#can-i-integrate-blackhole-into-my-app).
+Babel does not redistribute BlackHole, and its own driver does not require it.
 
-Referências oficiais: [dispositivos de um processo CoreAudio](https://developer.apple.com/documentation/coreaudio/kaudioprocesspropertydevices),
-[exemplo Apple com a API de processos, macOS 14.2+](https://developer.apple.com/documentation/coreaudio/capturing-system-audio-with-core-audio-taps).
-O Babel consulta processos/dispositivos, sem criar taps para capturar áudio global.
+Official references: [devices used by a CoreAudio process](https://developer.apple.com/documentation/coreaudio/kaudioprocesspropertydevices)
+and [Apple's process API example for macOS 14.2+](https://developer.apple.com/documentation/coreaudio/capturing-system-audio-with-core-audio-taps).
+Babel queries processes/devices without creating taps to capture global audio.
 
-## Windows: driver Babel com dois pares independentes
+## Windows: Babel driver with two independent pairs
 
-O pacote **BabelAudio** fornece quatro endpoints WASAPI que formam dois cabos
-independentes. O código do driver WaveRT e os scripts de compilação ficam em
-[native/windows](../native/windows/README.md). O INF prevê Windows 10 build
-19041 ou posterior. O pacote precisa corresponder à arquitetura do sistema.
-**Ainda é necessário produzir o pacote de distribuição assinado e validar a
-instalação, os fluxos e a remoção em Windows real.** O código-fonte não é um
-instalador já aprovado para produção.
+<a id="windows"></a>
 
-A pasta de distribuição `drivers/windows`, ao lado do executável Babel, reúne
-`BabelAudio.inf`, `BabelAudio.sys`, o catálogo e os helpers de instalação/remoção.
-Siga [o guia dos drivers](native-drivers.md) para obter ou compilar o pacote e
-instalá-lo explicitamente com autorização de administrador. O painel só mostra
-as instruções e mantém ocultas as ações de criação/remoção usadas pelo backend
-Linux. `babel setup` e `babel uninstall` indicam os arquivos disponíveis, sem
-executar scripts, elevar permissões ou afirmar sucesso de instalação.
+The **BabelAudio** package supplies four WASAPI endpoints forming two independent
+cables. WaveRT driver source and build scripts are in
+[native/windows](../native/windows/README.md). The INF targets Windows 10 build
+19041 or later. The package must match the system architecture.
+**A signed distribution package and real Windows validation of installation,
+streams, and removal are still required.** Source code is not a production-approved
+installer.
 
-| Campo/aplicativo | Dispositivo |
+The `drivers/windows` distribution directory beside the Babel executable contains
+`BabelAudio.inf`, `BabelAudio.sys`, the catalog, and installation/removal helpers.
+Follow the [driver guide](native-drivers.md) to obtain or build the package and
+install it explicitly with administrator authorization. The dashboard only shows
+instructions and hides the creation/removal actions used by the Linux backend.
+`babel setup` and `babel uninstall` identify available files without executing
+scripts, elevating permissions, or claiming successful installation.
+
+| Field/application | Device |
 |---|---|
-| Babel, captura do microfone | seu microfone físico |
-| Babel, reprodução do microfone traduzido | **Babel Microphone Feed** (reprodução) |
-| Aplicativo da chamada, microfone | **Babel Microphone** (gravação) |
-| Aplicativo da chamada, alto-falante | **Babel Speaker** (reprodução) |
-| Babel, captura da saída para tradução | **Babel Speaker Monitor** (gravação) |
-| Babel, reprodução da saída traduzida | seu fone/alto-falante físico |
+| Babel microphone capture | Your physical microphone |
+| Babel translated microphone playback | **Babel Microphone Feed** (playback) |
+| Call application microphone | **Babel Microphone** (recording) |
+| Call application speaker | **Babel Speaker** (playback) |
+| Babel output capture for translation | **Babel Speaker Monitor** (recording) |
+| Babel translated output playback | Your physical headphones/speaker |
 
-Autorize o acesso ao microfone para aplicativos desktop nas configurações de
-privacidade do Windows. O Babel usa a configuração compartilhada do dispositivo
-via WASAPI. Não ative “Escutar este dispositivo” nos virtuais: isso criaria uma
-segunda rota fora do controle do Babel. Use **Atualizar dispositivos** depois da
-instalação e selecione as pontas da tabela.
+Authorize microphone access for desktop applications in Windows privacy settings.
+Babel uses the device's shared-mode configuration through WASAPI. Do not enable
+“Listen to this device” on the virtual devices: it creates a second route outside
+Babel's control. Use **Refresh devices** after installation and select the
+endpoints listed above.
 
-O monitor verifica o microfone padrão do Windows e as sessões WASAPI externas.
-Escolher **Babel Microphone** como microfone padrão abre a rota do microfone e
-permite comandos de voz habilitados, mesmo sem um aplicativo capturando áudio.
-Uma captura explícita em Babel Microphone também abre essa rota. Escolher o
-microfone físico como padrão só a fecha se nenhum aplicativo ainda usa Babel.
+The monitor checks the Windows default microphone and external WASAPI sessions.
+Choosing **Babel Microphone** as default opens the microphone route and enables
+configured voice commands even without an application capturing audio. Explicit
+capture of Babel Microphone also opens the route. Selecting the physical
+microphone as default closes it only if no application still uses Babel.
 
-Reprodução de um aplicativo em **Babel Speaker** abre a rota de saída; escolher
-a saída como padrão sem reprodução não basta. As sessões do próprio Babel são
-excluídas. Cada direção mostra **Roteamento inativo** quando sua condição de
-atividade não é atendida, mesmo com a outra direção ou sessão ainda ativa.
+Application playback to **Babel Speaker** opens the output route; choosing it
+as default without playback is insufficient. Babel's own sessions are excluded.
+Each direction shows **Routing inactive** when its activity condition is unmet,
+even if the other direction or session is still active.
 
-O pareamento verifica a descrição de cada endpoint fornecida pelo driver e a
-identidade de interface **Babel Audio v1**. Os IDs WASAPI são preservados como
-identidades opacas; o nome amigável renomeável não determina o par. Pontas
-ausentes/ambíguas ou uma falha de consulta mantêm a direção afetada fechada com
-diagnóstico. Selecionar os dois lados do mesmo cabo para as duas rotas bloqueia
-ambas. Não há fallback para o dispositivo padrão.
+Pairing checks each driver-supplied endpoint description and the **Babel Audio
+v1** interface identity. WASAPI IDs remain opaque identities; a renameable friendly
+name does not determine pairing. Missing or ambiguous endpoints and query failures
+keep the affected direction closed with a diagnostic. Selecting both sides of
+the same cable for both routes blocks both. There is no default-device fallback.
 
-O monitor combina enumerações periódicas com eventos das sessões conhecidas.
-A Microsoft informa que a enumeração pode não incluir todas as sessões recém
-criadas; nesse caso o Babel pode permanecer em espera até conseguir observá-las.
-Esta implementação cobre WASAPI compartilhado. Modo exclusivo, ASIO e Kernel
-Streaming não foram validados. A compilação cruzada do aplicativo verifica os
-tipos/APIs, mas não comprova o funcionamento do driver carregado no Windows.
+The monitor combines periodic enumeration with events from known sessions.
+Microsoft notes that enumeration may omit newly created sessions; Babel can
+remain waiting until it observes them. This implementation covers shared WASAPI.
+Exclusive mode, ASIO, and Kernel Streaming have not been validated. Cross-compiling
+the application checks types and APIs but does not prove loaded-driver behavior
+on Windows.
 
-**Alternativa opcional:** dois pares independentes VB-CABLE ou CABLE-A/B/C/D
-continuam reconhecidos. Com CABLE-A e CABLE-B, substitua as quatro pontas Babel
-da tabela por CABLE-A Input, CABLE-A Output, CABLE-B Input e CABLE-B Output,
-respectivamente. Um único cabo não fornece dois percursos independentes.
-Obtenha drivers e licenças diretamente da [VB-Audio](https://vb-audio.com/Cable/)
-e consulte os [termos de distribuição](https://vb-audio.com/Services/licensing.htm).
-O driver Babel próprio não depende desses pacotes.
+**Optional alternative:** two independent VB-CABLE or CABLE-A/B/C/D pairs remain
+recognized. With CABLE-A and CABLE-B, replace the four Babel endpoints in the
+table with CABLE-A Input, CABLE-A Output, CABLE-B Input, and CABLE-B Output,
+respectively. One cable does not provide two independent paths. Obtain drivers
+and licenses directly from [VB-Audio](https://vb-audio.com/Cable/) and consult
+its [distribution terms](https://vb-audio.com/Services/licensing.htm).
+Babel's own driver does not depend on those packages.
 
-Referência oficial: [limites da enumeração de sessões WASAPI](https://learn.microsoft.com/en-us/windows/win32/api/audiopolicy/nf-audiopolicy-iaudiosessionmanager2-getsessionenumerator).
+Official reference: [WASAPI session enumeration limitations](https://learn.microsoft.com/en-us/windows/win32/api/audiopolicy/nf-audiopolicy-iaudiosessionmanager2-getsessionenumerator).
 
-## Limites de desempenho e validação
+## Performance and validation limits
 
-A suspensão é independente por direção nos três backends. O microfone exige
-Babel como padrão do sistema ou um aplicativo consumidor; a saída exige um
-aplicativo reproduzindo nela. Quando a condição deixa de existir, o Babel fecha
-os streams da rota, descarta suas filas e
-encerra o processamento correspondente; a retomada cria um novo percurso, sem
-reproduzir respostas antigas. O nome/ID da sessão e seus writers permanecem
-os mesmos. A detecção no macOS e Windows tem os requisitos e limites descritos
-acima. Compilar o monitor não comprova seu comportamento com todos os drivers.
+Suspension is independent per direction on all three backends. The microphone
+requires Babel as system default or a consuming application; output requires
+an application playing to it. When activity ends, Babel closes route streams,
+discards queues, and stops the corresponding processing. Resuming creates a new
+path without replaying old responses. The session name/ID and writers stay the
+same. macOS and Windows detection have the requirements and limits above.
+Compiling the monitor does not prove behavior with every driver.
 
-- Os callbacks nativos só convertem/misturam amostras, operam filas atômicas com
-  capacidade fixa e atualizam contadores. Não fazem rede, alocação, espera,
-  bloqueio de mutex ou logging. Ressampling e criação de frames ficam nos workers.
-- O ressampling nativo usa FIR sinc de 64 coeficientes e 512 fases com filtro
-  anti-aliasing. A taxa nativa do dispositivo é preservada; PCM16 mono entra e
-  sai da camada de tradução na taxa configurada pelo provider.
-- No Linux, dois clientes persistentes por rota (`parec`/`pacat`) transportam
-  PCM bruto. Não há um processo novo por frame. Os buffers e a rede estão fora
-  do callback do servidor; é uma escolha de integração simples, não a latência
-  mínima possível de uma implementação PipeWire nativa.
-- Filas são limitadas. Na captura, saturação descarta frames e incrementa o
-  contador; o objetivo é não acumular indefinidamente fala antiga. A reprodução
-  usa o limite configurado pela aplicação. Interrupções incrementam uma geração:
-  áudio antigo é ignorado mesmo quando a fila está cheia. No Linux, o cliente de
-  reprodução reinicia para eliminar o áudio pendente no servidor; no backend
-  nativo, a geração também é checada diretamente no callback.
-- Se a saída deixa de consumir amostras, a escrita falha após o limite da fila
-  (ou da latência, o maior dos dois), mais 500 ms, e encerra a rota com erro.
-  Isso também detecta um último frame bloqueado quando o provider não envia
-  mais áudio para provocar saturação da fila.
-- `latency_ms` é uma solicitação/limite do buffer do Babel. No backend nativo o
-  tamanho do callback é negociado pelo CPAL/sistema, não garantido pelo campo.
-  No Linux ele é passado ao cliente PulseAudio. Latência percebida inclui rede,
-  modelo, detecção de fim de fala, tradução e buffers do hardware. Não há garantia
-  de tradução simultânea sem atraso nem benchmark de produção neste repositório.
-- Os IDs nativos incluem a direção e a identidade persistente do dispositivo:
-  UID no macOS e ID de endpoint no Windows. Reordenar a lista não muda a seleção.
-  Configurações antigas que continham índice/nome são aceitas apenas se o nome
-  identificar um único dispositivo da direção correta; o índice antigo não é
-  usado para escolher outro dispositivo.
-- É possível trocar o físico durante a sessão. Se o dispositivo selecionado
-  desconectar, o Babel descarta o backlog e tenta reabrir a mesma identidade a
-  cada três segundos, sem escolher o padrão do sistema. É possível selecionar
-  outro físico durante essa espera. A troca/recuperação preserva a sessão,
-  transcrição, writer e provider; frames pendentes da rota física anterior são
-  descartados. Captura nativa sem callbacks por dois segundos sinaliza falha
-  para iniciar essa recuperação; silêncio com callbacks continua sendo áudio
-  válido. O comportamento físico ainda precisa ser verificado em cada SO.
-- Cancelar o worker solicita o fechamento nativo, mas não consegue interromper
-  uma chamada travada dentro do sistema/driver. O registro por identidade e
-  direção mantém o endpoint reservado até sua liberação real, impedindo abrir
-  outro stream do Babel para o mesmo endpoint enquanto o anterior persiste.
-  Nessa situação, a recuperação pode continuar bloqueada e exigir recuperação
-  do driver/processo; o status da tarefa não é prova de fechamento físico.
-- `underruns` conta callbacks nativos que precisaram inserir silêncio, inclusive
-  quando a IA ainda não produziu fala. PulseAudio não fornece esse contador pelo
-  transporte `pacat`, portanto ele permanece zero nesse backend.
+- Native callbacks process samples, operate fixed-capacity atomic queues, and
+  update counters. They perform no networking, allocation, waiting, mutex
+  locking, or logging. Resampling and frame creation run on workers.
+- Native resampling uses a 64-tap, 512-phase sinc FIR anti-aliasing filter where
+  conversion is required. Original routing preserves the configured device
+  format; the translation layer uses mono PCM16 at the provider's configured rate.
+- On Linux, two persistent clients per route (`parec`/`pacat`) transport raw PCM.
+  No process is launched per frame. Buffers and networking are outside the audio
+  server callback; this is a simple integration choice, not the lowest possible
+  latency of a native PipeWire implementation.
+- Queues are bounded. Saturated capture drops frames and increments a counter
+  instead of indefinitely accumulating old speech. Playback uses the application's
+  configured limit. Interruptions advance a generation: stale audio is ignored
+  even with a full queue. On Linux, playback restarts to clear pending server
+  audio; native playback also checks the generation in the callback.
+- If output stops consuming samples, writing fails after the queue limit or
+  latency, whichever is greater, plus 500 ms, ending the route with an error.
+  This also detects a final blocked frame when the provider sends no further
+  audio that would otherwise saturate the queue.
+- `latency_ms` is a Babel buffer request/limit. Native callback size is negotiated
+  by CPAL and the system, not guaranteed by this field. Linux passes it to the
+  PulseAudio client. Perceived latency includes network, model, end-of-speech
+  detection, translation, and hardware buffering. This repository makes no
+  zero-delay simultaneous translation guarantee and supplies no production benchmark.
+- Native IDs include direction and persistent device identity: UID on macOS and
+  endpoint ID on Windows. Reordering the list does not change selection. Legacy
+  index/name configurations are accepted only when the name uniquely identifies
+  a device in the correct direction; the old index never selects another device.
+- Physical devices can change during a session. If the selected device disconnects,
+  Babel discards backlog and retries the same identity every three seconds without
+  selecting the system default. Another physical device can be selected while
+  waiting. Switching/recovery preserves the session, transcription, writer, and
+  provider; pending frames from the previous physical route are discarded. Native
+  capture with no callbacks for two seconds triggers recovery; silence with
+  callbacks remains valid audio. Physical behavior still needs validation on each OS.
+- Cancelling a worker requests native closure but cannot interrupt a call stuck
+  inside the OS or driver. Registration by identity and direction reserves an
+  endpoint until actual release, preventing another Babel stream from opening
+  that endpoint while the previous one persists. Recovery can remain blocked and
+  require driver/process recovery; task status does not prove physical closure.
+- `underruns` counts native callbacks that inserted silence, including when AI has
+  not yet produced speech. PulseAudio does not expose this counter through
+  `pacat`, so it remains zero on that backend.
 
-Teste o percurso com a tradução e a transcrição desligadas, usando o
-encaminhamento original. Se desejar, habilite somente a gravação durante uma
-sessão para conferir o WAV combinado; esse uso não requer provedor de IA. A
-compilação cruzada confirma tipos e APIs, mas não substitui testes de dispositivo,
-permissões, suspensão/retomada e desconexão em máquinas macOS e Windows reais.
+Test the path with translation and transcription disabled, using original audio
+routing. Optionally enable recording alone during a session to inspect the mixed
+WAV; this needs no AI provider. Cross-compilation confirms types and APIs but does
+not replace device, permission, suspension/resumption, and disconnection tests
+on real macOS and Windows machines.
 
-Há também um teste Linux real, ignorado na suíte normal. Ele requer os clientes
-PulseAudio no `PATH` e uma sessão de áudio acessível, recusa executar se já houver
-dispositivos Babel, cria os endpoints, testa tom nas duas rotas, interrupção com
-fila cheia e preservação dos padrões, e remove os endpoints no final:
+A real Linux test is also available, ignored by the normal suite. It requires
+PulseAudio clients on `PATH` and an accessible audio session, refuses to run if
+Babel devices already exist, creates endpoints, tests tones in both routes,
+interruption with a full queue, and preservation of defaults, then removes its
+endpoints:
 
 ```sh
 cargo test --lib live_virtual_routes_idempotence_interruption_and_cleanup -- --ignored

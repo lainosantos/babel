@@ -40,7 +40,9 @@ const OUTPUT_FRAME_SAMPLES: usize = 480;
 pub struct ConfigurationChanged;
 impl std::fmt::Display for ConfigurationChanged {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("A configuração foi alterada fora deste painel. Recarregue os ajustes antes de salvar ou iniciar.")
+        f.write_str(
+            "Settings changed outside this dashboard. Reload settings before saving or starting.",
+        )
     }
 }
 impl std::error::Error for ConfigurationChanged {}
@@ -202,25 +204,24 @@ impl Running {
         let microphone = self.microphone.snapshot();
         let speaker = self.speaker.snapshot();
         let mut errors = [
-            ("microfone", &microphone.device_error),
-            ("saída", &speaker.device_error),
+            ("microphone", &microphone.device_error),
+            ("speaker", &speaker.device_error),
         ]
         .into_iter()
         .filter_map(|(route, error)| {
             error
                 .as_ref()
-                .map(|error| format!("Dispositivo de {route}: {error}"))
+                .map(|error| format!("Device for {route}: {error}"))
         })
         .collect::<Vec<_>>();
         if !errors.is_empty() {
             errors.push(
-                "Escolha outro dispositivo físico pela bandeja para continuar na mesma sessão."
-                    .into(),
+                "Choose another physical device in the tray to continue the same session.".into(),
             );
         }
-        for (name, route) in [("microfone", &microphone), ("saída", &speaker)] {
+        for (name, route) in [("microphone", &microphone), ("speaker", &speaker)] {
             if let Some(error) = &route.processing_error {
-                errors.push(format!("Processamento de {name}: {error}"));
+                errors.push(format!("Processing for {name}: {error}"));
             }
         }
         EngineStatus {
@@ -366,7 +367,7 @@ impl Controller {
         reap(&mut state).await;
         ensure!(
             state.running.is_none(),
-            "Encerre a sessão antes de criar dispositivos virtuais"
+            "End the session before creating virtual devices"
         );
         stop_routing(&mut state).await?;
         let result = audio::install_virtual_devices().await;
@@ -380,7 +381,7 @@ impl Controller {
         reap(&mut state).await;
         ensure!(
             state.running.is_none(),
-            "Encerre a sessão antes de remover dispositivos virtuais"
+            "End the session before removing virtual devices"
         );
         stop_routing(&mut state).await?;
         state.routing_enabled = false;
@@ -470,7 +471,7 @@ impl Controller {
         }
         ensure!(
             state.running.is_none(),
-            "Encerre a sessão antes de alterar a configuração"
+            "End the session before changing settings"
         );
         // Agent settings have their own live revision and API. An older main
         // settings form must never overwrite a newer agent configuration.
@@ -566,7 +567,7 @@ impl Controller {
         if revision.is_some_and(|expected| expected != state.config_revision) {
             return Err(ConfigurationChanged.into());
         }
-        ensure!(state.running.is_none(), "Uma sessão já está em execução");
+        ensure!(state.running.is_none(), "A session is already running");
         if state
             .pending_start
             .as_ref()
@@ -574,10 +575,7 @@ impl Controller {
         {
             state.pending_start = None;
         }
-        ensure!(
-            state.pending_start.is_none(),
-            "Uma sessão está sendo preparada"
-        );
+        ensure!(state.pending_start.is_none(), "A session is being prepared");
         state.config.validate_for_start()?;
         history::validate_request(&state.config, history_seconds)?;
         let configured = state.config.clone();
@@ -602,23 +600,23 @@ impl Controller {
         {
             state.pending_start = None;
         }
-        ensure!(!preparing.is_cancelled(), "Preparação da sessão cancelada");
+        ensure!(!preparing.is_cancelled(), "Session preparation cancelled");
         if state.config_revision != config_revision {
             return Err(ConfigurationChanged.into());
         }
-        ensure!(state.running.is_none(), "Uma sessão já está em execução");
+        ensure!(state.running.is_none(), "A session is already running");
         let (cfg, local_runtime_lease) = resolved?;
         drop(prepare_guard);
         let devices = audio::devices().await?;
         for (name, route, transcribe, record) in [
             (
-                "microfone",
+                "microphone",
                 &cfg.microphone,
                 cfg.transcription.microphone,
                 cfg.recording.microphone,
             ),
             (
-                "saída",
+                "speaker",
                 &cfg.speaker,
                 cfg.transcription.speaker,
                 cfg.recording.speaker,
@@ -634,14 +632,14 @@ impl Controller {
                 devices
                     .iter()
                     .any(|d| d.id == route.capture_device && d.direction == DeviceDirection::Input),
-                "Captura do fluxo {name} não encontrada: {}. Atualize a lista de dispositivos",
+                "Capture device for {name} not found: {}. Refresh the device list",
                 route.capture_device
             );
             ensure!(
                 devices.iter().any(
                     |d| d.id == route.playback_device && d.direction == DeviceDirection::Output
                 ),
-                "Reprodução do fluxo {name} não encontrada: {}. Atualize a lista de dispositivos",
+                "Playback device for {name} not found: {}. Refresh the device list",
                 route.playback_device
             );
         }
@@ -659,7 +657,7 @@ impl Controller {
         history::select_sources(&mut recent, &cfg, now);
         if history_seconds > 0 && recent.frames.is_empty() {
             maintain_routing(&mut state).await;
-            bail!("Nenhum áudio recente disponível para as fontes selecionadas nesta sessão");
+            bail!("No recent audio is available for the sources selected in this session");
         }
         let origin = recent.origin;
         if let Some(writer) = &mut audio {
@@ -748,14 +746,13 @@ impl Controller {
                 Ok(Ok(Ok(()))) => {}
                 Ok(Ok(Err(error))) => status.last_error = Some(format!("{error:#}")),
                 Ok(Err(_)) => {
-                    status.last_error =
-                        Some("A tarefa de áudio foi interrompida inesperadamente".into())
+                    status.last_error = Some("The audio task was interrupted unexpectedly".into())
                 }
                 Err(_) => {
                     running.task.abort();
                     let _ = running.task.await;
                     status.last_error =
-                        Some("Tempo limite ao parar o áudio; verifique os dispositivos".into());
+                        Some("Timed out while stopping audio; check your devices".into());
                 }
             }
             state.last = status;
@@ -781,7 +778,7 @@ fn select_physical(
         devices
             .iter()
             .any(|device| device.id == id && device.direction == direction && !device.is_virtual),
-        "Dispositivo físico indisponível; atualize a lista na bandeja"
+        "Physical device unavailable; refresh the list in the tray"
     );
     match direction {
         DeviceDirection::Input => config.microphone.capture_device = id.into(),
@@ -811,7 +808,7 @@ async fn reap(state: &mut State) {
         if let Err(error) = running
             .task
             .await
-            .unwrap_or_else(|_| Err(anyhow!("Tarefa de áudio encerrada inesperadamente")))
+            .unwrap_or_else(|_| Err(anyhow!("Audio task ended unexpectedly")))
         {
             status.last_error = Some(format!("{error:#}"));
         }
@@ -839,7 +836,7 @@ async fn create_session_files(
         transcription.directory =
             crate::storage::resolve_directory(&base, &transcription.directory)?
                 .to_str()
-                .context("A pasta de transcrições precisa ser representável em UTF-8")?
+                .context("The transcript folder must be representable in UTF-8")?
                 .to_owned();
     }
     let recording_directory = config
@@ -928,7 +925,7 @@ async fn run_session(
         writers.spawn_on(
             observe_session_writer(
                 history::write_transcript(writer, rx, config, recent, history_cancel, pending),
-                "Transcrição consolidada",
+                "Consolidated transcription",
                 affected,
             ),
             &processing_handle,
@@ -958,7 +955,7 @@ async fn run_session(
                         )
                         .await
                 },
-                "Gravação do áudio original misturado",
+                "Mixed original audio recording",
                 affected,
             ),
             &processing_handle,
@@ -990,7 +987,7 @@ async fn run_session(
         record_audio,
     ) in [
         (
-            "microfone",
+            "microphone",
             cfg.microphone.clone(),
             mic.clone(),
             TranscriptOrigin::Microphone,
@@ -1000,7 +997,7 @@ async fn run_session(
             cfg.recording.microphone,
         ),
         (
-            "saída",
+            "speaker",
             cfg.speaker.clone(),
             speaker.clone(),
             TranscriptOrigin::Speaker,
@@ -1055,7 +1052,7 @@ async fn observe_session_writer(
 ) -> Result<()> {
     let result = writer.await.context(label);
     if let Err(error) = &result {
-        let message = format!("{error:#}. O roteamento original continua disponível.");
+        let message = format!("{error:#}. Original audio routing remains available.");
         for metrics in affected.into_iter().flatten() {
             metrics.report_processing_error(&message);
         }
@@ -1069,14 +1066,12 @@ fn retain_session_failure(
     metrics: &[Arc<RouteMetrics>; 2],
 ) {
     let result = completed
-        .context("Tarefa de sessão encerrada inesperadamente")
+        .context("Session task ended unexpectedly")
         .and_then(|result| result);
     if let Err(error) = result {
         if completed_was_panic(&error) {
             for route in metrics {
-                route.report_processing_error(
-                    "Uma tarefa de processamento encerrou inesperadamente",
-                );
+                route.report_processing_error("A processing task ended unexpectedly");
             }
         }
         if failure.is_none() {
@@ -1107,7 +1102,7 @@ async fn supervise_session(
                 if let Some(completed) = completed {
                     retain_session_failure(&mut failure, completed, &metrics);
                     if failure.is_none() && !cancel.is_cancelled() {
-                        failure = Some(anyhow!("Um roteamento de sessão encerrou inesperadamente"));
+                        failure = Some(anyhow!("A session route ended unexpectedly"));
                     }
                 }
                 break;
@@ -1138,8 +1133,7 @@ async fn supervise_session(
         writers.abort_all();
         // Aborted workers cannot retain device ownership or writer senders.
         // Their JoinSets are dropped immediately; no unbounded drain follows.
-        let error =
-            "Tempo limite ao finalizar processamento/arquivos; arquivos podem estar incompletos";
+        let error = "Timed out while finalizing processing/files; files may be incomplete";
         for route in &metrics {
             route.report_processing_error(error);
         }
@@ -1220,7 +1214,7 @@ where
     // out. The guard instead aborts it, including queued provider work.
     tokio_util::task::AbortOnDropHandle::new(handle.spawn(route))
         .await
-        .context("Processamento da rota interrompido")?
+        .context("Route processing interrupted")?
 }
 
 /// Independent bounded queues: a slow recognizer cannot hold translation or
@@ -1313,7 +1307,7 @@ fn record(sender: &Option<TranscriptSink>, record: TranscriptRecord) -> Result<(
                 record: Box::new(record),
             })
             .map_err(|_| {
-                anyhow!("Transcrição indisponível ou lenta; o arquivo pode estar incompleto")
+                anyhow!("Transcription unavailable or slow; the file may be incomplete")
             })?;
     }
     Ok(())
@@ -1421,7 +1415,7 @@ mod tests {
                 released.await.context("Test writer was not released")?;
                 bail!("Synthetic disk failure")
             },
-            "Gravação",
+            "Recording",
             [Some(metrics[0].clone()), Some(metrics[1].clone())],
         ));
         let closed = Arc::new(RoutesClosed::default());
@@ -1535,7 +1529,7 @@ mod tests {
             .await
             .expect("Shutdown has a global deadline")
             .unwrap();
-        assert!(result.unwrap_err().to_string().contains("incompletos"));
+        assert!(result.unwrap_err().to_string().contains("incomplete"));
         assert!(
             tokio::time::timeout(Duration::from_secs(1), writer_dropped)
                 .await

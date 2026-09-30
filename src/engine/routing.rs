@@ -46,7 +46,7 @@ impl Routing {
             })
     }
     pub fn error(&self) -> Option<String> {
-        let messages = [("microfone", &self.microphone), ("saída", &self.speaker)]
+        let messages = [("microphone", &self.microphone), ("speaker", &self.speaker)]
             .into_iter()
             .filter_map(|(name, metrics)| {
                 metrics
@@ -63,11 +63,11 @@ pub(super) async fn stop_routing(state: &mut State) -> Result<()> {
     if let Some(mut routing) = state.routing.take() {
         routing.cancel.cancel();
         match tokio::time::timeout(Duration::from_secs(4), &mut routing.task).await {
-            Ok(result) => result.context("Roteamento original interrompido")??,
+            Ok(result) => result.context("Original audio routing interrupted")??,
             Err(_) => {
                 routing.task.abort();
                 let _ = routing.task.await;
-                bail!("Tempo limite ao encerrar o roteamento original");
+                bail!("Timed out while stopping original audio routing");
             }
         }
     }
@@ -193,14 +193,12 @@ pub(super) async fn maintain_routing(state: &mut State) {
             item = jobs.join_next() => match item {
                 Some(Ok(Err(error))) => Err(error),
                 _ if worker_cancel.is_cancelled() => Ok(()),
-                _ => Err(anyhow!("Um roteamento original encerrou inesperadamente")),
+                _ => Err(anyhow!("An original audio route ended unexpectedly")),
             },
         };
         worker_cancel.cancel();
         while let Some(item) = jobs.join_next().await {
-            let next = item
-                .context("Worker do roteamento interrompido")
-                .and_then(|r| r);
+            let next = item.context("Routing worker interrupted").and_then(|r| r);
             if result.is_ok() && next.is_err() {
                 result = next;
             }

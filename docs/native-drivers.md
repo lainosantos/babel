@@ -1,141 +1,145 @@
-# Drivers Babel para macOS e Windows
+# Babel drivers for macOS and Windows
 
-Os drivers próprios ficam em `native/macos` e `native/windows`. Eles criam os
-dispositivos selecionáveis; o aplicativo Rust continua responsável por captura
-física, tradução, transcrição, gravação, MCP, painel e bandeja. Não há IA, rede,
-chaves de API ou gravação de arquivos no caminho de áudio dos drivers.
+Babel's own drivers live in `native/macos` and `native/windows`. They create
+selectable devices; the Rust application remains responsible for physical audio
+capture, translation, transcription, recording, MCP, the dashboard and the tray.
+The drivers' audio path contains no AI, networking, API keys or file recording.
 
-**Estado:** código-fonte, build e instalação estão separados por plataforma.
-Isso não equivale a um pacote assinado, carregado e validado em hardware. O host
-de desenvolvimento Linux consegue verificar o código portável e a compilação
-cruzada Rust para Windows; SDK/WDK, assinatura e execução nativa têm validação
-própria. Não distribua o driver como certificado antes desses passos.
+**Status:** source code, build and installation are separate for each platform.
+This does not mean a package has been signed, loaded and validated on hardware.
+The Linux development host can check portable code and Rust cross-compilation
+for Windows; SDK/WDK builds, signing and native execution require their own
+validation. Do not distribute the driver as certified before completing these steps.
 
-## Limite entre Rust e código específico do sistema
+## Boundary between Rust and platform-specific code
 
-| Parte | Implementação | Por quê |
+| Component | Implementation | Reason |
 |---|---|---|
-| Aplicativo, IA, roteamento e configurações | Rust com `forbid(unsafe_code)` | Não precisa entrar no driver nem ser reescrito. |
-| Buffers dos dois drivers | Rust; armazenamento fixo e testes portáveis | Evita alocação por callback e controla limites, silêncio e descarte. |
-| macOS AudioServerPlugIn | Rust, com ponte C compilada contra o SDK Apple | A ponte define a vtable/estruturas e objetos CoreFoundation conforme o SDK, sem duplicar layouts complexos à mão. |
-| Windows WaveRT/PortCls | Adaptação C++ do SimpleAudioSample Microsoft + transporte Rust `no_std` | O WDK fornece essa integração em interfaces C++/COM, DMA e IRQL. O código C++ fica nessa fronteira. |
-| Instalador Windows | Rust + módulo SetupAPI isolado | Cria a instância ROOT, verifica o pacote e remove apenas a instalação Babel. Não depende do DevCon. |
-| Empacotamento | Python, PowerShell e shell de build | Orquestram Rust e as ferramentas oficiais do SDK; não fazem processamento de áudio. |
+| Application, AI, routing and settings | Rust with `forbid(unsafe_code)` | Does not need to run in the driver or be rewritten. |
+| Both drivers' buffers | Rust; fixed storage and portable tests | Avoids allocation per callback and controls bounds, silence and drops. |
+| macOS AudioServerPlugIn | Rust, with a C bridge compiled against the Apple SDK | The bridge defines the vtable, structures and CoreFoundation objects according to the SDK, without manually duplicating complex layouts. |
+| Windows WaveRT/PortCls | C++ adaptation of Microsoft's SimpleAudioSample + Rust `no_std` transport | The WDK provides this integration through C++/COM interfaces, DMA and IRQL. C++ remains at this boundary. |
+| Windows installer | Rust + an isolated SetupAPI module | Creates the ROOT instance, verifies the package and removes only the Babel installation. Does not depend on DevCon. |
+| Packaging | Python, PowerShell and build shell scripts | Orchestrate Rust and the official SDK tools; do not process audio. |
 
-Chamadas FFI que usam ponteiros são explicitamente isoladas e documentadas. O
-núcleo seguro não torna o HAL, o kernel ou o código C/C++ integralmente memory
-safe. O driver Windows, em particular, deve passar por Driver Verifier antes
-de distribuição. Um defeito nessa fronteira pode comprometer a sessão de áudio
-ou o sistema; uma checagem Rust no Linux não comprova o comportamento do WDK.
+FFI calls that use pointers are explicitly isolated and documented. The safe
+core does not make the HAL, kernel or C/C++ code entirely memory safe. The
+Windows driver, in particular, must pass Driver Verifier before distribution.
+A defect at this boundary can compromise the audio session or the system;
+a Rust check on Linux does not demonstrate WDK behavior.
 
-## Dispositivos e roteamento
+## Devices and routing
 
-| Uso | macOS | Windows |
+| Use | macOS | Windows |
 |---|---|---|
-| Babel reproduz o microfone processado | saída **Babel Microphone** | **Babel Microphone Feed** |
-| Aplicativo da chamada captura | entrada **Babel Microphone** | **Babel Microphone** |
-| Aplicativo da chamada reproduz | saída **Babel Speaker** | **Babel Speaker** |
-| Babel captura a saída original da chamada | entrada **Babel Speaker** | **Babel Speaker Monitor** |
+| Babel plays the processed microphone | **Babel Microphone** output | **Babel Microphone Feed** |
+| Call application captures | **Babel Microphone** input | **Babel Microphone** |
+| Call application plays audio | **Babel Speaker** output | **Babel Speaker** |
+| Babel captures the call's original output | **Babel Speaker** input | **Babel Speaker Monitor** |
 
-No macOS cada dispositivo é duplex, com entrada e saída. Os UIDs são
-`org.babel.audio.microphone.v1` e `org.babel.audio.speaker.v1`. No Windows o
-adaptador é `ROOT\BabelAudio`, interface **Babel Audio v1**, com quatro pontas.
-A enumeração persiste os IDs nativos; a identificação Windows usa descrição
-do driver e da interface, não o apelido amigável editável. Pares ausentes ou
-ambíguos mantêm o roteamento fechado.
+On macOS each device is duplex, with input and output. Its UIDs are
+`org.babel.audio.microphone.v1` and `org.babel.audio.speaker.v1`. On Windows the
+adapter is `ROOT\BabelAudio`, interface **Babel Audio v1**, with four endpoints.
+Enumeration persists native IDs; Windows identification uses the driver and
+interface descriptions, not the editable friendly name. Missing or ambiguous
+pairs keep routing closed.
 
-O formato do transporte é estéreo a 48 kHz: `f32` no HAL e PCM16 no WaveRT.
-O sistema de áudio pode converter formatos dos aplicativos. A camada de IA
-do Babel continua trabalhando no formato de cada provider, fora do driver.
-O HAL usa uma margem conservadora de 4.096 quadros (85,33 ms) para tolerar
-leitura antes da escrita em um ciclo. Essa latência fixa se soma à tradução;
-reduzi-la exige validar o agendamento no macOS. O WaveRT mantém até 4.096
-quadros na fila, sem introduzir essa mesma margem fixa deliberadamente.
-O driver transporta cada cabo localmente; não conecta os cabos entre si nem
-abre dispositivos físicos. Quando o processo Babel está fechado, os virtuais
-continuam instalados, mas não existe um serviço de IA/roteamento por trás deles.
+The transport format is stereo at 48 kHz: `f32` in the HAL and PCM16 in WaveRT.
+The audio system may convert application formats. Babel's AI layer continues
+working in each provider's format, outside the driver. The HAL uses a
+conservative margin of 4,096 frames (85.33 ms) to tolerate reads before writes
+within a cycle. This fixed latency adds to translation latency; reducing it
+requires validating scheduling on macOS. WaveRT retains up to 4,096 queued
+frames, without deliberately introducing the same fixed margin. The driver
+transports each cable locally; it does not connect the cables to one another
+or open physical devices. When the Babel process is closed, the virtual
+devices remain installed, but no AI/routing service runs behind them.
 
-## Build, pacote e instalação
+## Build, package and installation
 
-O [CI do GitHub](ci-installers.md) compila os drivers em runners hospedados e
-gera instaladores completos do aplicativo por sistema, com os arquivos do
-driver correspondente e verificação do conteúdo. Os pacotes de CI macOS/Windows
-são identificados como desenvolvimento, sem assinatura de distribuição.
+[GitHub CI](ci-installers.md) compiles the drivers on hosted runners and
+produces complete application installers for each operating system, including
+the corresponding driver files and content verification. macOS/Windows CI
+packages are labeled as development builds without distribution signing.
 
-Consulte os comandos completos e artefatos em:
+See the complete commands and artifacts in:
 
-- `native/macos/README.md`: workspace Rust, ponte compilada pelo SDK, bundle
-  `BabelAudio.driver`, pacote `BabelAudio.pkg`, assinatura e remoção.
-- `native/windows/README.md`: revisão Microsoft fixada e verificada por hashes,
-  Visual Studio/WDK, transporte Rust, INF/CAT/SYS e instalador Rust x64/ARM64.
+- `native/macos/README.md`: Rust workspace, SDK-compiled bridge,
+  `BabelAudio.driver` bundle, `BabelAudio.pkg` package, signing and removal.
+- `native/windows/README.md`: Microsoft revision pinned and verified by hashes,
+  Visual Studio/WDK, Rust transport, INF/CAT/SYS and Rust x64/ARM64 installer.
 
-O build não instala drivers. O aplicativo não baixa um driver de terceiros,
-não muda os dispositivos padrão, não instala certificados e não modifica a
-política de boot. O pacote do driver exige a autorização administrativa normal
-do sistema. No macOS, o bundle HAL fica em `/Library/Audio/Plug-Ins/HAL`.
-No Windows, o instalador usa SetupAPI para criar a instância ROOT; apenas
-adicionar um INF com PnPUtil não cria essa instância.
+The build does not install drivers. The application does not download a
+third-party driver, change default devices, install certificates or modify boot
+policy. The driver package requires the operating system's normal administrative
+authorization. On macOS, the HAL bundle goes in `/Library/Audio/Plug-Ins/HAL`.
+On Windows, the installer uses SetupAPI to create the ROOT instance; merely
+adding an INF with PnPUtil does not create that instance.
 
-O instalador Windows aceita `install --inf <caminho absoluto de BabelAudio.inf>`,
-`remove --inf <mesmo caminho>` e `list`. Ele confere classe MEDIA, fabricante,
-serviço, arquitetura, hardware ID e assinatura do catálogo. Uma atualização
-preserva um driver mais recente; não força downgrade. Falha ao instalar uma
-instância nova tenta remover essa instância. A remoção confere a identidade
-instalada e usa o nome OEM informado pelo Windows, nunca curingas. Um pacote
-em uso pode exigir reinício e uma nova execução da remoção com o mesmo INF.
+The Windows installer accepts `install --inf <absolute path to BabelAudio.inf>`,
+`remove --inf <same path>` and `list`. It checks the MEDIA class, manufacturer,
+service, architecture, hardware ID and catalog signature. An update preserves
+a newer driver instead of forcing a downgrade. If installing a new instance
+fails, the installer attempts to remove that instance. Removal verifies the
+installed identity and uses the OEM name reported by Windows, never wildcards.
+An in-use package may require a restart and another removal attempt with the
+same INF.
 
-Para incluir os pacotes junto ao aplicativo, use `drivers/macos` ou
-`drivers/windows` ao lado do executável. No macOS um app bundle também pode
-usar `Contents/Resources/drivers/macos`. `babel setup` informa o pacote encontrado
-ou como prepará-lo; não informa sucesso de instalação sem ter instalado.
-`babel uninstall` informa o helper correspondente. A interface mantém o guia
-de instalação do sistema e a atualização da lista de dispositivos.
+To bundle the packages with the application, use `drivers/macos` or
+`drivers/windows` beside the executable. A macOS app bundle can also use
+`Contents/Resources/drivers/macos`. `babel setup` reports the package it found
+or explains how to prepare it; it does not report installation success without
+installing it. `babel uninstall` identifies the corresponding helper. The
+interface provides the current operating system's installation guide and lets
+you refresh the device list.
 
-Uma versão pública Windows precisa cumprir a política de assinatura de drivers
-da Microsoft. O pacote macOS de distribuição precisa de assinatura Developer ID
-e do fluxo de notarização aplicável. Certificados, contas de desenvolvedor e
-aprovação dos fornecedores não são gerados pelo código do projeto.
-Fontes oficiais: [política Windows de assinatura](https://learn.microsoft.com/en-us/windows-hardware/drivers/install/kernel-mode-code-signing-policy--windows-vista-and-later-),
-[assinatura macOS](https://developer.apple.com/documentation/xcode/creating-distribution-signed-code-for-the-mac/),
-[notarização](https://developer.apple.com/documentation/security/customizing-the-notarization-workflow).
+A public Windows release must comply with Microsoft's driver-signing policy.
+The macOS distribution package requires Developer ID signing and the applicable
+notarization process. Certificates, developer accounts and vendor approvals
+are not generated by the project code.
+Official sources: [Windows signing policy](https://learn.microsoft.com/en-us/windows-hardware/drivers/install/kernel-mode-code-signing-policy--windows-vista-and-later-),
+[macOS signing](https://developer.apple.com/documentation/xcode/creating-distribution-signed-code-for-the-mac/),
+[notarization](https://developer.apple.com/documentation/security/customizing-the-notarization-workflow).
 
-## Verificação do transporte instalado
+## Verifying the installed transport
 
-O exemplo Rust `examples/native_driver_smoke.rs` abre somente IDs explícitos,
-exige nomes originais Babel e a opção `--confirm-virtual-devices`. Feche o Babel
-e outros aplicativos de áudio antes de usá-lo, para não somar áudio externo
-ou ativar roteamento físico. Não selecione microfone ou alto-falante reais.
+The Rust example `examples/native_driver_smoke.rs` opens only explicit IDs,
+requires original Babel names and the `--confirm-virtual-devices` option.
+Close Babel and other audio applications before using it, to avoid mixing
+external audio or activating physical routing. Do not select real microphones
+or speakers.
 
-1. Compile no sistema de destino com `cargo build --release --example native_driver_smoke --locked`.
-2. Execute `babel devices` e copie os quatro IDs, respeitando `input:`/`output:`.
-3. Execute o teste com os IDs exatos, entre aspas:
+1. Build on the target operating system with `cargo build --release --example native_driver_smoke --locked`.
+2. Run `babel devices` and copy all four IDs, preserving `input:`/`output:`.
+3. Run the test with the exact IDs in quotes:
 
 ```text
 native_driver_smoke --confirm-virtual-devices \
-  --microphone-render "output:<ID da ponta de reprodução do mic>" \
-  --microphone-capture "input:<ID da ponta de captura do mic>" \
-  --speaker-render "output:<ID da ponta de reprodução da saída>" \
-  --speaker-capture "input:<ID da ponta de captura da saída>"
+  --microphone-render "output:<microphone playback endpoint ID>" \
+  --microphone-capture "input:<microphone capture endpoint ID>" \
+  --speaker-render "output:<speaker playback endpoint ID>" \
+  --speaker-capture "input:<speaker capture endpoint ID>"
 ```
 
-No PowerShell use uma linha só ou crases para continuar linhas, e acrescente
-`.exe` ao executável. O teste envia quatro tons sintéticos distintos, um por
-canal, durante três segundos. Verifica sinal esperado, ausência de troca de
-canais, mistura entre cabos, erros de callback e saturação das filas. Imprime
-um relatório JSON e fecha os streams. Não grava PCM nem usa provedores de IA.
-Um resultado positivo cobre transporte e isolamento nessa execução; latência,
-permissões, interrupções, uso por múltiplos aplicativos e estabilidade prolongada
-continuam exigindo os cenários de `docs/testing.md`.
+In PowerShell, use a single line or backticks for line continuation, and append
+`.exe` to the executable. The test sends four distinct synthetic tones, one per
+channel, for three seconds. It checks the expected signal, channel order,
+separation between cables, callback errors and queue saturation. It prints a
+JSON report and closes the streams. It does not record PCM or use AI providers.
+A passing result covers transport and isolation for that run; latency,
+permissions, interruptions, use by multiple applications and long-term stability
+still require the scenarios in `docs/testing.md`.
 
-## Referências e licenças
+## References and licenses
 
-O código Babel original e seus núcleos Rust usam MIT. A adaptação Windows usa
-o SimpleAudioSample oficial sob **MS-PL**; sua licença e a revisão/hash de cada
-arquivo estão incluídos em `native/windows`. Não incorpora VB-CABLE nem BlackHole.
-Esses drivers podem continuar sendo instalados separadamente como alternativas,
-com suas licenças próprias. O Linux continua usando PulseAudio/PipeWire-pulse.
+Original Babel code and its Rust cores use MIT. The Windows adaptation uses
+the official SimpleAudioSample under **MS-PL**; its license and each file's
+revision/hash are included in `native/windows`. It does not incorporate
+VB-CABLE or BlackHole. Those drivers can still be installed separately as
+alternatives under their own licenses. Linux continues to use
+PulseAudio/PipeWire-pulse.
 
-- [Apple: criação de AudioServerPlugIn](https://developer.apple.com/documentation/coreaudio/creating-an-audio-server-driver-plug-in).
+- [Apple: creating an AudioServerPlugIn](https://developer.apple.com/documentation/coreaudio/creating-an-audio-server-driver-plug-in).
 - [Microsoft: SimpleAudioSample](https://github.com/microsoft/Windows-driver-samples/tree/main/audio/simpleaudiosample).
-- [Microsoft: miniports de áudio](https://learn.microsoft.com/en-us/windows-hardware/drivers/audio/miniport-driver-types-by-operating-system).
-- [SetupAPI: verificação do INF pelo catálogo](https://learn.microsoft.com/en-us/windows/win32/api/setupapi/nf-setupapi-setupverifyinffilew).
+- [Microsoft: audio miniports](https://learn.microsoft.com/en-us/windows-hardware/drivers/audio/miniport-driver-types-by-operating-system).
+- [SetupAPI: verifying an INF against its catalog](https://learn.microsoft.com/en-us/windows/win32/api/setupapi/nf-setupapi-setupverifyinffilew).

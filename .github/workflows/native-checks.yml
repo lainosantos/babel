@@ -1,0 +1,50 @@
+name: Native and package checks
+on:
+  workflow_call:
+permissions:
+  contents: read
+jobs:
+  portable:
+    env:
+      RUST_TEST_THREADS: '4'
+    runs-on: ubuntu-22.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+          targets: x86_64-pc-windows-gnu
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install Linux package validation tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes rpm rpm2cpio cpio
+      - name: Safe core and ABI policy tests (no device I/O)
+        run: |
+          set -euo pipefail
+          cargo fmt --manifest-path native/macos/Cargo.toml --all -- --check
+          cargo fmt --manifest-path native/windows/transport/Cargo.toml -- --check
+          cargo fmt --manifest-path native/windows/installer/Cargo.toml -- --check
+          cargo test --locked --manifest-path native/macos/Cargo.toml
+          cargo test --locked --manifest-path native/windows/transport/Cargo.toml --lib
+          cargo test --locked --manifest-path native/windows/installer/Cargo.toml
+          cargo clippy --locked --manifest-path native/macos/Cargo.toml --all-targets -- -D warnings
+          cargo clippy --locked --manifest-path native/windows/transport/Cargo.toml --all-targets -- -D warnings
+          cargo clippy --locked --manifest-path native/windows/installer/Cargo.toml --all-targets --target x86_64-pc-windows-gnu -- -D warnings
+      - name: Rust and C++ transport integration outside the kernel
+        run: python3 native/windows/tests/test_shim.py
+      - name: Verify pinned Microsoft sources and generate WaveRT project
+        run: python3 native/windows/prepare.py --output artifacts/wdk-source
+      - name: Driver and installer package contracts
+        env:
+          BABEL_WDK_GENERATED: artifacts/wdk-source
+        run: |
+          set -euo pipefail
+          python3 -m unittest discover -s native/windows/tests -p 'test_*.py' -v
+          python3 -m unittest discover -s packaging/windows -p 'test_*.py' -v
+          python3 -m unittest discover -s packaging/macos -p 'test_*.py' -v
+          python3 -m unittest discover -s packaging/linux -p 'test_*.py' -v
+          python3 -m unittest discover -s scripts -p test_local_runtime.py -v

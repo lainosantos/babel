@@ -1146,8 +1146,8 @@
     }
     for (const detail of document.querySelectorAll('[data-voice-kind]')) detail.textContent = `${voiceKind(detail.dataset.voiceKind)} · ${detail.dataset.voiceId}`;
     for (const link of document.querySelectorAll('a[href^="/help/"]')) {
-      link.hreflang = 'pt';
-      link.title = t('help.portuguese');
+      link.hreflang = 'en';
+      link.title = t('help.documentation');
     }
     renderPlatform();
     renderFilePathPreview();

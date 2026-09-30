@@ -70,7 +70,7 @@ where
             tokio::select! {
                 biased;
                 _ = cancel.cancelled() => return Ok(()),
-                changed = usage.changed() => changed.context("Monitor de uso dos dispositivos virtuais encerrado")?,
+                changed = usage.changed() => changed.context("Virtual device usage monitor closed")?,
             }
             continue;
         }
@@ -89,7 +89,7 @@ where
                 _ = cancel.cancelled() => break Ok(()),
                 changed = usage.changed() => {
                     if changed.is_err() {
-                        break Err(anyhow!("Monitor de uso dos dispositivos virtuais encerrado"));
+                        break Err(anyhow!("Virtual device usage monitor closed"));
                     }
                     let current = usage.borrow_and_update().clone();
                     let (active, current_epoch) = selected(&current, origin);
@@ -101,7 +101,7 @@ where
                 }
                 result = &mut worker => return result.and_then(|()| {
                     if cancel.is_cancelled() { Ok(()) }
-                    else { Err(anyhow!("O fluxo do dispositivo virtual encerrou inesperadamente")) }
+                    else { Err(anyhow!("Virtual device stream ended unexpectedly")) }
                 }),
             }
         };
@@ -114,7 +114,7 @@ where
         active_cancel.cancel();
         tokio::time::timeout(Duration::from_secs(4), &mut worker)
             .await
-            .context("Tempo limite ao suspender o dispositivo virtual")??;
+            .context("Timed out while suspending the virtual device")??;
         waiting(&metrics, inspection_error(&usage.borrow(), origin));
         selection_changed?;
     }

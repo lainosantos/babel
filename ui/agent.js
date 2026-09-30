@@ -323,7 +323,7 @@
       });
       const guide = localized('a', 'agent.guide');
       guide.href = '/help/voice-commands'; guide.target = '_blank'; guide.rel = 'noopener';
-      guide.hreflang = 'pt'; guide.title = t('help.portuguese');
+      guide.hreflang = 'en'; guide.title = t('help.documentation');
       actions.append(configure, guide); notice.append(title, hint, details, actions);
       byId('agent-error').after(notice);
     }
@@ -490,7 +490,7 @@
   byId('agent-cancel').addEventListener('click', () => action(async () => { await request('/agent/cancel', { method: 'POST', body: {} }); await poll(); }));
   window.addEventListener('babel:languagechange', () => {
     controls(); if (state.status) renderStatus(state.status);
-    for (const link of byId('voice-agent').querySelectorAll('a[href^="/help/"]')) { link.hreflang = 'pt'; link.title = t('help.portuguese'); }
+    for (const link of byId('voice-agent').querySelectorAll('a[href^="/help/"]')) { link.hreflang = 'en'; link.title = t('help.documentation'); }
   });
   async function initialize() {
     try {

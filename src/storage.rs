@@ -34,7 +34,7 @@ pub fn resolve(
     ] {
         ensure!(
             path.to_str().is_some(),
-            "A prévia das pastas precisa de caminhos representáveis em UTF-8"
+            "The folder preview requires paths representable in UTF-8"
         );
     }
     Ok(paths)
@@ -55,7 +55,7 @@ fn base_from_home(home: Option<PathBuf>) -> String {
 fn validate_path_value(value: &str, label: &str) -> Result<()> {
     ensure!(
         !value.trim().is_empty() && value.len() <= 4096 && !value.contains('\0'),
-        "{label} inválida: informe um caminho de até 4096 bytes"
+        "Invalid {label}: enter a path of up to 4096 bytes"
     );
     Ok(())
 }
@@ -71,25 +71,25 @@ pub(crate) fn validate_path(value: &str, label: &str) -> Result<()> {
         );
         ensure!(
             path.is_absolute() || (!path.has_root() && !prefix),
-            "{label} ambígua: use caminho relativo, unidade completa (C:\\pasta) ou UNC"
+            "Ambiguous {label}: use a relative path, a complete drive path (C:\\folder) or UNC"
         );
     }
     Ok(())
 }
 
 pub(crate) fn resolve_base(base_path: &str) -> Result<PathBuf> {
-    validate_path_value(base_path, "Pasta base")?;
+    validate_path_value(base_path, "base folder")?;
     let path = Path::new(base_path);
     ensure!(
         path.is_absolute(),
-        "A pasta base precisa ser um caminho absoluto"
+        "The base folder must be an absolute path"
     );
     Ok(path.to_path_buf())
 }
 
 pub(crate) fn resolve_directory(base_path: &Path, directory: &str) -> Result<PathBuf> {
-    validate_path(directory, "Pasta de arquivos")?;
-    ensure!(base_path.is_absolute(), "A pasta base precisa ser absoluta");
+    validate_path(directory, "file folder")?;
+    ensure!(base_path.is_absolute(), "The base folder must be absolute");
     join_absolute(base_path, directory)
 }
 
@@ -99,7 +99,7 @@ fn join_absolute(anchor: &Path, path: &str) -> Result<PathBuf> {
         // An explicit absolute folder remains independent of the base setting.
         return Ok(path.to_path_buf());
     }
-    std::path::absolute(anchor.join(path)).context("Não foi possível resolver a pasta de arquivos")
+    std::path::absolute(anchor.join(path)).context("Could not resolve the file folder")
 }
 
 #[cfg(test)]

@@ -1,86 +1,28 @@
-name: Babel CI and installers
-on: [push, pull_request, workflow_dispatch]
+name: Babel CI
+on:
+  push:
+    branches: ['**']
+  pull_request:
+    types: [opened, reopened, synchronize, edited]
+  workflow_dispatch:
 permissions:
   contents: read
 concurrency:
   group: babel-ci-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 jobs:
-  test:
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-22.04, macos-15, windows-2022]
-    runs-on: ${{ matrix.os }}
-    timeout-minutes: 35
+  conventional-commits:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 5
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
         with:
-          components: rustfmt, clippy
-      - uses: Swatinem/rust-cache@v2
-        with:
-          cache-on-failure: true
+          fetch-depth: 0
+          persist-credentials: false
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-      - run: cargo fmt --all -- --check
-      - run: cargo clippy --locked --all-targets -- -D warnings
-      - name: Native tests (no audio drivers required)
-        shell: bash
-        run: |
-          set -euo pipefail
-          mkdir -p artifacts
-          rustc -Vv > artifacts/toolchain.txt
-          cargo test --locked --all-targets 2>&1 | tee artifacts/rust-tests.log
-      - run: python -m unittest discover -s scripts -p test_needle_bridge.py -v
-      - run: cargo build --locked --bins
-      - name: Native CLI smoke with isolated config
-        shell: bash
-        run: |
-          suffix=''
-          if [ "$RUNNER_OS" = Windows ]; then suffix='.exe'; fi
-          python scripts/test_cli_smoke.py --babel "target/debug/babel${suffix}" --output-dir artifacts/cli-smoke
-      - name: Native command feedback render smoke
-        shell: bash
-        run: |
-          suffix=''
-          if [ "$RUNNER_OS" = Windows ]; then suffix='.exe'; fi
-          python scripts/test_feedback_smoke.py --feedback "target/debug/babel-feedback${suffix}" --output-dir artifacts/command-feedback
-      - name: Native feedback on isolated Linux display
-        if: runner.os == 'Linux'
-        shell: bash
-        run: |
-          set -euo pipefail
-          # winit and softbuffer load these desktop libraries at runtime, so
-          # successful linking (or Xvfb already being installed) is insufficient.
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            xvfb libx11-6 libx11-xcb1 libxcursor1 libxi6 \
-            libxkbcommon0 libxkbcommon-x11-0
-          python scripts/test_native_feedback.py --xvfb "$(command -v Xvfb)" 2>&1 | tee artifacts/native-feedback-window.log
-      - name: Preserve test evidence
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: test-evidence-${{ matrix.os }}
-          path: artifacts/
-          if-no-files-found: warn
-          retention-days: 14
-  dashboard:
-    runs-on: ubuntu-22.04
-    timeout-minutes: 10
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 22
-          cache: npm
-          cache-dependency-path: ui/package-lock.json
-      - run: npm ci
-        working-directory: ui
-      - run: npm test
-        working-directory: ui
-  installers:
-    needs: [test, dashboard]
-    uses: ./.github/workflows/native-drivers.yml
+      - name: Validate new commit subjects and pull request title
+        run: python .github/scripts/conventional_commits.py
+  checks:
+    uses: ./.github/workflows/checks.yml

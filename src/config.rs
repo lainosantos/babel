@@ -79,7 +79,7 @@ impl InterfaceConfig {
     pub fn validate(&self) -> Result<()> {
         ensure!(
             self.language == "system" || crate::i18n::is_supported_language(&self.language),
-            "Idioma da interface não suportado"
+            "Unsupported interface language"
         );
         Ok(())
     }
@@ -138,7 +138,7 @@ impl HistoryConfig {
     pub fn validate(&self) -> Result<()> {
         ensure!(
             (1..=3600).contains(&self.duration_secs),
-            "Histórico de áudio: 1 a 3600 segundos"
+            "Audio history: 1 to 3600 seconds"
         );
         Ok(())
     }
@@ -469,14 +469,14 @@ impl AppConfig {
     pub fn load(path: &Path) -> Result<Self> {
         ensure!(
             fs::metadata(path)?.len() <= 65_536,
-            "Configuração maior que 64 KiB"
+            "Configuration exceeds 64 KiB"
         );
-        let text = fs::read_to_string(path).context("Não foi possível ler a configuração")?;
-        let document: toml::Value = toml::from_str(&text).context("Configuração TOML inválida")?;
+        let text = fs::read_to_string(path).context("Could not read the configuration")?;
+        let document: toml::Value = toml::from_str(&text).context("Invalid TOML configuration")?;
         let mut cfg: Self = document
             .clone()
             .try_into()
-            .context("Configuração TOML inválida")?;
+            .context("Invalid TOML configuration")?;
         let stored_base = document
             .get("files")
             .and_then(|files| files.get("base_path"));
@@ -489,15 +489,14 @@ impl AppConfig {
             } else {
                 &cfg.files.base_path
             };
-            let absolute_config = std::path::absolute(path).context(
-                "Não foi possível resolver o caminho da configuração para migrar a pasta base",
-            )?;
+            let absolute_config = std::path::absolute(path)
+                .context("Could not resolve the configuration path to migrate the base folder")?;
             let directory = absolute_config
                 .parent()
-                .context("A configuração não possui uma pasta válida")?;
+                .context("The configuration has no valid parent folder")?;
             cfg.files.base_path = crate::storage::resolve_directory(directory, legacy_base)?
                 .to_str()
-                .context("A pasta base migrada precisa ser representável em UTF-8")?
+                .context("The migrated base folder must be representable in UTF-8")?
                 .to_owned();
         }
         // A removed local diagnostic provider must never silently become cloud
@@ -523,14 +522,14 @@ impl AppConfig {
         cfg.validate()?;
         if migrate_base || migrate_provider || migrate_stt || migrate_runtime {
             cfg.save(path)
-                .context("Não foi possível persistir a migração da configuração")?;
+                .context("Could not persist the configuration migration")?;
         }
         Ok(cfg)
     }
     pub fn save(&self, path: &Path) -> Result<()> {
         self.validate()?;
         let serialized = toml::to_string_pretty(self)?;
-        ensure!(serialized.len() <= 65_536, "Configuração maior que 64 KiB");
+        ensure!(serialized.len() <= 65_536, "Configuration exceeds 64 KiB");
         let parent = path
             .parent()
             .filter(|p| !p.as_os_str().is_empty())
@@ -546,7 +545,7 @@ impl AppConfig {
         file.write_all(serialized.as_bytes())?;
         file.as_file().sync_all()?;
         file.persist(path)
-            .context("Não foi possível salvar a configuração atomicamente")?;
+            .context("Could not save the configuration atomically")?;
         Ok(())
     }
     pub fn validate(&self) -> Result<()> {
@@ -554,15 +553,15 @@ impl AppConfig {
         self.agent.validate()?;
         self.local_runtime.validate()?;
         self.history.validate()?;
-        ensure!(self.version == 1, "Versão de configuração não suportada");
+        ensure!(self.version == 1, "Unsupported configuration version");
         crate::storage::resolve_base(&self.files.base_path)?;
         crate::session::validate_pattern(&self.files.name_pattern)?;
         if self.recording.enabled {
             ensure!(
                 self.recording.microphone || self.recording.speaker,
-                "Escolha pelo menos uma origem para gravar áudio"
+                "Select at least one source to record audio"
             );
-            crate::storage::validate_path(&self.recording.directory, "Pasta de gravação de áudio")?;
+            crate::storage::validate_path(&self.recording.directory, "audio recording folder")?;
         }
         for (name, p) in [
             ("gemini", &self.providers.gemini),
@@ -576,11 +575,11 @@ impl AppConfig {
                     && model
                         .bytes()
                         .all(|b| b.is_ascii_alphanumeric() || b"-._".contains(&b)),
-                "Identificador de modelo inválido no provider {name}"
+                "Invalid model identifier for provider {name}"
             );
             ensure!(
                 model != "gemini-3.8-flash" || name != "gemini",
-                "gemini-3.8-flash não é um modelo Live de saída de voz"
+                "gemini-3.8-flash is not a Live voice output model"
             );
             let env = &p.api_key_env;
             ensure!(
@@ -588,34 +587,34 @@ impl AppConfig {
                     && env.len() <= 128
                     && !env.as_bytes()[0].is_ascii_digit()
                     && env.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_'),
-                "Nome de variável de ambiente inválido para {name}"
+                "Invalid environment variable name for {name}"
             );
             ensure!(
                 (1..=120).contains(&p.connect_timeout_secs),
-                "Timeout de {name}: 1 a 120 segundos"
+                "Timeout for {name}: 1 to 120 seconds"
             );
             ensure!(
                 p.max_reconnect_attempts <= 20,
-                "Máximo de 20 reconexões para {name}"
+                "At most 20 reconnections for {name}"
             );
             ensure!(
                 p.voice.len() <= 128
                     && p.tts_model.len() <= 128
                     && p.transcription_model.len() <= 128,
-                "Configuração de voz/modelo excessiva em {name}"
+                "Voice/model settings exceed the limit for {name}"
             );
             ensure!(
                 p.endpoint.len() <= 2048,
-                "Endpoint de {name} excede 2048 bytes"
+                "Endpoint for {name} exceeds 2048 bytes"
             );
         }
         ensure!(
             self.providers.gemini.endpoint == GEMINI_ENDPOINT,
-            "O adaptador Gemini usa o endpoint oficial fixo"
+            "The Gemini adapter uses the fixed official endpoint"
         );
         ensure!(
             self.providers.elevenlabs.endpoint == "https://api.elevenlabs.io/v1",
-            "O adaptador ElevenLabs usa o endpoint oficial fixo"
+            "The ElevenLabs adapter uses the fixed official endpoint"
         );
         // Validate only transports needed by selected features. An original-only
         // session must not require an unused translator, synthesizer or ASR setup.
@@ -649,94 +648,94 @@ impl AppConfig {
         }
         ensure!(
             (100..=1000).contains(&self.audio.capture_queue_ms),
-            "Fila de captura: 100 a 1000 ms"
+            "Capture queue: 100 to 1000 ms"
         );
         ensure!(
             (100..=5000).contains(&self.audio.playback_queue_ms),
-            "Fila de reprodução: 100 a 5000 ms"
+            "Playback queue: 100 to 5000 ms"
         );
         ensure!(
             (100..=1000).contains(&self.audio.max_capture_age_ms),
-            "Idade máxima da captura: 100 a 1000 ms"
+            "Maximum capture age: 100 to 1000 ms"
         );
         ensure!(
             (5..=200).contains(&self.audio.device_latency_ms),
-            "Latência do dispositivo: 5 a 200 ms"
+            "Device latency: 5 to 200 ms"
         );
         if self.transcription.enabled {
             ensure!(
                 self.transcription.microphone || self.transcription.speaker,
-                "Escolha pelo menos um fluxo para transcrever"
+                "Select at least one route to transcribe"
             );
-            crate::storage::validate_path(&self.transcription.directory, "Pasta de transcrições")?;
+            crate::storage::validate_path(&self.transcription.directory, "transcript folder")?;
         }
-        for (name, route) in [("microfone", &self.microphone), ("saída", &self.speaker)] {
+        for (name, route) in [("microphone", &self.microphone), ("speaker", &self.speaker)] {
             ensure!(
                 matches!(route.provider.as_str(), "gemini" | "openai" | "local"),
-                "Provider de tradução desconhecido em {name}"
+                "Unknown translation provider for {name}"
             );
             for lang in [&route.source_language, &route.target_language] {
                 ensure!(
                     !lang.is_empty()
                         && lang.len() <= 35
                         && lang.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-'),
-                    "Código de idioma inválido em {name} (ex. pt-BR)"
+                    "Invalid language code for {name} (e.g. pt-BR)"
                 );
             }
             ensure!(
                 route.gain.is_finite() && (0.0..=4.0).contains(&route.gain),
-                "Ganho de {name}: 0 a 4"
+                "Gain for {name}: 0 to 4"
             );
             ensure!(
                 route.prompt.len() <= 8192,
-                "Prompt de {name} excede 8192 bytes"
+                "Prompt for {name} exceeds 8192 bytes"
             );
             ensure!(
                 !route.enabled
                     || !self.continuous_translation(route)
                     || route.prompt.trim().is_empty(),
-                "Modelo dedicado contínuo não aceita prompts em {name}; escolha um modelo conversacional"
+                "The dedicated continuous model does not accept prompts for {name}; choose a conversational model"
             );
             ensure!(
                 matches!(
                     route.voice.engine.as_str(),
                     "native" | "gemini" | "elevenlabs"
                 ),
-                "Síntese de voz inválida em {name}"
+                "Invalid voice synthesis for {name}"
             );
             ensure!(
                 (100..=2000).contains(&route.voice.chunk_ms),
-                "Intervalo de texto para síntese: 100 a 2000 ms"
+                "Text interval for synthesis: 100 to 2000 ms"
             );
             ensure!(
                 route.voice.voice_id.len() <= 256 && route.voice.style.len() <= 2000,
-                "Voz/estilo excessivo em {name}"
+                "Voice/style exceeds the limit for {name}"
             );
             if !route.enabled {
                 // Unused voice settings cannot prevent original recording/ASR.
             } else if route.voice.engine == "native" {
                 ensure!(
                     route.voice.style.is_empty(),
-                    "Estilo TTS só é suportado pela síntese Gemini"
+                    "TTS style is only supported by Gemini synthesis"
                 );
                 ensure!(
                     !self.continuous_translation(route) || route.voice.voice_id.is_empty(),
-                    "Voz fixa/clonada em {name} exige síntese Gemini ou ElevenLabs; o modelo dedicado não aceita seleção de voz nativa"
+                    "A fixed/cloned voice for {name} requires Gemini or ElevenLabs synthesis; the dedicated model does not accept native voice selection"
                 );
             } else {
                 ensure!(
                     !route.voice.voice_id.trim().is_empty(),
-                    "Escolha uma voz para a síntese de {name}"
+                    "Select a synthesis voice for {name}"
                 );
                 ensure!(
                     route.voice.engine != "elevenlabs" || route.voice.style.is_empty(),
-                    "ElevenLabs não aceita este prompt livre de estilo; use uma voz de design"
+                    "ElevenLabs does not support this free-form style prompt; use a designed voice"
                 );
             }
             for device in [&route.capture_device, &route.playback_device] {
                 ensure!(
                     device.len() <= 1024 && !device.contains(['\0', '\n', '\r']),
-                    "Dispositivo inválido em {name}"
+                    "Invalid device for {name}"
                 );
             }
         }
@@ -746,13 +745,13 @@ impl AppConfig {
     /// Validate routing independently of cloud credentials or feature switches.
     /// Incomplete routes are allowed while the user configures their devices.
     pub fn validate_routing(&self) -> Result<()> {
-        for (name, route) in [("microfone", &self.microphone), ("saída", &self.speaker)] {
+        for (name, route) in [("microphone", &self.microphone), ("speaker", &self.speaker)] {
             for device in [&route.capture_device, &route.playback_device] {
                 ensure!(
                     device.len() <= 1024
                         && !device.contains(['\0', '\n', '\r'])
                         && !device.starts_with('@'),
-                    "Use dispositivos explícitos e válidos em {name}"
+                    "Use explicit, valid devices for {name}"
                 );
             }
             if !route_configured(route) {
@@ -760,14 +759,14 @@ impl AppConfig {
             }
             ensure!(
                 canonical_device(&route.capture_device) != canonical_device(&route.playback_device),
-                "O fluxo {name} retorna ao próprio dispositivo; use cabos independentes"
+                "The {name} route feeds back into its own device; use independent cables"
             );
         }
         if route_configured(&self.microphone) && route_configured(&self.speaker) {
             ensure!(
                 canonical_device(&self.microphone.playback_device)
                     != canonical_device(&self.speaker.capture_device),
-                "Microfone e saída virtuais precisam de dois cabos independentes"
+                "The virtual microphone and speaker require two independent cables"
             );
         }
         Ok(())
@@ -780,17 +779,17 @@ impl AppConfig {
                 || self.speaker.enabled
                 || self.transcription.enabled
                 || self.recording.enabled,
-            "Selecione tradução, transcrição ou gravação para iniciar uma sessão; o roteamento original já funciona sem sessão"
+            "Select translation, transcription or recording to start a session; original audio routing already works without a session"
         );
         for (name, route, transcribe, record) in [
             (
-                "microfone",
+                "microphone",
                 &self.microphone,
                 self.transcription.microphone,
                 self.recording.microphone,
             ),
             (
-                "saída",
+                "speaker",
                 &self.speaker,
                 self.transcription.speaker,
                 self.recording.speaker,
@@ -801,7 +800,7 @@ impl AppConfig {
             if route.enabled || transcribe || record {
                 ensure!(
                     route_configured(route),
-                    "Selecione captura e reprodução de {name}"
+                    "Select capture and playback devices for {name}"
                 );
             }
             if route.enabled && matches!(route.provider.as_str(), "gemini" | "openai") {
@@ -1070,7 +1069,7 @@ mod tests {
                     .validate()
                     .unwrap_err()
                     .to_string()
-                    .contains("Provider de tradução desconhecido")
+                    .contains("Unknown translation provider")
             );
             let directory = tempfile::tempdir().unwrap();
             let path = directory.path().join("new.toml");
@@ -1394,7 +1393,7 @@ mod tests {
             cfg.validate_for_start()
                 .unwrap_err()
                 .to_string()
-                .contains("retorna ao próprio dispositivo")
+                .contains("feeds back into its own device")
         );
     }
     #[test]
@@ -1441,7 +1440,7 @@ mod tests {
             cfg.validate_routing()
                 .unwrap_err()
                 .to_string()
-                .contains("dois cabos independentes")
+                .contains("two independent cables")
         );
         assert!(cfg.validate().is_err());
     }

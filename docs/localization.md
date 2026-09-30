@@ -1,4 +1,4 @@
-# Idiomas da interface / Interface languages
+# Interface languages
 
 The dashboard and tray support English (`en`) and Portuguese (`pt`). The saved
 preference is `interface.language`; `system` is the default, including for older
@@ -9,11 +9,11 @@ language. Regional variants map to their base language. Unsupported, missing,
 
 ## Change language
 
-Use **Interface language / Idioma da interface** in the dashboard. The preference
+Use **Interface language** in the dashboard. The preference
 is saved immediately. You can change it while a session is running without
 restarting audio, AI connections or session files. It is separate from speech
 source/target languages and does not translate user prompts, names, voice IDs,
-transcripts or existing recordings. Help documents remain in Portuguese.
+transcripts or existing recordings. Help documents are maintained in English; intentional interface translations remain available.
 
 The authenticated `GET /api/interface` returns the saved preference, resolved
 language, detected system locale, registered languages and configuration revision.

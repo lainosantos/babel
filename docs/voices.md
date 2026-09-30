@@ -1,135 +1,225 @@
-# Biblioteca de vozes e síntese personalizada
+# Voice library and custom synthesis
 
-O Babel oferece duas escolhas de saída. O caminho direto usa o áudio traduzido pelo provedor de fala. O caminho com voz personalizada recebe texto traduzido internamente e o sintetiza pela voz selecionada. Os arquivos de transcrição continuam contendo somente as falas originais; o texto traduzido usado pela síntese não deve ser gravado como transcrição original.
+Babel offers two output choices. The direct path uses audio translated by the
+speech provider. The custom-voice path receives translated text internally and
+synthesizes it with the selected voice. Transcript files still contain only
+original speech; translated text used for synthesis must not be saved as an
+original transcript.
 
-A síntese personalizada acrescenta uma etapa de IA, requisições e custo. O áudio sintetizado chega em streaming, mas precisa de algum texto antes de começar. Uma biblioteca de vozes não torna esse caminho equivalente à tradução direta contínua. É possível escolher uma voz diferente para cada direção; isso identifica a direção, não cada participante de uma chamada com áudio misturado.
+Custom synthesis adds an AI step, requests and cost. Synthesized audio streams,
+but needs some text before it can begin. A voice library does not make this path
+equivalent to direct continuous translation. You can choose a different voice
+for each direction; that identifies the direction, not each participant in a
+call with mixed audio.
 
-## O que está implementado
+## Implemented features
 
-| Recurso | Gemini | ElevenLabs |
+| Feature | Gemini | ElevenLabs |
 |---|---|---|
-| Listar biblioteca da conta | Vozes prontas e perfis personalizados | Vozes disponíveis para a chave |
-| Criar voz por descrição | Perfil `prompted` persistente | Gera prévias e salva a primeira retornada |
-| Clonar com referência enviada pelo usuário | Referência e gravação separada de consentimento | Instant Voice Cloning com referência |
-| Síntese com voz selecionada | Gemini 3.8 Flash TTS ou Flash-Lite TTS | Modelo TTS configurado, por exemplo `eleven_flash_v2_5` |
-| Prompt textual de estilo por síntese | Sim, via `speech_metadata.style` | Não neste adaptador; o campo precisa ficar vazio |
-| Identificar várias pessoas no mesmo áudio | Não oferecido pela biblioteca | Não oferecido pela biblioteca |
-| Cadastrar automaticamente a voz dos primeiros segundos | Não implementado | Não implementado |
+| List account library | Preset voices and custom profiles | Voices available to the key |
+| Create a voice from a description | Persistent `prompted` profile | Generates previews and saves the first returned |
+| Clone a user-uploaded reference | Reference and separate consent recording | Instant Voice Cloning with a reference |
+| Synthesize using a selected voice | Gemini 3.8 Flash TTS or Flash-Lite TTS | Configured TTS model, such as `eleven_flash_v2_5` |
+| Per-synthesis text style prompt | Yes, through `speech_metadata.style` | Not in this adapter; the field must be empty |
+| Identify several people in the same audio | Not provided by the library | Not provided by the library |
+| Automatically enroll a voice from its first seconds | Not implemented | Not implemented |
 
-O cliente usa o ID que a API realmente retorna. Não troca silenciosamente a voz escolhida por uma voz padrão. Uma resposta de cadastro não garante que o provedor já liberou a voz para síntese: a ElevenLabs pode retornar `verification_required`.
+The client uses the ID actually returned by the API. It does not silently replace
+the selected voice with a default. An enrollment response does not guarantee the
+provider has released the voice for synthesis: ElevenLabs can return
+`verification_required`.
 
-## Configurar credenciais
+## Configure credentials
 
-1. Crie uma chave no provedor e confirme acesso aos modelos e às operações de biblioteca.
-2. Configure a chave no painel de credenciais do Babel ou no ambiente do processo que inicia o aplicativo.
-3. Use nomes separados, por exemplo `GEMINI_API_KEY` e `ELEVENLABS_API_KEY`. Os perfis guardam o nome da credencial, não o segredo.
-4. Escolha o provedor da biblioteca e carregue as vozes. Uma voz Gemini não pode ser usada como ID da ElevenLabs, ou vice-versa.
-5. Aplique o perfil à rota desejada e reinicie a tradução para usar a nova configuração.
+1. Create a provider key and confirm access to the models and library operations.
+2. Configure the key in Babel's credential panel or the environment of the
+   process that launches the app.
+3. Use separate names, such as `GEMINI_API_KEY` and `ELEVENLABS_API_KEY`.
+   Profiles store the credential name, not the secret.
+4. Choose the library provider and load voices. A Gemini voice cannot serve as
+   an ElevenLabs ID, or vice versa.
+5. Apply the profile to the desired route and restart translation to use it.
 
-No Bash, é possível inserir uma chave sem registrá-la literalmente no histórico:
+In Bash, enter a key without putting its literal value in shell history:
 
 ```bash
 read -rsp 'Gemini API key: ' GEMINI_API_KEY
 export GEMINI_API_KEY
 ```
 
-O mesmo padrão funciona com `ELEVENLABS_API_KEY`. No Windows, configure a variável para o processo que abre o Babel ou use o painel. Chaves inseridas no painel ficam somente na memória da sessão e têm precedência sobre o ambiente. Reiniciar o aplicativo remove esse valor de memória. Os arquivos de configuração não persistem a chave.
+The same pattern works with `ELEVENLABS_API_KEY`. On Windows, set the variable
+for the process that opens Babel or use the dashboard. Dashboard keys live only
+in process memory and take precedence over the environment. Restarting the app
+removes the in-memory value. Configuration files do not persist keys.
 
-As conexões cloud usam endpoints oficiais fixos e TLS. Redirecionamentos HTTP são recusados. Erros apresentados pelo Babel informam o código HTTP, sem reproduzir corpos de resposta ou cabeçalhos com segredos. A chave é marcada como sensível e a cópia obtida do resolvedor usa `Zeroizing`; isso não garante apagar todas as cópias internas das bibliotecas HTTP/TLS nem o ambiente do processo.
+Cloud connections use fixed official endpoints and TLS. HTTP redirects are
+rejected. Babel errors report the HTTP code without response bodies or headers
+containing secrets. The key is marked sensitive and the resolver's copy uses
+`Zeroizing`; this does not guarantee erasure of all internal HTTP/TLS copies
+or the process environment.
 
-## Criar uma voz por descrição
+## Create a voice from a description
 
-Escolha um nome que facilite reconhecer o perfil e descreva os traços permanentes: timbre, faixa vocal, sotaque e estilo de locução. Um exemplo é “voz adulta, acolhedora, articulação clara e sotaque brasileiro neutro”. Use o idioma/código desejado, como `pt-BR`.
+Choose a recognizable profile name and describe stable traits: timbre, vocal
+range, accent and delivery style. For example: “adult, warm voice, clear
+articulation and a neutral Brazilian accent.” Use the desired language/code,
+such as `pt-BR`.
 
-No Gemini, o cadastro usa `gemini-3.8-flash-tts`, `type=prompted` e armazenamento de perfil habilitado. O ID retornado pode ser reutilizado em sínteses. Um prompt de estilo por fala controla a interpretação sem redefinir o perfil. [Voice design](https://ai.google.dev/gemini-api/docs/voice-design).
+Gemini enrollment uses `gemini-3.8-flash-tts`, `type=prompted` and profile
+storage enabled. The returned ID is reusable for synthesis. A per-utterance
+style prompt controls delivery without redefining the profile.
+[Voice design](https://ai.google.dev/gemini-api/docs/voice-design).
 
-Na ElevenLabs, a operação tem duas chamadas: gerar prévias e salvar um ID gerado. Esta versão do Babel salva a primeira prévia retornada, conforme indicado na tabela de recursos. A descrição mais o idioma deve ter 20–1000 caracteres. O áudio da prévia não é baixado: `stream_previews=true` pede somente os IDs, reduzindo a resposta. Não há uma etapa de audição/comparação de todas as prévias nesta interface. [Design](https://elevenlabs.io/docs/api-reference/text-to-voice/design), [salvar perfil](https://elevenlabs.io/docs/api-reference/text-to-voice/create).
+ElevenLabs uses two calls: generate previews, then save a generated ID. This
+version of Babel saves the first returned preview, as stated in the feature
+table. Description plus language must contain 20–1000 characters. Preview audio
+is not downloaded: `stream_previews=true` requests IDs only, reducing the
+response. This interface has no step for auditioning/comparing every preview.
+[Design](https://elevenlabs.io/docs/api-reference/text-to-voice/design),
+[save profile](https://elevenlabs.io/docs/api-reference/text-to-voice/create).
 
-Criar um perfil é uma ação externa explícita, com possível cobrança e consumo da cota de vozes. O Babel não repete automaticamente a criação após erros de rede, para evitar perfis duplicados. Se houver timeout depois do envio, recarregue a biblioteca antes de tentar novamente: a operação pode ter sido concluída remotamente.
+Creating a profile is an explicit external action that may incur charges and
+consume voice quota. Babel does not automatically retry creation after network
+errors, avoiding duplicate profiles. If a request times out after sending,
+reload the library before retrying: it may already have completed remotely.
 
-## Clonar uma voz com referência
+## Clone a voice from a reference
 
-Os uploads aceitam **WAV RIFF, PCM16 sem compressão, mono, de 8 a 48 kHz**. Não basta renomear `.mp3` para `.wav`. O cliente verifica o cabeçalho, alinhamento, tamanho e duração. Use gravação limpa, sem músicas nem outras pessoas falando ao mesmo tempo.
+Uploads accept **RIFF WAV, uncompressed PCM16, mono, 8–48 kHz**. Renaming `.mp3`
+to `.wav` is insufficient. The client checks headers, alignment, size and
+duration. Use clean recordings without music or overlapping speakers.
 
-Para Gemini, prepare:
+For Gemini, prepare:
 
-- Referência de **10–30 segundos** da pessoa.
-- Outro WAV contendo a frase de consentimento exigida pelo provedor, falada pela mesma pessoa. O Babel aceita 1–60 segundos para esse arquivo.
-- A documentação recomenda 24 kHz e gravações em condições acústicas semelhantes. A API verifica o consentimento; validar o formato localmente não substitui essa verificação.
+- A **10–30-second** reference of the person.
+- Another WAV containing the provider's required consent sentence, spoken by
+  the same person. Babel accepts 1–60 seconds for this file.
+- Documentation recommends 24 kHz and similar acoustic conditions. The API
+  verifies consent; local format validation does not replace that verification.
 
-Frase oficial em português brasileiro:
+Record the exact consent sentence prescribed by Google's voice-replication
+documentation for the recording language. Follow the provider's wording rather
+than translating or substituting a consent statement yourself.
 
-> Eu sou o proprietário desta voz e autorizo o Google a usá-la para criar um modelo de voz sintética.
+Persistent Gemini profiles have account/provider-defined limits and retention;
+consult documentation before relying on an ID permanently.
+[Replication requirements](https://ai.google.dev/gemini-api/docs/voice-replication).
 
-Os perfis Gemini persistentes têm limites e prazo de retenção definidos pela conta/provedor; consulte a documentação antes de depender de um ID permanentemente. [Requisitos de replicação](https://ai.google.dev/gemini-api/docs/voice-replication).
+For ElevenLabs, select the reference WAV. The adapter accepts 1–300 seconds,
+subject to upload limits and service requirements. It uses Instant Voice
+Cloning, not Professional Voice Cloning training. The separate consent file is
+specific to Gemini and is not sent in the ElevenLabs call. This does not remove
+account authorization, verification or access requirements.
+[Instant Voice Cloning](https://elevenlabs.io/docs/api-reference/voices/ivc/create).
 
-Para ElevenLabs, selecione a referência WAV. O adaptador aceita 1–300 segundos, sujeito ao limite do upload e às exigências do serviço. Ele usa Instant Voice Cloning; não implementa treinamento Professional Voice Cloning. O arquivo de consentimento separado é específico do fluxo Gemini e não é enviado na chamada ElevenLabs. Isso não elimina exigências de autorização, verificação ou acesso aplicadas à conta. [Instant Voice Cloning](https://elevenlabs.io/docs/api-reference/voices/ivc/create).
+The dashboard form accepts up to **2 MiB per WAV file**, both reference and
+consent. The local API limits the complete JSON request to **8 MiB**. Base64
+adds roughly one third to the size; Gemini's two files share that budget. The
+module also has an internal 16 MiB-per-decoded-file limit, but the smaller
+dashboard limits prevail. Mono 24 kHz WAV saves space and follows Gemini's
+recommendation.
 
-O formulário do painel aceita até **2 MiB por arquivo WAV**, tanto na referência quanto no consentimento. A API local limita a requisição JSON completa a **8 MiB**. Base64 aumenta o tamanho em aproximadamente um terço, e no Gemini os dois arquivos compartilham esse orçamento. O módulo também possui uma defesa interna de 16 MiB por arquivo decodificado; os limites menores do painel prevalecem. WAV mono de 24 kHz economiza espaço e atende à recomendação Gemini.
+Babel does not secretly capture participant samples or automatically associate
+cloned profiles with people in mixed audio. Profiles come from explicitly
+uploaded files and are selected per route.
 
-O Babel não captura amostras escondidas de participantes nem associa perfis clonados automaticamente a pessoas no áudio misturado. Os perfis são criados a partir dos arquivos explicitamente enviados e selecionados por rota.
+## Selection and playback
 
-## Seleção e reprodução
-
-No modo de voz personalizada, informe provedor de síntese, modelo, credencial e ID de voz correspondentes. Modelos Gemini aceitos nesta integração:
+For custom voices, supply matching synthesis provider, model, credential and
+voice ID. This integration accepts these Gemini models:
 
 ```text
 gemini-3.8-flash-tts
 gemini-3.8-flash-lite-tts
 ```
 
-Para ElevenLabs, um modelo de baixa latência como `eleven_flash_v2_5` pode ser configurado. A disponibilidade da voz/modelo depende da conta. O idioma `pt-BR` é convertido para o código `pt` usado pelo endpoint TTS; `eleven_multilingual_v2` detecta o idioma pelo texto, pois não aceita o parâmetro de idioma. O campo de estilo livre precisa ficar vazio para ElevenLabs. [Streaming TTS](https://elevenlabs.io/docs/api-reference/text-to-speech/stream).
+For ElevenLabs, a low-latency model such as `eleven_flash_v2_5` is configurable.
+Voice/model availability depends on the account. `pt-BR` maps to the TTS
+endpoint's `pt` code; `eleven_multilingual_v2` detects language from text because
+it does not accept a language parameter. The free-form style field must remain
+empty for ElevenLabs.
+[Streaming TTS](https://elevenlabs.io/docs/api-reference/text-to-speech/stream).
 
-O módulo emite PCM16 little-endian, mono, 24 kHz, em quadros de até 480 amostras, sem esperar baixar uma fala inteira. O motor controla o ritmo da reprodução pela quantidade real de amostras e conserva esse ritmo entre fragmentos de texto. O intervalo `voice.chunk_ms` limita a espera a partir do primeiro fragmento ainda não sintetizado, mesmo quando a fala continua. Frases são limitadas a 240 caracteres e a fila tem quatro trechos; se a síntese ficar atrasada além do orçamento configurado ou a fila encher, o fluxo termina com erro explícito. São verificados MIME, frequência quando informada, Base64 e continuidade dos pares de bytes. Áudio com cabeçalhos WAV/MP3/Ogg/FLAC não é tratado como PCM por engano. O Gemini precisa sinalizar conclusão do SSE; fechamento prematuro é erro. [Formato e streaming Gemini](https://ai.google.dev/gemini-api/docs/speech-generation#streaming-speech-generation).
+The module emits little-endian PCM16, mono, 24 kHz in frames of up to 480 samples,
+without downloading an entire utterance first. The engine paces playback by
+actual sample count and preserves that pace across text fragments.
+`voice.chunk_ms` bounds waiting from the first unsynthesized fragment, even
+while speech continues. Utterances are limited to 240 characters and the queue
+to four segments; if synthesis falls behind its configured budget or the queue
+fills, the flow ends with an explicit error. MIME, rate when supplied, Base64
+and byte-pair continuity are checked. Audio with WAV/MP3/Ogg/FLAC headers is not
+mistaken for raw PCM. Gemini must signal SSE completion; premature closure is
+an error. [Gemini formats and streaming](https://ai.google.dev/gemini-api/docs/speech-generation#streaming-speech-generation).
 
-## Endpoints usados
+## Endpoints
 
-| Provedor | Operação | Endpoint |
+| Provider | Operation | Endpoint |
 |---|---|---|
-| Gemini | Listar/criar perfis | `GET/POST https://generativelanguage.googleapis.com/v1beta/voices` |
-| Gemini | Síntese em SSE | `POST https://generativelanguage.googleapis.com/v1beta/interactions` |
-| ElevenLabs | Listar perfis | `GET https://api.elevenlabs.io/v2/voices` |
-| ElevenLabs | Gerar design | `POST https://api.elevenlabs.io/v1/text-to-voice/design` |
-| ElevenLabs | Salvar design | `POST https://api.elevenlabs.io/v1/text-to-voice` |
-| ElevenLabs | Clonar referência | `POST https://api.elevenlabs.io/v1/voices/add` |
-| ElevenLabs | Síntese PCM | `POST https://api.elevenlabs.io/v1/text-to-speech/{voice_id}/stream?output_format=pcm_24000` |
+| Gemini | List/create profiles | `GET/POST https://generativelanguage.googleapis.com/v1beta/voices` |
+| Gemini | SSE synthesis | `POST https://generativelanguage.googleapis.com/v1beta/interactions` |
+| ElevenLabs | List profiles | `GET https://api.elevenlabs.io/v2/voices` |
+| ElevenLabs | Generate design | `POST https://api.elevenlabs.io/v1/text-to-voice/design` |
+| ElevenLabs | Save design | `POST https://api.elevenlabs.io/v1/text-to-voice` |
+| ElevenLabs | Clone reference | `POST https://api.elevenlabs.io/v1/voices/add` |
+| ElevenLabs | PCM synthesis | `POST https://api.elevenlabs.io/v1/text-to-speech/{voice_id}/stream?output_format=pcm_24000` |
 
-No código, as operações públicas são `voices::list`, `voices::design`, `voices::clone_voice` e `voices::synthesize`. O painel expõe biblioteca, design e clone em suas rotas autenticadas; use a interface para aproveitar os tokens e a proteção de origem do aplicativo.
+Public code operations are `voices::list`, `voices::design`,
+`voices::clone_voice` and `voices::synthesize`. The dashboard exposes the library,
+design and cloning through authenticated routes; use the interface to benefit
+from the app's tokens and origin protection.
 
-Exemplo da estrutura de design enviada ao backend local, sem chave em texto claro:
+Example design request to the local backend, with no plaintext key:
 
 ```json
 {
   "provider": "gemini",
   "api_key_env": "GEMINI_API_KEY",
-  "name": "Português acolhedor",
-  "description": "Voz adulta acolhedora, articulação clara e sotaque brasileiro neutro.",
+  "name": "Warm Brazilian Portuguese",
+  "description": "Adult, warm voice, clear articulation and a neutral Brazilian accent.",
   "language": "pt-BR"
 }
 ```
 
-Para clone, os campos são `provider`, `api_key_env`, `name`, `reference_base64` e `consent_base64` (obrigatório para Gemini). Envie somente o Base64 do WAV, sem prefixo `data:`. O retorno comum contém `id`, `name`, `provider` e `kind`.
+Cloning fields are `provider`, `api_key_env`, `name`, `reference_base64` and
+`consent_base64` (required for Gemini). Send only the WAV's Base64 without a
+`data:` prefix. The common response contains `id`, `name`, `provider` and `kind`.
 
-## Custos, privacidade e limites operacionais
+## Costs, privacy and operational limits
 
-Biblioteca, cadastro e síntese usam a conta e cotas do provedor selecionado. Os valores de cobrança variam; o Babel não estima preços nem promete uma franquia gratuita. Se a tradução e a síntese usam fornecedores diferentes, o áudio original segue para o tradutor e o texto traduzido segue para o sintetizador. Referências vocais e consentimento vão para o serviço de cadastro quando o usuário cria um perfil. O perfil pode persistir na nuvem; o Babel não apaga perfis remotos ao remover uma seleção local.
+Library access, enrollment and synthesis use the selected provider account and
+quotas. Prices vary; Babel does not estimate charges or promise a free allowance.
+If translation and synthesis use different providers, original audio goes to
+the translator and translated text to the synthesizer. Voice references/consent
+go to the enrollment service when the user creates a profile. Profiles may
+persist in the cloud; removing a local selection does not delete remote profiles.
 
-O cliente de síntese pede `store=false` nas interações Gemini; o cadastro de perfil usa `store=true`. O significado de retenção, logs e políticas da conta continua sendo definido pelo provedor. Não se deve interpretar esses parâmetros como anonimização ou garantia geral de retenção zero.
+The synthesis client requests `store=false` for Gemini interactions; profile
+enrollment uses `store=true`. Retention, logs and account policies remain
+provider-defined. These parameters do not imply anonymization or a general
+zero-retention guarantee.
 
-Os limites locais protegem estabilidade: conexão HTTP de cinco segundos, requisição de até 60 segundos, resposta JSON de até 8 MiB, evento SSE de aproximadamente 1 MiB e áudio total de até 16 MiB por síntese. Uma fila de áudio bloqueada por dois segundos encerra a requisição. Bibliotecas são paginadas com limites de 100 páginas e 10.000 perfis; exceder o limite produz erro explícito, sem mostrar uma lista truncada como completa.
+Local stability limits are: five-second HTTP connection, up to 60 seconds per
+request, JSON response up to 8 MiB, SSE event around 1 MiB, and up to 16 MiB
+total audio per synthesis. An audio queue blocked for two seconds ends the
+request. Libraries are paginated with limits of 100 pages and 10,000 profiles;
+exceeding either produces an explicit error rather than presenting a truncated
+list as complete.
 
-## Resolver problemas
+## Troubleshooting
 
-| Sintoma | Ação |
+| Symptom | Action |
 |---|---|
-| Credencial ausente | Configure a chave no painel ou no ambiente que inicia o Babel; confira o nome da variável do perfil. |
-| HTTP 401/403 | Confira chave, permissões, modelo, região e acesso a operações de vozes. |
-| HTTP 429 | Confira a cota/limite da conta; reduza sessões ou frequência de chamadas. |
-| HTTP 400/422 | Confira modelo, ID, idioma, descrição e formato dos arquivos; a API pode exigir condições adicionais. |
-| Perfil requer verificação | Complete o processo no provedor antes de selecionar a voz para síntese. |
-| WAV inválido | Exporte áudio mono PCM16, sem compressão, com cabeçalho RIFF consistente. |
-| Fila de síntese bloqueada | Reduza carga e duração dos fragmentos; confira se a saída física está consumindo o áudio. |
-| Voz não aparece após timeout de cadastro | Recarregue a biblioteca; não repita imediatamente a criação. |
-| Qualidade/voz varia entre participantes | A rota recebe áudio misturado; seleção de perfil não faz diarização. |
+| Missing credential | Set the key in the dashboard or Babel's launch environment; check the profile's variable name. |
+| HTTP 401/403 | Check the key, permissions, model, region and voice-operation access. |
+| HTTP 429 | Check account quotas/limits; reduce sessions or request frequency. |
+| HTTP 400/422 | Check model, ID, language, description and file formats; the API may impose additional conditions. |
+| Profile requires verification | Complete the provider's process before selecting it for synthesis. |
+| Invalid WAV | Export uncompressed mono PCM16 with a consistent RIFF header. |
+| Synthesis queue blocked | Reduce load and segment duration; check that the physical output consumes audio. |
+| Voice missing after enrollment timeout | Reload the library; do not immediately repeat creation. |
+| Quality/voice varies across participants | The route receives mixed audio; selecting a profile does not perform diarization. |
 
-Os testes automatizados usam credenciais fictícias e servidores HTTP locais. Validam paginação, design em duas etapas, upload multipart, consentimento Gemini, SSE, PCM e sanitização de erros. Não comprovam acesso da sua conta nem a fidelidade da voz: esses pontos exigem uma chamada real explicitamente iniciada com sua chave.
+Automated tests use dummy credentials and local HTTP servers. They validate
+pagination, two-step design, multipart upload, Gemini consent, SSE, PCM and error
+sanitization. They do not prove account access or voice fidelity; those require
+a real call explicitly initiated with your key.

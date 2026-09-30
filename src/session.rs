@@ -12,17 +12,17 @@ pub(crate) struct SessionIdentity {
 pub(crate) fn validate_pattern(pattern: &str) -> Result<()> {
     ensure!(
         !pattern.is_empty() && pattern.len() <= 128,
-        "Padrão de nomes: 1 a 128 bytes"
+        "Filename pattern: 1 to 128 bytes"
     );
     ensure!(
         pattern.contains("{id}"),
-        "Inclua {{id}} no padrão para identificar sessões distintas"
+        "Include {{id}} in the pattern to identify distinct sessions"
     );
     ensure!(
         !pattern
             .chars()
             .any(|c| c.is_control() || "/\\:*?\"<>|".contains(c)),
-        "Padrão de nomes não pode conter caminhos ou caracteres reservados"
+        "Filename patterns cannot contain paths or reserved characters"
     );
     let mut remaining = pattern.to_owned();
     for token in ["{date}", "{time}", "{session}", "{id}"] {
@@ -30,7 +30,7 @@ pub(crate) fn validate_pattern(pattern: &str) -> Result<()> {
     }
     ensure!(
         !remaining.contains(['{', '}']),
-        "Campos do padrão: {{date}}, {{time}}, {{session}}, {{id}}"
+        "Pattern fields: {{date}}, {{time}}, {{session}}, {{id}}"
     );
     let longest = pattern
         .replace("{date}", "20000101")
@@ -48,11 +48,11 @@ pub(crate) fn validate_file_stem(stem: &str) -> Result<()> {
             && !stem
                 .chars()
                 .any(|c| c.is_control() || "/\\:*?\"<>|{}".contains(c)),
-        "Nome de arquivo gerado inválido ou maior que 240 bytes"
+        "Generated filename is invalid or exceeds 240 bytes"
     );
     ensure!(
         !stem.ends_with(['.', ' ']) && !matches!(stem, "." | ".."),
-        "Nome de arquivo não pode terminar em ponto ou espaço"
+        "Filenames cannot end with a period or space"
     );
     let base = stem.split('.').next().unwrap_or(stem).to_ascii_uppercase();
     let numbered_device = ["COM", "LPT"].into_iter().any(|prefix| {
@@ -65,7 +65,7 @@ pub(crate) fn validate_file_stem(stem: &str) -> Result<()> {
     });
     ensure!(
         !matches!(base.as_str(), "CON" | "PRN" | "AUX" | "NUL") && !numbered_device,
-        "Nome reservado pelo Windows; escolha outro padrão"
+        "Name reserved by Windows; choose another pattern"
     );
     Ok(())
 }
@@ -73,11 +73,11 @@ pub(crate) fn validate_file_stem(stem: &str) -> Result<()> {
 pub(crate) fn validate_name(name: &str) -> Result<()> {
     ensure!(
         name.chars().count() <= 100,
-        "Nome da sessão: no máximo 100 caracteres"
+        "Session name: at most 100 characters"
     );
     ensure!(
         !name.chars().any(char::is_control),
-        "Nome da sessão não pode conter quebras de linha ou caracteres de controle"
+        "Session names cannot contain line breaks or control characters"
     );
     Ok(())
 }
@@ -137,7 +137,7 @@ fn slug(name: &str) -> String {
         slug.push(c);
     }
     if slug.is_empty() {
-        "sessao".into()
+        "session".into()
     } else {
         slug
     }
@@ -200,7 +200,7 @@ mod tests {
             SessionIdentity::new(Some("../../"))
                 .unwrap()
                 .id
-                .ends_with("sessao")
+                .ends_with("session")
         );
     }
     #[test]

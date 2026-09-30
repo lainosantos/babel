@@ -1,163 +1,158 @@
-# Modelos locais integrados
+# Embedded local models
 
-O Babel gerencia os modelos locais e carrega os motores quando uma função ativa
-da sessão precisa deles.
-O instalador inclui os motores de inferência para Linux, macOS e Windows. O usuário
-não precisa instalar Python, Ollama, CMake, um compilador ou um servidor separado.
-Os pesos dos modelos são baixados automaticamente na primeira seleção e ficam em
-cache para as próximas execuções.
+Babel manages local models and loads engines when an enabled session feature
+needs them. Installers include inference engines for Linux, macOS and Windows.
+Users do not need Python, Ollama, CMake, a compiler or a separate server.
+Model weights download automatically on first selection and remain cached for
+subsequent runs.
 
-## Começar pela interface
+## Start from the interface
 
-Para transcrição, abra **Transcrição**, escolha **whisper.cpp** em uma ou nas duas
-origens e mantenha **Integrado ao Babel** no perfil. O padrão para novas
-configurações é Whisper Base Q5_1. Salvar baixa e verifica os pesos ausentes,
-sem manter o reconhecedor carregado. Ativar a transcrição continua sendo uma
-escolha independente.
+For transcription, open **Transcription**, choose **whisper.cpp** for one or
+both sources and keep **Built into Babel** in its profile. New configurations
+default to Whisper Base Q5_1. Saving downloads/verifies missing weights without
+keeping the recognizer loaded. Enabling transcription remains a separate choice.
 
-Para tradução, abra **Tradução e vozes**, escolha **Local** na rota desejada e
-mantenha os componentes de reconhecimento, tradução e voz em **Integrado ao
-Babel**. Salvar prepara os arquivos de Whisper, Qwen e Piper conforme a seleção.
-A opção de voz automática escolhe uma voz disponível para o idioma de destino.
+For translation, open **Translation & voices**, choose **Local** for the desired
+route and keep recognition, translation and voice components **Built into
+Babel**. Saving prepares selected Whisper, Qwen and Piper files. Automatic voice
+selection chooses an available voice for the target language.
 
-O estado aparece nas duas páginas e em **Ajustes → Modelos locais**:
+State appears on both pages and under **Settings → Local models**:
 
-- **Em espera:** ainda não há uma preparação ativa para a seleção salva.
-- **Preparando:** baixando pesos ou, ao iniciar uma sessão, carregando os motores;
-  o download mostra
-  tamanho recebido e percentual quando o servidor informa o total.
-- **Pesos em cache (`cached`):** os arquivos estão verificados no disco; os
-  motores de inferência não precisam ocupar RAM.
-- **Prontos (`ready`):** os motores necessários à sessão foram carregados.
-- **Precisam de atenção:** a preparação falhou; os detalhes ajudam a corrigir
-  rede, armazenamento, modelo ou instalação. Salvar novamente tenta a preparação.
+- **Idle:** no active preparation for the saved selection yet.
+- **Preparing:** downloading weights or loading engines when a session starts;
+  downloads show received size and percentage when the server supplies a total.
+- **Weights cached (`cached`):** files are verified on disk; inference engines
+  need not occupy RAM.
+- **Ready (`ready`):** engines required by the session have loaded.
+- **Needs attention:** preparation failed; details help diagnose networking,
+  storage, model or installation issues. Saving again retries preparation.
 
-Iniciar uma sessão aguarda os modelos ficarem prontos. **Cancelar início da
-sessão** interrompe essa espera, sem exigir desligar o roteamento original.
-O carregamento solicitado é interrompido; arquivos já baixados ficam no cache. A sessão
-carrega somente os motores exigidos pela tradução e/ou transcrição habilitadas.
-Um provider local salvo numa função desligada não faz essa sessão carregar IA.
-O roteamento e a gravação de áudio original não precisam desses modelos.
+Starting a session waits for models to become ready. **Cancel session start**
+interrupts that wait without requiring original routing to stop. Requested
+loading is canceled; downloaded files stay cached. The session loads only
+engines required by enabled translation and/or transcription. A local provider
+saved for a disabled feature does not make that session load AI. Original
+routing and recording do not need these models.
 
-Após a última sessão liberar os motores, o Babel os mantém por uma espera curta
-para permitir outro início sem recarregamento. O padrão é 60 segundos; passado
-esse prazo, encerra os processos que gerencia e libera a RAM deles, mantendo os
-pesos em disco. Uma nova sessão dentro do prazo cancela a liberação. Os serviços
-externos continuam sob o controle de quem os iniciou: o Babel não os encerra.
+After the last session releases engines, Babel retains them briefly so another
+session can start without reloading. The default is 60 seconds; afterward it
+terminates managed processes and releases their RAM while keeping weights on
+disk. A new session within that interval cancels unloading. External services
+remain controlled by whoever started them: Babel does not terminate them.
 
-Não é necessário iniciar uma sessão para preparar os modelos, mas preparar um
-modelo não grava, transcreve ou traduz automaticamente. A captura para essas
-funções segue as opções da sessão e o uso do dispositivo virtual correspondente.
-Com tradução, transcrição e gravação desligadas, o áudio original segue a rota
-física configurada.
+No session is needed to prepare models, but preparation does not automatically
+record, transcribe or translate. Capture for these features follows session
+options and the corresponding virtual device's use. With translation,
+transcription and recording off, original audio follows the configured physical
+route.
 
-Os comandos de voz têm outro ciclo: Whisper precisa ficar disponível enquanto
-o agente escuta um microfone Babel elegível, mesmo sem sessão. Needle só carrega
-para interpretar um comando. Veja [comandos de voz](voice-commands.md) para os
-limites de CPU e a liberação por inatividade desses componentes.
+Voice commands have another lifecycle: Whisper must remain available while the
+agent listens to an eligible Babel microphone, even without a session. Needle
+loads only to interpret a command. See [voice commands](voice-commands.md) for
+these components' CPU limits and idle unloading.
 
-## Modelos disponíveis
+## Available models
 
-| Etapa | Catálogo integrado | Padrão e considerações |
+| Stage | Embedded catalog | Default and considerations |
 |---|---|---|
-| Reconhecimento original | Whisper `tiny-q5_1`, `base-q5_1`, `small-q5_1`, multilíngues; variantes originais `tiny`, `base`, `small` continuam disponíveis | `base-q5_1`; Tiny prioriza custo, Small oferece mais capacidade com maior consumo |
-| Tradução de texto | Qwen `qwen3-0.6b` | Motor llama.cpp incluído; modelo compacto, sem garantia universal de qualidade |
-| Síntese | Piper, vozes listadas abaixo | `auto` acompanha o idioma de destino |
+| Original recognition | Multilingual Whisper `tiny-q5_1`, `base-q5_1`, `small-q5_1`; original `tiny`, `base`, `small` variants remain available | `base-q5_1`; Tiny prioritizes cost, Small offers more capacity with higher resource use |
+| Text translation | Qwen `qwen3-0.6b` | Included llama.cpp engine; compact model without a universal quality guarantee |
+| Synthesis | Piper voices listed below | `auto` follows the target language |
 
-Tamanhos aproximados de download, em MB decimais (1 MB = 1.000.000 bytes):
+Approximate download sizes in decimal MB (1 MB = 1,000,000 bytes):
 
-| Arquivo de modelo | Download |
+| Model file | Download |
 |---|---:|
-| Whisper Tiny Q5_1 | 32,2 MB |
-| Whisper Base Q5_1 — padrão | 59,7 MB |
-| Whisper Small Q5_1 | 190,1 MB |
+| Whisper Tiny Q5_1 | 32.2 MB |
+| Whisper Base Q5_1 — default | 59.7 MB |
+| Whisper Small Q5_1 | 190.1 MB |
 | Whisper Tiny | 78 MB |
 | Whisper Base | 148 MB |
 | Whisper Small | 488 MB |
 | Qwen3 0.6B Q8 | 639 MB |
-| Cada voz Piper | 63–64 MB, mais configuração e licença |
+| Each Piper voice | 63–64 MB, plus configuration and license |
 
-A interface mostra o progresso em MiB (1 MiB = 1.048.576 bytes), por isso o número
-exibido difere dessa tabela. O tamanho do download não representa o uso de RAM
-durante a inferência. Uma tradução local com Whisper Base Q5_1, Qwen e duas vozes
-precisa de aproximadamente 826 MB em pesos; os motores do instalador e arquivos
-temporários ocupam espaço adicional. Pesos já presentes e verificados são
-reutilizados, sem novo download a cada sessão.
+The interface shows progress in MiB (1 MiB = 1,048,576 bytes), so its numbers
+differ from the table. Download size is not inference RAM usage. Local
+translation with Whisper Base Q5_1, Qwen and two voices needs approximately
+826 MB of weights; packaged engines and temporary files need additional space.
+Already-present verified weights are reused without downloading each session.
 
-Q5_1 reduz a precisão numérica dos pesos para ocupar menos espaço. O modelo
-multilíngue Base continua sendo a base do padrão; não é substituído por Tiny.
-A [documentação do whisper.cpp](https://github.com/ggml-org/whisper.cpp#quantization)
-descreve o menor uso de memória e disco e ressalta que o ganho de velocidade
-depende do hardware. As versões e SHA-256 vêm do catálogo fixado do Babel.
-Uma configuração que já selecionava `tiny`, `base` ou `small` mantém essa escolha;
-para adotar a versão compacta, selecione-a e salve.
+Q5_1 reduces weights' numerical precision to save space. Multilingual Base
+remains the default's underlying model; it is not replaced by Tiny.
+[whisper.cpp documentation](https://github.com/ggml-org/whisper.cpp#quantization)
+describes reduced memory/disk use and notes that speed improvements depend on
+hardware. Versions and SHA-256 values come from Babel's pinned catalog.
+A configuration already using `tiny`, `base` or `small` keeps that choice;
+select/save the compact version to adopt it.
 
-O tradutor permanece Qwen3 0.6B Q8, e as vozes Piper permanecem na qualidade
-medium. Reduzir ainda mais seus pesos sem avaliar o idioma e o áudio poderia
-prejudicar o resultado. A seleção usa [Qwen multilíngue com raciocínio desativado](https://huggingface.co/Qwen/Qwen3-0.6B#switching-between-thinking-and-non-thinking-mode)
-para a tradução de segmentos e uma voz Piper por idioma necessário. Isso não
-garante fidelidade para todo idioma, sotaque ou vocabulário.
+The translator remains Qwen3 0.6B Q8 and Piper voices remain medium quality.
+Reducing their weights further without evaluating languages/audio could hurt
+results. The selection uses [multilingual Qwen with thinking disabled](https://huggingface.co/Qwen/Qwen3-0.6B#switching-between-thinking-and-non-thinking-mode)
+for segment translation and one Piper voice per required language. This does
+not guarantee fidelity for every language, accent or vocabulary.
 
-| Idioma de destino | Voz Piper integrada |
+| Target language | Embedded Piper voice |
 |---|---|
-| Inglês | `en_US-lessac-medium` |
-| Português | `pt_BR-faber-medium` |
-| Espanhol | `es_ES-davefx-medium` |
-| Francês | `fr_FR-siwis-medium` |
-| Alemão | `de_DE-thorsten-medium` |
-| Italiano | `it_IT-paola-medium` |
-| Chinês | `zh_CN-huayan-medium` |
+| English | `en_US-lessac-medium` |
+| Portuguese | `pt_BR-faber-medium` |
+| Spanish | `es_ES-davefx-medium` |
+| French | `fr_FR-siwis-medium` |
+| German | `de_DE-thorsten-medium` |
+| Italian | `it_IT-paola-medium` |
+| Chinese | `zh_CN-huayan-medium` |
 
-O `voice_id` explícito da rota tem prioridade sobre `piper_voice` do perfil. A
-voz deve ser compatível com o idioma falado. Se o catálogo integrado não cobrir
-seu idioma de destino, escolha uma voz TTS externa compatível ou configure um
-servidor próprio. Clonagem, voice design e preservação da identidade original
-não são recursos dessas vozes Piper integradas.
+An explicit route `voice_id` takes precedence over the profile's `piper_voice`.
+The voice must support the spoken language. If the embedded catalog does not
+cover your target, choose compatible external TTS or configure your own server.
+Cloning, voice design and original-identity preservation are not features of
+these embedded Piper voices.
 
-Whisper do perfil de tradução e Whisper do STT têm modelos e segmentação
-independentes. Duas origens e uma tradução simultânea podem compartilhar motores,
-mas ainda precisam processar cada fluxo; isso aumenta a carga. O TXT contém
-somente os resultados do STT escolhido, não o texto intermediário da tradução.
+Translation Whisper and STT Whisper have independent model/segmentation
+settings. Two sources and simultaneous translation may share engines, but each
+stream still needs processing, increasing load. The TXT contains only the
+selected STT's results, not intermediate translation text.
 
-## Pasta e processamento
+## Storage and processing
 
-Em **Ajustes → Modelos locais**, defina:
+In **Settings → Local models**, configure:
 
-- **Pasta dos modelos:** vazia usa o cache do aplicativo na conta do sistema.
-  Para escolher outro disco ou pasta, informe um caminho absoluto. Exemplos:
-  `/home/usuario/Babel-models` no Linux, `/Users/usuario/Babel-models` no macOS ou
-  `D:\Babel-models` no Windows. `~` e variáveis de ambiente não são expandidos.
-- **Threads de CPU para inferência:** de 1 a 64, padrão até 2 conforme as CPUs
-  disponíveis, para Whisper e Qwen.
-  Esse ajuste não controla as threads internas do Piper. Um valor maior não
-  garante menor latência e pode disputar CPU com os dispositivos de áudio.
-- **Liberar modelos após inatividade:** `idle_unload_secs`, de 1 a 3600 segundos,
-  padrão 60. Conta após a última sessão liberar os motores; não interrompe uma
-  inferência ainda pertencente à sessão. Diminuir economiza RAM mais cedo, mas
-  pode exigir outro carregamento ao reiniciar a sessão.
+- **Model storage folder:** empty uses the app cache in the OS account. To choose another
+  disk/folder, enter an absolute path, such as `/home/user/Babel-models` on Linux,
+  `/Users/user/Babel-models` on macOS or `D:\Babel-models` on Windows.
+  `~` and environment variables are not expanded.
+- **Inference CPU threads:** 1–64, default up to two depending on available
+  CPUs, for Whisper and Qwen. The effective value is capped by the processing
+  CPU budget. Piper retains its own internal scheduling; managed children also
+  receive limits for known compute libraries. A larger value does not guarantee
+  lower latency and can increase resource contention.
+- **Release idle models after (seconds):** `idle_unload_secs`, 1–3600 seconds, default
+  60. Starts after the last session releases engines; it does not interrupt
+  inference still owned by a session. Lower values release RAM earlier but may
+  require reloading when another session starts.
 
-Quando o campo fica vazio, o diretório padrão é:
+When the folder field is empty, weights default to:
 
-| Sistema do Babel | Pasta padrão dos pesos |
+| Babel host OS | Default weights folder |
 |---|---|
-| Linux | `$XDG_DATA_HOME/babel/models`, quando definido como caminho absoluto; senão `$HOME/.local/share/babel/models` |
+| Linux | `$XDG_DATA_HOME/babel/models` when set to an absolute path; otherwise `$HOME/.local/share/babel/models` |
 | macOS | `$HOME/Library/Application Support/Babel/models` |
 | Windows | `%LOCALAPPDATA%\Babel\models` |
 
-Esses nomes descrevem as variáveis do ambiente do processo Babel. O campo da UI
-não expande essas expressões: para informar uma pasta própria, use o caminho
-absoluto completo. Os pesos ficam nos dados locais do aplicativo, não na pasta
-de downloads do navegador. A ausência de um diretório de conta válido exige
-escolher uma pasta absoluta explicitamente.
+These names describe the Babel process's environment variables. The UI field
+does not expand them: use a complete absolute path for a custom folder. Weights
+live in local app data, not browser downloads. If no valid account directory
+exists, an explicit absolute folder is required.
 
-A pasta dos modelos é independente da base dos arquivos de sessão TXT/WAV.
-Alterá-la não move os arquivos existentes: um modelo ausente no novo local
-precisa ser preparado novamente. Reserve espaço para todos os modelos
-selecionados; modelos e vozes diferentes têm tamanhos diferentes.
+The model folder is independent of the TXT/WAV session-file base. Changing it
+does not move existing files: a model missing at the new location must be
+prepared again. Reserve space for all selected models; model/voice sizes vary.
 
 ```toml
 [local_runtime]
-directory = "" # Cache do aplicativo, ou caminho absoluto no sistema anfitrião.
+directory = "" # App cache, or an absolute path on the Babel host.
 threads = 2
 idle_unload_secs = 60
 
@@ -183,88 +178,86 @@ vad_threshold = 0.01
 request_timeout_secs = 30
 ```
 
-A primeira preparação requer acesso à internet para baixar os pesos publicados.
-Downloads são verificados contra o catálogo de integridade do Babel antes do uso.
-Uma falha não deve ser confundida com um modelo pronto. Depois de preparar os
-modelos necessários, a inferência integrada funciona offline. Selecionar outro
-modelo ainda ausente requer uma nova preparação com acesso à rede.
+Initial preparation needs internet access to published weights. Downloads are
+verified against Babel's integrity catalog before use. Failure must not be
+mistaken for readiness. After required models are prepared, embedded inference
+works offline. Selecting another uncached model needs preparation with network
+access again.
 
-## Portas, credenciais e modo externo
+## Ports, credentials and external mode
 
-`endpoint = "auto"` e os endpoints de componentes com valor `"auto"` significam
-processos gerenciados. O Babel escolhe portas disponíveis dinamicamente em
-loopback; não confia em um serviço já presente numa porta conhecida. Os
-endereços temporários não substituem `auto` no arquivo de configuração. O
-reconhecedor integrado não exige uma chave de API do usuário.
+`endpoint = "auto"` and component endpoints set to `"auto"` mean managed
+processes. Babel dynamically chooses available loopback ports; it does not
+trust a service already present on a well-known port. Temporary addresses do
+not replace `auto` in saved configuration. The embedded recognizer needs no
+user API key.
 
-**Servidor externo (avançado)** permite manter instalações próprias ou servidores
-em outra máquina. Informe a URL completa, incluindo a porta real, quando houver.
-Nesse modo, o Babel não instala, inicia, atualiza ou baixa modelos para esse
-servidor, nem o encerra por inatividade. O Whisper usa o modelo carregado nele;
-a escolha de variante Whisper da UI
-só controla o motor integrado.
+**External server (advanced)** supports your own installations or another
+machine. Enter the full URL, including its actual port when applicable. In
+this mode Babel does not install, start, update or download models for the
+server, or stop it on inactivity. Whisper uses the model loaded there; the UI's
+Whisper variant selection controls only the embedded engine.
 
-No STT Whisper externo, `api_key_env` é uma referência opcional a uma credencial
-Bearer. O segredo pode vir do ambiente do processo ou da chave temporária
-aplicada no painel. Não coloque o segredo no TOML. Endereços HTTP sem TLS são
-aceitos somente no loopback; servidores remotos precisam de HTTPS. URLs com
-credenciais embutidas não são aceitas.
+For external Whisper STT, `api_key_env` is an optional Bearer credential
+reference. The secret can come from the process environment or a temporary key
+applied in the dashboard. Do not put the secret in TOML. Non-TLS HTTP is accepted
+only on loopback; remote servers require HTTPS. Embedded URL credentials are
+rejected.
 
-Na tradução externa, o campo legado `ollama_endpoint` escolhe o endereço e
-`translation_api` define o protocolo: `ollama` para `/api/chat` ou `openai` para
-chat completions compatível. Esse nome legado não implica instalar Ollama no
-modo integrado; o runtime gerenciado usa llama.cpp. É possível gerenciar um
-componente e usar um endpoint externo em outro, sem acoplar o STT da transcrição.
+For external translation, legacy `ollama_endpoint` selects the address and
+`translation_api` selects the protocol: `ollama` for `/api/chat` or `openai` for
+compatible chat completions. That legacy name does not imply installing Ollama
+in embedded mode; the managed runtime uses llama.cpp. One component may be
+managed while another uses an external endpoint, without coupling transcription STT.
 
-## Instalação, desenvolvimento e limites
+## Installation, development and limits
 
-Use um instalador ou pacote do Babel que inclua os runtimes correspondentes ao
-sistema e à arquitetura. Copiar apenas o executável Rust de uma compilação de
-desenvolvimento não inclui automaticamente as bibliotecas e motores nativos.
-Se o pacote estiver incompleto, a UI informa o erro de preparação; atualizar a
-instalação completa é preferível a apontar para uma porta arbitrária.
+Use a Babel installer/package containing runtimes for the OS and architecture.
+Copying only the Rust executable from a development build does not automatically
+include native engines/libraries. If the package is incomplete, the UI reports
+preparation failure; updating the complete installation is preferable to
+pointing at an arbitrary port.
 
-Os motores nativos são processos separados do núcleo Rust. O código Rust do
-Babel proíbe `unsafe` próprio, mas isso não torna whisper.cpp, llama.cpp, ONNX ou
-outros componentes nativos memory-safe. Eles têm seus próprios contratos,
-atualizações e licenças; os pesos das vozes também têm licenças próprias.
+Native engines are separate processes from the Rust core. Babel's Rust code
+forbids its own `unsafe`, but that does not make whisper.cpp, llama.cpp, ONNX or
+other native components memory-safe. They have their own contracts, updates
+and licenses; voice weights also have separate licenses.
 
-O reconhecimento integrado trabalha em segmentos. A tradução local acumula o
-tempo de segmentar, reconhecer, traduzir e sintetizar. Tiny reduz o custo, mas
-pode sacrificar qualidade; Small pode exigir mais recursos. Não há promessa de
-latência fixa nem de desempenho universal de fala contínua em qualquer CPU.
-Para reduzir sobrecarga, comece por uma direção, um modelo menor e um número de
-threads que deixe CPU disponível para o áudio. O painel preserva erros de
-preparação e os limites de fila evitam acumular atraso indefinidamente.
+Embedded recognition operates in segments. Local translation accumulates
+segmentation, recognition, translation and synthesis time. Tiny lowers cost but
+can sacrifice quality; Small may need more resources. Fixed latency or universal
+continuous-speech performance on every CPU is not promised. To reduce overhead,
+start with one direction, a smaller model and a thread count that leaves CPU
+capacity for audio. The dashboard retains preparation errors, and queue limits
+prevent unbounded lag.
 
-A transcrição Whisper salva o texto original, sem diarização nem timestamps por
-palavra. Seus tempos correspondem aos segmentos capturados. Veja o
-[guia de transcrição](transcription.md) e o
-[guia dos providers](other-providers.md) para limites de cada protocolo.
+Whisper transcription saves original text without diarization or word timestamps.
+Timing refers to captured segments. See [transcription](transcription.md) and
+[provider guidance](other-providers.md) for protocol-specific limits.
 
-## Verificação dos pacotes no CI
+## Package verification in CI
 
-### Medição pontual de memória em 29/09/2026
+### Point-in-time memory measurement on 2026-09-29
 
-Neste Linux, com dois threads e o áudio público JFK incluído no whisper.cpp,
-Base original e Base Q5_1 produziram a mesma transcrição. O RSS após a inferência
-foi de 245.268 KiB para 156.728 KiB, e a duração de 2,19 s para 2,14 s. O arquivo
-de pesos caiu de 147.951.465 para 59.707.625 bytes. Esse teste confirma uma
-redução de memória nesse cenário; não é uma avaliação multilíngue, uma promessa
-de latência ou uma medição em Windows/macOS.
+On this Linux development host, using two threads and the public JFK audio
+included with whisper.cpp, original Base and Base Q5_1 produced identical
+transcripts. Post-inference RSS decreased from 245,268 KiB to 156,728 KiB,
+and duration from 2.19 s to 2.14 s. Weights decreased from 147,951,465 to
+59,707,625 bytes. This confirms reduced memory in that scenario; it is not a
+multilingual evaluation, latency promise or Windows/macOS measurement.
 
-### Contratos de instalação e inferência
+### Installation and inference contracts
 
-Além de validar os hashes e executar `--help`, o CI usa
-`scripts/test_bundled_inference.py` para carregar os três motores reais na
-arquitetura do runner. O teste baixa somente pesos pinados do catálogo, envia
-um segundo de silêncio sintético ao Whisper Base Q5_1 e uma frase fixa ao Qwen, e pede
-duas falas ao mesmo processo Piper. Verifica descoberta de porta dinâmica,
-respostas JSON, caminhos Unicode de saída e amostras WAV válidas. Nenhum
-microfone, dispositivo de áudio ou chave de nuvem é usado.
+In release/package builds, beyond checking hashes and `--help`, CI uses
+`scripts/test_bundled_inference.py` to load all three real engines on the runner's
+architecture. It downloads only pinned catalog weights, sends one second of
+synthetic silence to Whisper Base Q5_1 and a fixed sentence to Qwen, and requests
+two utterances from the same Piper process. It checks dynamic-port discovery,
+JSON responses, Unicode output paths and valid WAV samples. No microphone,
+audio device or cloud key is used. Ordinary commit/PR validation does not build
+these installer runtime payloads; see [CI and releases](ci-installers.md).
 
-Esse teste verifica instalação, carregamento e protocolo, sem medir qualidade
-linguística, latência durante chamadas reais ou funcionamento dos drivers.
-Python é usado apenas pelo teste de desenvolvimento/CI; não é dependência do
-Babel instalado. O cache de teste aceita o mesmo formato de nomes e hashes dos
-modelos do aplicativo, permitindo reutilizar pesos já verificados.
+This test verifies installation, loading and protocols, not linguistic quality,
+real-call latency or driver operation. Python is used only by development/CI
+testing; it is not an installed Babel dependency. The test cache accepts the same
+model filenames/hashes as the app, allowing verified weights to be reused.

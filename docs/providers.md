@@ -1,99 +1,208 @@
-# Provedores de fala
+# Speech providers
 
-O `SpeechProvider` recebe PCM16 mono de 16 kHz em um canal limitado e devolve eventos de texto e, nos tradutores, PCM16 mono de 24 kHz. Cada direção mantém sessões independentes para tradução (STS) e transcrição (STT), quando esses recursos estão habilitados. A passagem original e a gravação sem transcrição/tradução não abrem provedores. Rede, JSON, Base64 e IA ficam fora dos callbacks de áudio. Para adicionar um provedor, implemente o trait e registre sua factory.
+`SpeechProvider` receives PCM16 mono at 16 kHz through a bounded channel and
+returns text events and, for translators, PCM16 mono at 24 kHz. Each direction
+maintains independent translation (STS) and transcription (STT) sessions when
+those features are enabled. Original routing and recording without
+transcription/translation do not open providers. Networking, JSON, Base64 and AI
+stay outside audio callbacks. To add a provider, implement the trait and register
+its factory.
 
-## Perfis e escolha por direção
+## Profiles and per-direction selection
 
-`providers.gemini`, `providers.openai`, `providers.elevenlabs` e `providers.local` guardam configurações independentes. `microphone.provider` e `speaker.provider` selecionam o tradutor de cada direção; `voice.engine` seleciona áudio nativo ou outro sintetizador. ElevenLabs participa como sintetizador, sem um endpoint speech-to-speech de tradução neste aplicativo. Chaves ficam na memória da sessão ou no ambiente; o TOML guarda somente o nome da credencial. Os reconhecedores usam outros perfis: `transcription.providers.gemini`, `.openai`, `.deepgram` e `.whisper`. `transcription.microphone_recognition` e `transcription.speaker_recognition` escolhem separadamente o provider e o idioma da fala original de cada origem, sem herdar `microphone.provider`, `speaker.provider` ou seus idiomas. O TXT recebe somente resultados do STT dedicado, mesmo quando há tradução simultânea. Textos de entrada emitidos pelo tradutor não são gravados.
+`providers.gemini`, `providers.openai`, `providers.elevenlabs` and
+`providers.local` hold independent settings. `microphone.provider` and
+`speaker.provider` select each direction's translator; `voice.engine` selects
+native audio or another synthesizer. ElevenLabs acts as a synthesizer, without
+a speech-to-speech translation endpoint in this app. Keys live in process
+memory or the environment; TOML stores only the credential name. Recognizers
+use separate profiles: `transcription.providers.gemini`, `.openai`, `.deepgram`
+and `.whisper`. `transcription.microphone_recognition` and
+`transcription.speaker_recognition` independently select the original-speech
+provider/language for each source, without inheriting `microphone.provider`,
+`speaker.provider` or their languages. The TXT receives only dedicated STT
+results, even during simultaneous translation. Translator input text is not saved.
 
-Leia [transcrição independente e seus quatro providers](transcription.md), [configuração e operação](configuration.md), [OpenAI e pipeline local](other-providers.md) e [biblioteca de vozes](voices.md).
+Read [independent transcription and its four providers](transcription.md),
+[configuration and operation](configuration.md), [OpenAI and the local pipeline](other-providers.md)
+and the [voice library](voices.md).
 
 ## Gemini
 
-A integração usa o WebSocket oficial v1beta, TLS com validação de certificado e a chave indicada por `api_key_env`. A chave segue em `x-goog-api-key`, em vez da URL; o cabeçalho é marcado como sensível. O cliente não aceita endpoint configurável e nunca mostra corpos de erro, motivos de fechamento ou mensagens remotas em erros locais. A credencial é resolvida primeiro do armazenamento temporário do painel e depois do ambiente, usando o nome configurado em `providers.gemini.api_key_env`. A cópia resolvida usa `Zeroizing`; cópias internas da biblioteca HTTP/TLS e o ambiente do processo não têm garantia de apagamento.
+The integration uses the official v1beta WebSocket, certificate-verified TLS and
+the key named by `api_key_env`. The key travels in `x-goog-api-key` rather than
+the URL; the header is marked sensitive. The client does not accept a custom
+endpoint and never includes error bodies, close reasons or remote messages in
+local errors. Credentials resolve first from temporary dashboard storage, then
+from the environment, using `providers.gemini.api_key_env`. The resolved copy
+uses `Zeroizing`; internal HTTP/TLS copies and the process environment have no
+erasure guarantee.
 
-Para tradução, há dois modos selecionados pelo modelo:
+Translation has two modes selected by model:
 
-| Modelo | Comportamento | Configuração |
+| Model | Behavior | Configuration |
 |---|---|---|
-| `gemini-3.5-live-translate-preview` | Tradução contínua enquanto chega áudio; modelo padrão para o requisito de tempo real | Código BCP-47 de destino; idioma de origem automático. Voz, prompts, VAD e raciocínio não são enviados. `echoTargetLanguage=false`: silêncio quando a fala já está no idioma de destino. |
-| `gemini-3.8-live` | Áudio em ambas as direções, com geração sujeita à detecção de atividade/turnos do modelo | Idiomas no prompt de interpretação, voz e duração de silêncio do VAD. `NO_INTERRUPTION` permite continuar capturando enquanto a tradução é reproduzida. |
+| `gemini-3.5-live-translate-preview` | Continuous translation as audio arrives; the default model for real-time translation | Target BCP-47 code; automatic source language. Voice, prompts, VAD and reasoning are not sent. `echoTargetLanguage=false`: silence when speech is already in the target language. |
+| `gemini-3.8-live` | Bidirectional audio, with generation subject to the model's activity/turn detection | Languages in the interpreting prompt, voice and VAD silence duration. `NO_INTERRUPTION` allows capture to continue while translation plays. |
 
-O cliente não transforma `gemini-3.8-flash` em um modelo de fala nem promete tradução contínua no modo Live genérico. Disponibilidade e permissões dependem da conta Google. Modelos podem mudar; o nome permanece configurável. O prefixo `models/` é opcional. O modo específico de tradução só é ativado pelo identificador documentado, não por comparação parcial.
+The client does not turn `gemini-3.8-flash` into a speech model or promise
+continuous translation in generic Live mode. Availability/permissions depend
+on the Google account. Models may change; their names remain configurable.
+The `models/` prefix is optional. Translation-specific mode activates only for
+the documented identifier, not a partial match.
 
-No modo contínuo, prompts não vazios causam erro de configuração. Não há envio de `clientContent`, texto ou marcadores de fim de turno. No modo genérico, o prompt orienta a interpretar perguntas/comandos capturados como conteúdo a traduzir. Isso é uma instrução ao modelo, sem garantia formal de resistência a comandos na fala.
+In continuous mode, nonempty prompts are configuration errors. The client sends
+no `clientContent`, text or end-of-turn markers. In generic mode, the prompt
+instructs the model to treat captured questions/commands as content to translate.
+This is a model instruction, not a formal guarantee against instructions in speech.
 
-A API recebe áudio binário PCM little-endian codificado em Base64, em `realtimeInput.audio`. A entrada começa somente depois de `setupComplete`. O motor usa quadros de 100 ms no modo de tradução contínua. A resposta pode trazer diversos fragmentos de áudio no mesmo evento; todos são processados. O resultado é reproduzido ao chegar, sem aguardar `turnComplete`. Esse evento serve somente para sinalizar o encerramento de uma geração aos consumidores.
+The API receives Base64-encoded little-endian binary PCM in `realtimeInput.audio`.
+Input begins only after `setupComplete`. The engine uses 100 ms frames in
+continuous translation mode. A response may contain several audio fragments in
+one event; all are processed. Output plays as it arrives, without waiting for
+`turnComplete`. That event only signals generation completion to consumers.
 
-Na sessão de tradução, o motor desliga `input_transcription`: o texto de entrada do STS não é usado para o TXT. Com voz TTS personalizada, solicita `output_transcription`, que permanece em memória para sintetizar a tradução. O reconhecimento original usa uma sessão STT separada, alimentada pelo mesmo áudio original da origem selecionada. Ativar ou mudar a transcrição não troca o provider, modelo, idioma ou voz da tradução.
+Translation sessions disable `input_transcription`: STS input text does not
+feed the TXT. With custom TTS voices, they request `output_transcription`, which
+stays in memory for translation synthesis. Original recognition uses a separate
+STT session fed the same original audio from the selected source. Enabling or
+changing transcription does not change the translation provider, model, language
+or voice.
 
-## Gemini: transcrição independente
+## Gemini: independent transcription
 
-Na página **Transcrição**, selecione Gemini para o microfone, para a saída ou
-para ambos. `transcription.providers.gemini.model` usa
-`gemini-3.5-transcribe-live`; chave, endpoint fixo e limites pertencem a esse
-perfil STT. Os campos `transcription.microphone_recognition.language` e
-`transcription.speaker_recognition.language` aceitam BCP-47 ou `auto`.
-A sessão solicita `TEXT` e modo `VERBATIM`, sem voz, idioma de destino ou prompt
-de tradução. Recebe PCM16 mono a 16 kHz e fornece texto original final.
-Esse percurso funciona tanto com tradução desligada quanto junto a qualquer
-tradutor. O campo legado `providers.gemini.transcription_model` não controla
-o novo perfil em execução; veja a [configuração e migração do STT](transcription.md).
-Veja o [guia oficial de Live Transcribe](https://ai.google.dev/gemini-api/docs/live-api/live-transcribe).
+On **Transcription**, select Gemini for the microphone, incoming audio or both.
+`transcription.providers.gemini.model` uses `gemini-3.5-transcribe-live`; its key,
+fixed endpoint and limits belong to this STT profile.
+`transcription.microphone_recognition.language` and
+`transcription.speaker_recognition.language` accept BCP-47 or `auto`.
+The session requests `TEXT` and `VERBATIM` mode without a voice, target language
+or translation prompt. It receives PCM16 mono at 16 kHz and returns final
+original text. This path works with translation off or alongside any translator.
+The legacy `providers.gemini.transcription_model` field does not control the new
+running profile; see [STT configuration and migration](transcription.md).
+See the [official Live Transcribe guide](https://ai.google.dev/gemini-api/docs/live-api/live-transcribe).
 
-O adaptador ignora hipóteses parciais para não duplicar conteúdo no TXT. A sessão
-do modelo tem limite de dez minutos; `goAway` provoca reconexão controlada.
-Não há diarização nem timestamps por palavra neste streaming. Encerrar a sessão
-do Babel cancela reconhecimento pendente: espere uma pausa e o resultado final
-quando precisar guardar a última frase. O writer esvazia apenas finais já
-recebidos. A gravação WAV, quando habilitada, continua sendo um caminho separado.
-Os [limites oficiais](https://ai.google.dev/gemini-api/docs/live-api/live-transcribe#limitations)
-não equivalem a garantia de continuidade sem perda numa reconexão.
+The adapter ignores partial hypotheses to avoid duplicating TXT content. Model
+sessions have a ten-minute limit; `goAway` triggers controlled reconnection.
+This streaming mode has no diarization or word timestamps. Stopping the Babel
+session cancels pending recognition: wait for a pause and the final result when
+you need to save the last sentence. The writer drains only finals already
+received. WAV recording, when enabled, remains a separate path. The
+[official limits](https://ai.google.dev/gemini-api/docs/live-api/live-transcribe#limitations)
+are not a guarantee of lossless continuity across reconnection.
 
-## Participantes, marcações de tempo e identidade vocal
+## Participants, timestamps and voice identity
 
-Live Translate tenta reproduzir características vocais automaticamente. Essa capacidade pertence ao modelo; no caminho Live direto não há cadastro de voz, amostra inicial configurável ou `voice_id`. A Google documenta mudanças de voz após pausas e confusão durante trocas rápidas de locutor. Uma voz fixa, como `Kore` no modo Live genérico, também não clona a voz de entrada. [Limitações do Live Translate](https://ai.google.dev/gemini-api/docs/live-api/live-translate#limitations).
+Live Translate attempts to reproduce vocal characteristics automatically. This
+is a model capability; the direct Live path has no voice enrollment, configurable
+initial sample or `voice_id`. Google documents voice changes after pauses and
+confusion during rapid speaker changes. A fixed voice such as `Kore` in generic
+Live mode does not clone the input voice either.
+[Live Translate limitations](https://ai.google.dev/gemini-api/docs/live-api/live-translate#limitations).
 
-O áudio de uma chamada normalmente chega já misturado. Identificar a direção “microfone” ou “saída” não identifica cada pessoa desse sinal. Nomes atribuídos manualmente a um canal devem aparecer como rótulos do canal, nunca como identificação automática de locutor.
+Call audio usually arrives already mixed. Identifying the “microphone” or
+“output” direction does not identify every person in that signal. A manually
+assigned channel name must be presented as a channel label, never automatic
+speaker identification.
 
-A existência de `diarization` e `wordTimestamp` no schema compartilhado de `AudioTranscriptionConfig` não confirma compatibilidade do modelo. A documentação de `gemini-3.5-transcribe-live` exclui diarização e timestamps por palavra no streaming; a API de transcrição de arquivos oferece esses recursos. Portanto, o provedor não envia essas opções nem inventa locutores ou alinhamentos temporais. [Guia Live Transcribe](https://ai.google.dev/gemini-api/docs/live-api/live-transcribe#limitations), [tabela de capacidades](https://ai.google.dev/gemini-api/docs/models/gemini-3.5-transcribe).
+The presence of `diarization` and `wordTimestamp` in the shared
+`AudioTranscriptionConfig` schema does not confirm model compatibility. The
+`gemini-3.5-transcribe-live` documentation excludes streaming diarization and
+word timestamps; file transcription offers those features. The provider
+therefore neither sends those options nor invents speakers/timing alignments.
+[Live Transcribe guide](https://ai.google.dev/gemini-api/docs/live-api/live-transcribe#limitations),
+[capability table](https://ai.google.dev/gemini-api/docs/models/gemini-3.5-transcribe).
 
-A abstração preserva metadados autênticos quando presentes: `speakerLabel` e os offsets da primeira/última palavra de `words` são expostos por `TranscriptMetadata`. IDs e listas têm limites; durações inválidas, negativas ou com overflow são rejeitadas. Campos ausentes continuam ausentes. Esses offsets são relativos ao áudio da sessão do provedor e podem reiniciar após reconexão. Essa compatibilidade com o schema do [SDK oficial](https://github.com/googleapis/python-genai/blob/main/google/genai/types.py#L2051) não ativa diarização nos modelos atuais.
+The abstraction preserves authentic metadata when supplied: `speakerLabel`
+and offsets of the first/last entries in `words` are exposed through
+`TranscriptMetadata`. IDs/lists are bounded; invalid, negative or overflowing
+durations are rejected. Missing fields remain missing. Offsets are relative to
+the provider session's audio and may reset on reconnection. This compatibility
+with the [official SDK schema](https://github.com/googleapis/python-genai/blob/main/google/genai/types.py#L2051)
+does not enable diarization in current models.
 
-`provider::capabilities(model)` descreve os modelos de tradução, declarando apenas recursos confirmados para as famílias conhecidas. Gemini Live Translate informa tradução contínua e preservação vocal automática de melhor esforço; os modelos 3.8 Live informam voz fixa e prompts. OpenAI `gpt-realtime-translate` informa tradução contínua e `gpt-realtime-2.1` informa voz fixa e prompts, incluindo snapshots dessas famílias com sufixo de data válido. O catálogo não atribui preservação vocal automática ao OpenAI. Nesse catálogo de tradução, diarização, timestamps por palavra e cadastro de voz permanecem `false`: a biblioteca de vozes e os reconhecedores STT são fluxos separados. O STT Deepgram, por exemplo, pode fornecer rótulos reais de falante e tempos das palavras sem que o tradutor ofereça esses recursos. Famílias desconhecidas e sufixos não reconhecidos não anunciam capacidades presumidas.
+`provider::capabilities(model)` describes translation models, advertising only
+confirmed capabilities for known families. Gemini Live Translate advertises
+continuous translation and best-effort automatic voice preservation; 3.8 Live
+models advertise fixed voices and prompts. OpenAI `gpt-realtime-translate`
+advertises continuous translation and `gpt-realtime-2.1` fixed voices/prompts,
+including snapshots of those families with valid date suffixes. The catalog
+does not attribute automatic voice preservation to OpenAI. In this translation
+catalog, diarization, word timestamps and voice enrollment remain `false`:
+the voice library and STT recognizers are separate flows. Deepgram STT, for
+example, can supply actual speaker labels and word timing even if the translator
+cannot. Unknown families and unrecognized suffixes advertise no assumed capabilities.
 
-Marcações geradas pelo aplicativo a partir do relógio local indicam quando o texto foi recebido, incluindo o atraso da rede/IA. Não são o início de cada palavra no áudio. A documentação Live cita tempos de enunciados, mas a referência WebSocket pública não especifica esses offsets para Live Translate; o recebimento desses metadados não é garantido.
+App timestamps derived from the local clock indicate when text arrived, including
+network/AI delay. They are not individual word start times. Live documentation
+mentions utterance timing, but the public WebSocket reference does not specify
+those offsets for Live Translate; receiving such metadata is not guaranteed.
 
-O Babel implementa uma biblioteca separada de design/clonagem e síntese com Gemini 3.8 Flash TTS ou ElevenLabs. No Gemini, o cadastro aceita 10–30 segundos de referência e uma gravação específica de consentimento da mesma pessoa, retornando um perfil reutilizável. Esse TTS recebe texto e não utiliza a Live API. O adaptador `revoice` mantém a tradução ativa, descarta seu áudio nativo e sintetiza o texto traduzido em blocos pela voz selecionada; portanto acrescenta requisições, latência e custo. Cada direção seleciona seu perfil, sem atribuir automaticamente clones a pessoas de uma chamada misturada. O caminho direto continua disponível para priorizar tradução contínua. Veja [biblioteca, requisitos e exemplos](voices.md), [Voice replication](https://ai.google.dev/gemini-api/docs/voice-replication) e [modelo TTS](https://ai.google.dev/gemini-api/docs/models/gemini-3.8-flash-tts).
+Babel implements a separate design/cloning and synthesis library using Gemini
+3.8 Flash TTS or ElevenLabs. Gemini enrollment accepts a 10–30-second reference
+and a specific consent recording from the same person, returning a reusable
+profile. This TTS consumes text and does not use the Live API. `revoice` keeps
+translation active, discards its native audio and synthesizes translated text
+in chunks using the selected voice, adding requests, latency and cost. Each
+direction chooses its profile without automatically assigning clones to people
+in a mixed call. The direct path remains available to prioritize continuous
+translation. See [library, requirements and examples](voices.md),
+[Voice replication](https://ai.google.dev/gemini-api/docs/voice-replication) and
+[the TTS model](https://ai.google.dev/gemini-api/docs/models/gemini-3.8-flash-tts).
 
-## Limites e recuperação do Gemini
+## Gemini limits and recovery
 
-- Mensagens WebSocket: até 512 KiB; fragmento PCM de saída: até 48.000 bytes (um segundo); entrada: até 16.000 amostras por envio. MIME, frequência, canais, Base64 e comprimento par de PCM16 são validados.
-- Envio de áudio: prazo de 500 ms. Eventos de reprodução: prazo de dois segundos. Filas e buffers de rede são limitados. Congestionamento prolongado encerra a sessão, em vez de consumir memória sem limite.
-- Ping a cada 15 segundos; conexão sem nenhuma resposta por 45 segundos é reaberta. Um segundo sem novos quadros envia `audioStreamEnd`, sem encerrar a conexão.
-- O número configurado de tentativas limita falhas consecutivas; uma sessão saudável de pelo menos um minuto restaura o orçamento. A espera aumenta de 250 ms até cinco segundos. Erros de configuração, autenticação e protocolo não geram retries infinitos.
-- Ao reconectar, a reprodução pendente é interrompida e o áudio capturado durante a indisponibilidade é descartado. Não há promessa de continuidade sem perda durante falhas da rede ou rotação de sessão.
-- No Live genérico, `sessionResumptionUpdate` e `goAway` permitem retomar de um ponto explicitamente resumível. O cliente habilita compressão de contexto. No modelo de tradução, a sessão é recriada sem essas opções, cuja compatibilidade específica não está documentada.
-- Cancelamento interrompe conexão, espera de setup, rede e filas. O fechamento inesperado da captura é erro, não conclusão bem-sucedida.
+- WebSocket messages: up to 512 KiB; output PCM fragment: up to 48,000 bytes
+  (one second); input: up to 16,000 samples per send. MIME, rate, channels,
+  Base64 and even PCM16 byte length are validated.
+- Audio sends have a 500 ms deadline; playback events have two seconds. Queues
+  and network buffers are bounded. Prolonged congestion ends the session
+  instead of consuming unbounded memory.
+- Ping every 15 seconds; a connection with no response for 45 seconds is
+  reopened. One second without new frames sends `audioStreamEnd` without
+  closing the connection.
+- Configured retries limit consecutive failures; a healthy session of at least
+  one minute restores the budget. Backoff grows from 250 ms to five seconds.
+  Configuration, authentication and protocol errors do not retry indefinitely.
+- Reconnection interrupts pending playback and discards audio captured during
+  unavailability. Lossless continuity during network failures/session rotation
+  is not promised.
+- Generic Live uses `sessionResumptionUpdate` and `goAway` to resume from an
+  explicitly resumable point. The client enables context compression. The
+  translation model recreates sessions without those options, whose model-specific
+  compatibility is undocumented.
+- Cancellation interrupts connections, setup waits, networking and queues.
+  Unexpected capture closure is an error, not successful completion.
 
-## Uso sem tradução e validação
+## Use without translation and validation
 
-Desligue a tradução da direção desejada para encaminhar o áudio original. Esse
-percurso funciona sem sessão: o microfone ativa quando Babel é o padrão do
-sistema ou um aplicativo usa seu microfone virtual; a saída exige um aplicativo
-enviando áudio ao Babel. Também permanece disponível durante uma sessão de
-gravação. Não há um provedor
-de diagnóstico para selecionar, e roteamento e gravação, com transcrição e
-tradução desligadas, não abrem conexões de IA nem exigem chave. A transcrição
-independente usa o perfil `transcription.providers.*` escolhido para cada origem, mesmo que a tradução dessa direção esteja ativa. Gemini, OpenAI, Deepgram e Whisper estão descritos no [guia de transcrição](transcription.md).
+Turn off translation for a direction to forward its original audio. This works
+without a session: the microphone activates when Babel is the system default or
+an app uses its virtual microphone; output requires an app sending audio to
+Babel. It also remains available during recording sessions. There is no diagnostic
+provider to select; routing/recording with transcription and translation off
+neither open AI connections nor require a key. Independent transcription uses
+the `transcription.providers.*` profile selected for each source, even while
+that direction translates. Gemini, OpenAI, Deepgram and Whisper are described
+in the [transcription guide](transcription.md).
 
-Os testes usam um servidor WebSocket local com credencial fictícia: barreira de setup, PCM little-endian, múltiplos fragmentos, transcrições, cancelamento, retomada de sessão, orçamento de retries, erros sanitizados e EOF de captura. Eles não comprovam autorização da conta nem a qualidade real da tradução; isso exige uma chave válida e áudio real.
+Tests use a local WebSocket server and dummy credentials: setup barrier,
+little-endian PCM, multiple fragments, transcripts, cancellation, session
+resumption, retry budgets, sanitized errors and capture EOF. They do not prove
+account authorization or actual translation quality; those require a valid key
+and real audio.
 
-## Referências oficiais
+## Official references
 
-Documentação consultada em 29/09/2026:
+Documentation consulted on 2026-09-29:
 
-- [Live Translation](https://ai.google.dev/gemini-api/docs/live-api/live-translate): modo contínuo, modelo especializado e configuração.
-- [Referência WebSockets](https://ai.google.dev/api/live): mensagens, transcrição, setup e retomada.
-- [Capacidades Live](https://ai.google.dev/gemini-api/docs/live-api/capabilities): formatos PCM e capacidades do modelo 3.8 Live.
-- [SDK oficial: cabeçalhos](https://github.com/googleapis/python-genai/blob/main/google/genai/_api_client.py) e [conexão Live](https://github.com/googleapis/python-genai/blob/main/google/genai/live.py): autenticação por cabeçalho.
+- [Live Translation](https://ai.google.dev/gemini-api/docs/live-api/live-translate):
+  continuous mode, specialized model and configuration.
+- [WebSocket reference](https://ai.google.dev/api/live): messages, transcription,
+  setup and resumption.
+- [Live capabilities](https://ai.google.dev/gemini-api/docs/live-api/capabilities):
+  PCM formats and 3.8 Live model capabilities.
+- [Official SDK headers](https://github.com/googleapis/python-genai/blob/main/google/genai/_api_client.py)
+  and [Live connection](https://github.com/googleapis/python-genai/blob/main/google/genai/live.py):
+  header authentication.

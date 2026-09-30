@@ -478,7 +478,7 @@ async fn stuck_previous_worker_never_overlaps_with_replacement() {
         .unwrap()
         .unwrap()
         .unwrap_err();
-    assert!(error.to_string().contains("dispositivo anterior"));
+    assert!(error.to_string().contains("previous device"));
     assert!(
         received.try_recv().is_err(),
         "a new worker must not start before the old worker exits"

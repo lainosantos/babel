@@ -1,45 +1,45 @@
 # Babel
 
-Microfone e saída de áudio virtuais para tradução bidirecional de voz. O núcleo,
-os adaptadores de IA, o servidor do painel e os controles de bandeja são Rust.
-Cada direção pode usar um provedor e uma voz diferentes para tradução.
-A transcrição também escolhe seu próprio provedor e idioma para o microfone e
-para o áudio recebido, independentemente da tradução.
-Tradução, transcrição e gravação são independentes. Fora de uma sessão, o Babel
-encaminha o áudio original entre os dispositivos configurados. Desligar a
-tradução de uma direção mantém esse encaminhamento durante a sessão também.
+Virtual microphone and audio output for bidirectional speech translation. The
+core, AI adapters, dashboard server and tray controls are written in Rust. Each
+direction can use a different translation provider and voice. Transcription
+also selects its own provider and language for the microphone and incoming
+audio, independently of translation.
+Translation, transcription and recording are independent. Outside a session,
+Babel routes original audio between the configured devices. Turning off a
+direction's translation preserves that routing during a session as well.
 
-O agente de comandos usa **somente o microfone físico original**, com nome de
-ativação configurável (padrão “Babel”), Whisper local, **Needle 3** e integrações
-MCP HTTP/stdio autenticadas. Funciona também sem sessão de tradução ou gravação.
-O áudio da saída nunca alimenta o agente. Consulte
-[instalação e comandos de voz](docs/voice-commands.md) e
-[integrações e autenticação MCP](docs/mcp.md); os dois serviços locais precisam
-ser preparados antes do uso. O painel e as notificações mostram o processamento
-e o resultado sem bloquear o roteamento de áudio.
+The command agent uses **only the original physical microphone**, with a
+configurable wake name (default: “Babel”), local Whisper, **Needle 3** and
+authenticated HTTP/stdio MCP integrations. It also works without a translation
+or recording session. Output audio never feeds the agent. See
+[setup and voice commands](docs/voice-commands.md) and
+[MCP integrations and authentication](docs/mcp.md); both local services must be
+prepared before use. The dashboard and notifications show processing and results
+without blocking audio routing.
 
 ```text
-Microfone físico → tradução → Babel Microphone → aplicativo de chamada
-Aplicativo de chamada → Babel Speaker → tradução → fones físicos
+Physical microphone → translation → Babel Microphone → calling app
+Calling app → Babel Speaker → translation → physical headphones
 ```
 
-O modo nativo transmite áudio em conexões persistentes. Gemini Live Translate e
-OpenAI Realtime Translate são os adaptadores de tradução contínua. Modelos
-conversacionais esperam detecção de fim de fala; a opção local trabalha em trechos.
-Vozes personalizadas acrescentam síntese TTS em streaming após a tradução.
-**Streaming não significa latência zero nem garante um prazo de tempo real rígido.**
+Native voice mode streams audio over persistent connections. Gemini Live
+Translate and OpenAI Realtime Translate are the continuous translation adapters.
+Conversational models wait for end-of-speech detection; the local option works
+in segments. Custom voices add streaming TTS after translation.
+**Streaming does not mean zero latency or guarantee a hard real-time deadline.**
 
-## Começar
+## Getting started
 
-Requer Rust **1.90 ou posterior**. Clone/abra este diretório e compile:
+Requires Rust **1.90 or later**. Clone/open this directory and build:
 
 ```sh
 cargo build --release --locked
 cargo run --release -- init
 ```
 
-No Linux, instale `pulseaudio-utils` (Ubuntu/Debian), com PipeWire + pipewire-pulse
-ou PulseAudio em execução na sessão do usuário. Não execute o Babel como root.
+On Linux, install `pulseaudio-utils` (Ubuntu/Debian), with PipeWire +
+pipewire-pulse or PulseAudio running in the user session. Do not run Babel as root.
 
 ```sh
 sudo apt install pulseaudio-utils
@@ -47,215 +47,226 @@ cargo run --release -- setup
 cargo run --release -- serve
 ```
 
-O sistema escolhe uma porta livre para o painel em cada execução. O terminal
-imprime o endereço efetivo com um token de sessão; abra esse link completo ou
-**Configurações** na bandeja, que acompanha o endereço atual. A bandeja oferece
-**configurações**, **iniciar sessão**, **encerrar
-sessão** e **sair**. Encerrar uma sessão finaliza seus arquivos e volta ao áudio
-original; sair do Babel encerra também o encaminhamento local.
-Também permite escolher o **microfone físico** e a **saída física**, com a
-tradução parada ou em execução, e atualizar a lista de dispositivos. A troca
-mantém a sessão de IA e os arquivos abertos; pode haver uma breve lacuna de áudio.
-O painel também funciona sem bandeja com `serve --no-tray`.
+The OS chooses an available dashboard port on each run. The terminal prints the
+actual address with a session token; open that complete link or **Settings**
+from the tray, which tracks the current address. The tray offers **Settings**,
+**Start session**, **Stop session** and **Quit**. Stopping a session finalizes
+its files and returns to original audio; quitting Babel also stops local routing.
+You can select the **physical microphone** and **physical output**, whether
+translation is stopped or running, and refresh the device list. Switching keeps
+the AI session and files open; a brief audio gap is possible. The dashboard also
+works without a tray using `serve --no-tray`.
 
-O painel e a bandeja identificam o sistema em que o Babel está executando.
-As instruções de áudio, os controles de dispositivos virtuais e a orientação
-de início automático acompanham esse sistema. No Linux, o painel oferece criar
-e remover os dispositivos Babel; no macOS e Windows, mostra como preparar e
-instalar o pacote do driver Babel próprio e selecionar suas pontas. A ajuda abre
-diretamente na seção do sistema atual.
+The dashboard and tray identify the OS running Babel. Audio instructions,
+virtual-device controls and startup guidance follow that OS. On Linux, the
+dashboard offers to create/remove Babel devices; on macOS and Windows, it
+explains how to prepare/install Babel's own driver package and select its
+endpoints. Help opens directly at the section for the current OS.
 
-Em Linux/macOS, `./scripts/run.sh` inicia o binário compilado a partir deste
-diretório; na primeira execução, compila caso ele ainda não exista. O script
-também aceita os subcomandos, por exemplo `./scripts/run.sh doctor`.
+On Linux/macOS, `./scripts/run.sh` starts the built binary from this directory;
+on the first run, it builds if the binary does not exist. It also accepts
+subcommands, for example `./scripts/run.sh doctor`.
 
-1. Em **Tradução e vozes**, configure os perfis usados para traduzir.
-   Provedores de nuvem recebem uma chave temporária pelo painel ou pela variável
-   de ambiente indicada. Só gravar ou encaminhar originais dispensa essa etapa.
-2. Nessa mesma página, escolha o tradutor de cada faixa. As configurações de um
-   provedor não sobrescrevem as dos outros. O padrão é Gemini Live Translate.
-3. Em **Roteamento**, selecione os físicos e as pontas virtuais do seu sistema.
-   No Linux, use o microfone físico como captura e `babel_mic_bus` como reprodução
-   do microfone; na saída, `babel_speaker.monitor` como captura e seus fones como
-   reprodução. O [guia por sistema](docs/platforms.md) mostra as pontas macOS/Windows.
-4. Em **Tradução e vozes**, defina os idiomas e as vozes de cada direção e ative
-   apenas as traduções desejadas. Os perfis de IA e a biblioteca de vozes ficam juntos.
-5. Em **Transcrição**, escolha os originais que deseja guardar e, para cada
-   origem, seu provider STT e idioma: Gemini, OpenAI, Deepgram ou Whisper.
-   Os perfis e credenciais de transcrição ficam nessa página e são independentes
-   dos perfis de tradução. Em **Gravação**, selecione o áudio original que deseja
-   salvar. Ambas têm um atalho para a pasta base e os nomes de arquivos em
-   **Ajustes**. É possível só gravar, só transcrever ou combinar os recursos.
-6. Salve os ajustes, preencha **Nome da sessão** se desejar e clique em **Iniciar
-   sessão**. No aplicativo da chamada, selecione **Babel_Microphone** e
-   **Babel_Speaker** no Linux, ou **Babel Microphone** e **Babel Speaker** no
-   macOS/Windows. Sem sessão ativa, esses caminhos passam o original.
+1. In **Translation & voices**, configure the profiles used for translation.
+   Cloud providers receive a temporary key through the dashboard or the named
+   environment variable. Recording or routing originals alone skips this step.
+2. On the same page, select each direction's translator. One provider's settings
+   do not overwrite another's. The default is Gemini Live Translate.
+3. In **Routing**, select physical devices and your OS's virtual endpoints.
+   On Linux, use the physical microphone as capture and `babel_mic_bus` as
+   microphone playback; for incoming audio, use `babel_speaker.monitor` as
+   capture and your headphones as playback. The [platform guide](docs/platforms.md)
+   lists macOS/Windows endpoints.
+4. In **Translation & voices**, choose each direction's languages and voices,
+   enabling only the translations you want. AI profiles and the voice library
+   are grouped on this page.
+5. In **Transcription**, choose the originals to save and each source's STT
+   provider and language: Gemini, OpenAI, Deepgram or Whisper. Transcription
+   profiles and credentials live here, independently of translation profiles.
+   In **Recording**, select the original audio to save. Both pages link to the
+   base folder and filenames in **Settings**. You can record, transcribe or
+   combine features.
+6. Save settings, optionally enter a **Session name**, and click **Start session**.
+   The session bar mirrors the current Translation, Recording and Transcription
+   switches so you can adjust them before starting. In the calling app, select
+   **Babel_Microphone** and **Babel_Speaker** on Linux, or **Babel Microphone**
+   and **Babel Speaker** on macOS/Windows. Without an active session, these
+   routes carry original audio.
 
-Para usar somente o áudio original, deixe a tradução desligada nas duas direções.
-O roteamento continua funcionando quando um aplicativo usa os dispositivos Babel.
-Se quiser guardar esse áudio, ative **Gravação** e inicie uma sessão; não é preciso
-escolher um provedor especial, fornecer chave de IA ou habilitar transcrição.
+To use original audio only, leave translation off in both directions. Routing
+continues while an app uses the Babel devices; selecting Babel as the default
+microphone also activates its microphone route. To save audio, enable
+**Recording** and start a session; no special provider, AI key or transcription
+is required.
 
-Configurações antigas com `loopback` são migradas para o perfil Gemini com
-tradução e transcrição da rota desligadas, sem iniciar chamadas à nuvem. Veja
-[a migração de configuração](docs/configuration.md#arquivos-e-chaves).
+Legacy `loopback` configurations migrate to the Gemini profile with route
+translation and transcription disabled, without starting cloud calls. See
+[configuration migration](docs/configuration.md#files-and-keys).
 
-No macOS e Windows, o **driver nativo Babel** fornece dois percursos independentes.
-O código-fonte e os scripts de compilação estão em `native/macos` e `native/windows`;
-**a assinatura dos pacotes de distribuição e a validação em hardware nativo ainda
-estão pendentes**. O app usa CoreAudio/WASAPI via CPAL, com IDs persistentes e
-monitoramento dos aplicativos. No macOS, essa detecção exige **macOS 14.2+**.
-BlackHole e VB-CABLE continuam como alternativas opcionais, sem serem dependências
-do driver próprio. Consulte [compilação e pacotes nativos](docs/native-drivers.md)
-e [o mapa de dispositivos por sistema](docs/platforms.md).
+On macOS and Windows, the **native Babel driver** provides two independent
+routes. Source code and build scripts are in `native/macos` and `native/windows`;
+**distribution-package signing and native hardware validation are still pending**.
+The app uses CoreAudio/WASAPI through CPAL, with persistent IDs and app-activity
+monitoring. On macOS, that detection requires **macOS 14.2+**. BlackHole and
+VB-CABLE remain optional alternatives, not dependencies of Babel's own driver.
+See [native builds and packages](docs/native-drivers.md) and
+[device maps by platform](docs/platforms.md).
 
-No Windows, o executável é `target\release\babel.exe`; os mesmos subcomandos
-funcionam no PowerShell. No macOS, o loop de eventos da bandeja roda na thread
-principal. Permita a captura de microfone ao aplicativo/terminal.
+On Windows, the executable is `target\release\babel.exe`; the same subcommands
+work in PowerShell. On macOS, the tray event loop runs on the main thread. Grant
+microphone capture permission to the app/terminal.
 
-## Documentação
+## Documentation
 
-- [Guia de configuração e operação](docs/configuration.md): perfis, chaves,
-  idiomas, rotas, qualidade, filas, transcrição, gravação e bandeja.
-- [Idiomas da interface](docs/localization.md): inglês, português, seleção pelo
-  sistema e inclusão de novos catálogos de tradução.
-- [Transcrição dos originais](docs/transcription.md): Gemini, OpenAI, Deepgram e
-  Whisper, seleção de idioma/provider por origem, perfis próprios e limitações.
-- [Gravação dos originais](docs/recording.md): WAV único, mistura, sincronização
-  e limites do gravador.
-- [Dispositivos Linux/macOS/Windows](docs/platforms.md): instalação,
-  roteamento, permissões, drivers e solução de problemas.
-- [Instaladores no GitHub Actions](docs/ci-installers.md): pacotes por sistema,
-  artefatos, verificações e assinatura.
-- [Drivers nativos Babel](docs/native-drivers.md): código, compilação,
-  preparação dos pacotes e requisitos de instalação explícita.
-- [Gemini Live](docs/providers.md): protocolos, modelos, transcrições,
-  capacidades e restrições da tradução contínua.
-- [OpenAI, Deepgram e serviços open source](docs/other-providers.md): Realtime
-  Translate, Realtime conversacional, Deepgram STT e inferência local.
-- [Modelos locais integrados](docs/local-inference.md): Whisper, Qwen e Piper,
-  preparação automática, armazenamento, downloads e uso offline.
-- [Vozes Gemini e ElevenLabs](docs/voices.md): biblioteca, voice design,
-  clonagem, seleção por faixa, formatos, requisitos, custos e limites.
-- [Arquitetura, segurança de memória e desempenho](docs/architecture.md).
-- [Diagnóstico e validação](docs/testing.md).
-- [Iniciar a bandeja no login](docs/autostart.md): ativação opcional por usuário.
-- [Configuração completa de exemplo](examples/babel.example.toml).
+Browse the [documentation website](https://lainosantos.github.io/babel/) or the
+source guides below.
 
-## O que está implementado
+- [Configuration and operation](docs/configuration.md): profiles, keys,
+  languages, routes, quality, queues, transcription, recording and tray.
+- [Interface languages](docs/localization.md): English, Portuguese, system
+  selection and adding translation catalogs.
+- [Original-audio transcription](docs/transcription.md): Gemini, OpenAI,
+  Deepgram and Whisper, source-specific languages/providers, profiles and limits.
+- [Original-audio recording](docs/recording.md): one WAV, mixing,
+  synchronization and recorder limits.
+- [Linux/macOS/Windows devices](docs/platforms.md): installation,
+  routing, permissions, drivers and troubleshooting.
+- [GitHub Actions installers](docs/ci-installers.md): platform packages,
+  artifacts, checks, tagged releases and signing.
+- [Native Babel drivers](docs/native-drivers.md): source, builds,
+  package preparation and explicit installation requirements.
+- [Gemini Live](docs/providers.md): protocols, models, transcriptions,
+  capabilities and continuous translation restrictions.
+- [OpenAI, Deepgram and open-source services](docs/other-providers.md): Realtime
+  Translate, conversational Realtime, Deepgram STT and local inference.
+- [Embedded local models](docs/local-inference.md): Whisper, Qwen and Piper,
+  automatic preparation, storage, downloads and offline use.
+- [Gemini and ElevenLabs voices](docs/voices.md): library, voice design,
+  cloning, per-direction selection, formats, requirements, costs and limits.
+- [Architecture, memory safety and performance](docs/architecture.md).
+- [Diagnostics and validation](docs/testing.md).
+- [Start the tray at login](docs/autostart.md): optional per-user activation.
+- [Complete example configuration](examples/babel.example.toml).
+- [Contributing](CONTRIBUTING.md): English repository content, Conventional
+  Commits, checks and release policy.
 
-| Integração de tradução/voz | Tradução de áudio | Voz personalizada |
+## Implemented integrations
+
+| Translation/voice integration | Audio translation | Custom voice |
 |---|---|---|
-| Gemini Live Translate | Contínua, áudio para áudio | Preservação automática aproximada; TTS opcional para voz fixa |
-| Gemini 3.8 Live | Speech-to-speech por turnos/VAD | Voz pronta nativa; TTS opcional |
-| OpenAI Realtime Translate | Contínua, áudio para áudio | Voz do modelo; TTS opcional |
-| OpenAI Realtime | Speech-to-speech por turnos/VAD | Voz pronta nativa; TTS opcional |
-| Whisper + Qwen + Piper integrados | Pipeline local por trechos | Vozes Piper do catálogo; TTS de nuvem opcional |
-| Gemini 3.8 TTS | Síntese do texto traduzido, não tradutor isolado | Vozes prontas, design e clonagem cadastrada |
-| ElevenLabs | Síntese do texto traduzido, não tradutor isolado | Vozes da biblioteca, design e instant voice clone |
+| Gemini Live Translate | Continuous audio-to-audio | Approximate automatic preservation; optional TTS for a fixed voice |
+| Gemini 3.8 Live | Speech-to-speech with turns/VAD | Native preset voice; optional TTS |
+| OpenAI Realtime Translate | Continuous audio-to-audio | Model voice; optional TTS |
+| OpenAI Realtime | Speech-to-speech with turns/VAD | Native preset voice; optional TTS |
+| Embedded Whisper + Qwen + Piper | Local segmented pipeline | Catalog Piper voices; optional cloud TTS |
+| Gemini 3.8 TTS | Synthesizes translated text; not a standalone translator | Preset voices, design and registered clones |
+| ElevenLabs | Synthesizes translated text; not a standalone translator | Library voices, design and instant voice cloning |
 
-Os quatro reconhecedores abaixo produzem o TXT dos originais, com qualquer
-tradutor ou sem tradução. Cada origem escolhe seu próprio provider e idioma.
+The four recognizers below produce the original-audio TXT, with any translator
+or without translation. Each source selects its own provider and language.
 
-| Reconhecedor STT | Modelo/caminho padrão | Falantes e tempos |
+| STT recognizer | Default model/path | Speakers and timing |
 |---|---|---|
-| Gemini | `gemini-3.5-transcribe-live` | Sem diarização ou tempos por palavra no streaming |
-| OpenAI | `gpt-live-transcribe` | Sem identificação de falantes ou tempos por palavra no adaptador padrão |
-| Deepgram | Nova-3 via Listen v1 | Diarização configurável e tempos fornecidos nas palavras |
-| Whisper | Motor integrado, modelo Base; Tiny/Small opcionais | Offsets dos trechos capturados, sem identificação de falantes |
+| Gemini | `gemini-3.5-transcribe-live` | No streaming diarization or word timestamps |
+| OpenAI | `gpt-live-transcribe` | No speaker identification or word timestamps in the default adapter |
+| Deepgram | Nova-3 through Listen v1 | Configurable diarization and provider word timestamps |
+| Whisper | Embedded engine, Base model; optional Tiny/Small | Captured-segment offsets, no speaker identification |
 
-Perfis de reconhecimento usam `transcription.providers.*`; a escolha e o idioma
-ficam em `transcription.microphone_recognition` e
-`transcription.speaker_recognition`. O texto de entrada do tradutor STS não é
-gravado nem substitui esse reconhecimento. Veja [configuração e exemplos](docs/transcription.md).
+Recognition profiles use `transcription.providers.*`; selection and language
+live in `transcription.microphone_recognition` and
+`transcription.speaker_recognition`. STS input text is neither saved nor used
+instead of dedicated recognition. See [configuration and examples](docs/transcription.md).
 
-Os providers locais em modo integrado são preparados ao salvar a seleção. Os
-instaladores incluem os motores; pesos ausentes são baixados com verificação de
-hash e reutilizados offline. Não é preciso instalar ou iniciar Python, Ollama
-ou serviços separados. Endpoints externos, incluindo Ollama, continuam opcionais
-para instalações próprias. A UI acompanha preparação e permite escolher a pasta
-absoluta dos modelos e as threads de reconhecimento/tradução.
+Embedded local providers are prepared when their selection is saved. Installers
+include engines; missing weights are downloaded with hash verification and
+reused offline. No separate Python, Ollama or service installation/startup is
+needed. External endpoints, including Ollama, remain optional for custom
+installations. The UI tracks preparation and lets you choose the absolute model
+folder and recognition/translation thread limits.
 
+The library supports creating multiple voices, listing account profiles and
+selecting a voice per direction. Reference/consent audio is sent only when
+cloning is explicitly requested. Keys entered in the dashboard remain in memory
+until the process exits; TOML stores only the corresponding variable name.
 
-A biblioteca permite criar várias vozes, listar os perfis da conta e selecionar
-uma voz para cada direção. O áudio de referência/consentimento é enviado somente
-quando a ação de clonagem é acionada. Chaves digitadas no painel ficam na memória
-até o processo encerrar; o TOML guarda apenas o nome da variável correspondente.
+## Session files, participants and voices
 
-## Arquivos da sessão, participantes e voz
+Saved transcripts contain **original audio only**: one TXT per session combines
+microphone and incoming-audio segments, labeled `[microphone]` and
+`[received output]`. Segments are ordered
+by arrival, which may differ from the exact order of speech across independent
+connections. Timestamps are optional; text distinguishes audio offsets,
+approximate alignment and local receipt time.
 
-As transcrições gravadas são **somente dos áudios originais**: um único TXT por
-sessão reúne os trechos do microfone e da saída recebida, identificados por
-`[microfone]` e `[saída recebida]`. A ordem é a de chegada dos fragmentos, que
-pode diferir da ordem exata da fala nas duas conexões. Horários são opcionais;
-o texto distingue offsets de áudio, alinhamento aproximado e recebimento local.
+Audio recording is a separate option, off by default. It mixes selected originals
+into **one PCM16 mono WAV at 16 kHz**, before translation and output gain.
+Transcription and recording have independent source/folder selections. In
+**Settings → Session files**, `files.base_path` defines a shared base folder
+that is **always absolute**; the dashboard shows complete TXT/WAV destinations.
+New configurations use `Babel` inside the user's home directory, independently
+of the launch directory. Transcript/recording destinations can be relative to
+that base or absolute. Legacy configurations with a missing or relative base
+are migrated once against the TOML's directory and saved with an absolute path;
+existing files are not moved. Check the destination if you previously launched
+from a directory other than the configuration folder.
+The shared filename pattern is `{date}-{time}-{session}-{id}`: UTC date/time,
+a filename-safe title and a required identifier. `.txt`/`.wav` extensions are
+automatic. An enabled feature needs at least one selected source with configured
+devices, even if its translation is off. Recording originals needs no AI provider;
+transcription needs speech recognition and may use cloud services according to
+the selected profile. See [filenames and recording options](docs/configuration.md#session-files).
 
-A gravação de áudio é outra opção, desligada por padrão. Ela mistura as origens
-selecionadas em **um único WAV PCM16 mono a 16 kHz**, antes da tradução e do ganho
-da saída. Transcrição e gravação têm seleções de faixas e pastas independentes.
-Em **Ajustes → Arquivos da sessão**, `files.base_path` define uma pasta base
-comum **sempre absoluta**; o painel exibe os destinos completos do TXT e do WAV.
-Configurações novas usam a pasta `Babel` dentro da pasta pessoal do usuário,
-independentemente do diretório de execução. Os destinos de transcrição e gravação
-podem ser relativos a essa base ou absolutos. Configurações antigas sem base ou
-com base relativa são migradas uma vez contra a pasta do TOML e salvas com caminho
-absoluto; a migração não move arquivos existentes. Confira o destino se antes
-iniciava o programa em uma pasta diferente da configuração.
-O padrão de nome comum é `{date}-{time}-{session}-{id}`: data/hora em UTC, título
-adaptado para arquivo e identificador obrigatório. As extensões `.txt` e `.wav`
-são automáticas. Um recurso habilitado precisa ter ao menos uma origem selecionada
-com dispositivos configurados, mesmo que sua tradução esteja desligada.
-Gravar os originais não exige um provedor de IA; transcrever exige reconhecimento
-de fala e pode usar nuvem conforme o perfil escolhido.
-Veja [nomes e opções de gravação](docs/configuration.md#arquivos-da-sessão).
+An optional bounded memory history keeps both original directions on the same
+timeline. Its default retention is ten minutes and is configurable. Including
+recent history when starting a session is an explicit opt-in under the advanced
+start options; it applies to whichever file-producing features are enabled.
 
-Deepgram pode atribuir IDs de falante às palavras e o Babel preserva esses
-metadados na transcrição. São rótulos locais da conexão, sujeitos a erros e a
-reinício após reconexão; não são nomes nem identidade persistente entre origens
-ou sessões. **O cadastro automático de clones nos primeiros segundos e sua
-associação aos participantes não estão implementados.** Os dois canais de áudio
-não são tratados como identificação das pessoas de uma reunião. Gemini pode
-aproximar as características originais da voz, sem garantir uma identidade
-vocal distinta por participante. Vozes fixas/desenhadas/clonadas são selecionadas
-explicitamente.
+Deepgram can assign speaker IDs to words, and Babel preserves those transcript
+metadata. IDs are connection-local labels, can be wrong and can restart after
+reconnection; they are not names or persistent identities across sources/sessions.
+**Automatically enrolling clones from the first seconds and assigning them to
+participants is not implemented.** Two audio directions are not treated as
+identification of people in a meeting. Gemini may approximate original voice
+characteristics without guaranteeing a distinct vocal identity per participant.
+Fixed/designed/cloned voices are selected explicitly.
 
-Gemini exige uma amostra de referência de 10–30 segundos e uma gravação de
-consentimento da mesma pessoa para cadastrar um clone. Isso é diferente da
-preservação de voz do modelo Live. Os detalhes e alternativas estão no guia de
-vozes; o painel não oferece controles que fingem habilitar funções incompatíveis.
+Gemini requires a 10–30-second reference sample and a consent recording from
+the same person to register a clone. This differs from Live voice preservation.
+Details and alternatives are in the voice guide; the dashboard does not offer
+controls that pretend unsupported features are available.
 
-## Comandos
+## Commands
 
 ```text
-babel                         Painel local + bandeja
-babel serve --port 0           Painel em porta escolhida pelo sistema (padrão)
-babel serve --no-tray          Apenas painel local
-babel init                    Cria babel.toml sem sobrescrever
-babel devices                 Lista IDs reais de captura/reprodução
-babel setup                   Cria dispositivos Linux; orienta drivers nos demais
-babel uninstall               Remove dispositivos Linux; orienta remoção nativa
-babel doctor                  Diagnóstico local, sem enviar áudio à nuvem
-babel run                     Executa configuração sem painel; Ctrl+C encerra
-babel run --session "Reunião"  Inicia uma sessão nomeada sem painel
-babel --config outro.toml …   Usa outra configuração
+babel                         Local dashboard + tray
+babel serve --port 0           Dashboard on an OS-selected port (default)
+babel serve --no-tray          Local dashboard only
+babel init                    Create babel.toml without overwriting
+babel devices                 List actual capture/playback IDs
+babel setup                   Create Linux devices; show driver guidance elsewhere
+babel uninstall               Remove Linux devices; show native removal guidance
+babel doctor                  Local diagnostics without sending audio to the cloud
+babel run                     Run configuration without dashboard; Ctrl+C stops
+babel run --session "Meeting"  Start a named session without dashboard
+babel --config other.toml …    Use another configuration
 ```
 
-Encerrar a sessão não remove os dispositivos virtuais. Assim o aplicativo da
-chamada mantém sua seleção. Os módulos Linux devem ser recriados depois que o
-servidor de áudio reiniciar. O Babel não troca a saída padrão global.
+Stopping a session does not remove virtual devices, so the calling app retains
+its selection. Linux modules must be recreated after the audio server restarts.
+Babel does not change the global default output.
 
-No painel, **Inicialização → Iniciar Babel ao entrar no sistema** registra
-somente a bandeja e o serviço local. A opção vem desligada. Ao abrir, o Babel
-aguarda aplicativos usando os virtuais e encaminha o áudio original aos físicos
-configurados somente enquanto houver esse uso, sem iniciar
-tradução, transcrição nem gravação. É possível desfazer a opção no mesmo painel.
+In the dashboard, **Startup → Start in the tray at login** registers only the
+tray and local service. It is off by default. On startup, Babel waits for the
+virtual devices' activation conditions and routes original audio to configured
+physical devices only while those conditions hold, without starting translation,
+transcription or recording. You can undo startup registration on the same page.
 
-## Estado da validação
+## Validation status
 
-Há testes de protocolo com WebSocket/HTTP simulados, filas e cancelamento,
-configuração, transcrição, resampling, autenticação do painel e execução em
-PipeWire real com áudio sintético. Compilação cruzada verifica o código Windows.
-Os drivers próprios têm testes de núcleo e caminhos de compilação separados do
-aplicativo. Os testes dos drivers carregados em hardware macOS/Windows, os pacotes
-assinados e as chamadas com contas/chaves reais dos provedores ainda são necessários
-antes de distribuir o produto como validado para produção. Veja [a reprodução dos testes](docs/testing.md).
+Tests cover simulated WebSocket/HTTP protocols, queues/cancellation,
+configuration, transcription, resampling, dashboard authentication and real
+PipeWire with synthetic audio. Cross-compilation checks Windows code. Babel's
+drivers have core tests and build paths separate from the application. Loaded
+driver tests on macOS/Windows hardware, signed distribution packages and calls
+with real provider accounts/keys are still required before presenting the product
+as validated for production. See [reproducing the tests](docs/testing.md).

@@ -1,51 +1,57 @@
-# Instaladores no GitHub Actions
+# Installers in GitHub Actions
 
-O workflow **Babel CI and installers** (`.github/workflows/ci.yml`) roda em push,
-pull request e acionamento manual. Primeiro exige testes Rust, Clippy, formatação,
-testes da interface e smoke da CLI nos três sistemas. Em seguida chama o workflow
-reutilizável **Build installers and native drivers**. Esse segundo workflow também
-pode ser acionado manualmente para reconstruir pacotes; ele executa seus próprios
-testes dos núcleos nativos e dos empacotadores.
+Normal commits and pull requests run validation: Rust tests, Clippy, formatting,
+interface tests, CLI smoke checks and Conventional Commit checks. They do not
+build installer payloads. New commits must follow Conventional Commits; existing
+history is not rewritten to adopt that policy.
 
-Todos os jobs usam runners hospedados pelo GitHub. Não é necessário manter um
-runner `self-hosted`, instalar o WDK manualmente no runner ou fornecer chaves de
-API dos provedores de IA. O repositório precisa conter todos os fontes, manifests,
-lockfiles, scripts e workflows; pastas de build e configurações pessoais não devem
-ser versionadas.
+Pushing a release tag in the form `v<SemVer>` triggers the release workflow.
+After its required checks pass, it builds installers and native drivers,
+creates the corresponding GitHub Release and attaches the packages and
+integrity files. The reusable native-driver/installer workflow also supports
+manual package builds. Manual builds are useful for inspection and do not
+replace the tagged-release path. See [contribution and release policy](../CONTRIBUTING.md).
 
-## Onde baixar
+All jobs use GitHub-hosted runners. No `self-hosted` runner, manual runner WDK
+installation or AI-provider API key is required. The repository must include
+all sources, manifests, lockfiles, scripts and workflows; build directories
+and personal configurations must not be committed.
 
-Abra **Actions → Babel CI and installers → execução → Artifacts**. Depois de todos
-os testes e builds correspondentes passarem, os seguintes artefatos ficam
-armazenados por 30 dias:
+## Downloads
 
-| Artifact | Conteúdo | Runner |
+For a tagged release, open the repository's **Releases** page and select the
+matching version. Workflow artifacts also appear under **Actions → workflow
+run → Artifacts**. After the relevant checks and builds pass, installer
+artifacts are retained for 30 days:
+
+| Artifact | Contents | Runner |
 |---|---|---|
-| `babel-installers-linux-amd64` | `.deb`, `.rpm`, `.tar.gz`, manifestos e hashes | Ubuntu 22.04 x64 |
-| `babel-installers-macos-universal-development` | `.pkg` com Babel.app + driver HAL, manifesto e hashes | macOS 15 / SDK Apple |
-| `babel-installers-windows-x64-development` | instalador `.exe`, `.zip` completo, manifesto e hashes | Windows Server 2022 / VS2022 |
-| `babel-installers-windows-ARM64-development` | os mesmos formatos, payload ARM64 | Windows Server 2022 com compilação cruzada |
+| `babel-installers-linux-amd64` | `.deb`, `.rpm`, `.tar.gz`, manifests and hashes | Ubuntu 22.04 x64 |
+| `babel-installers-macos-universal-development` | `.pkg` with Babel.app + HAL driver, manifest and hashes | macOS 15 / Apple SDK |
+| `babel-installers-windows-x64-development` | `.exe` installer, complete `.zip`, manifest and hashes | Windows Server 2022 / VS2022 |
+| `babel-installers-windows-ARM64-development` | Same formats with ARM64 payload | Windows Server 2022 with cross-compilation |
 
-O nome dos arquivos inclui a versão de `Cargo.toml`. O `.pkg` macOS contém código
-Intel e Apple Silicon. O Windows usa instaladores separados e verifica a
-arquitetura nativa do sistema; o driver x64 não é oferecido por emulação em ARM64.
-No Linux, a dependência mínima de glibc é extraída dos binários realmente gerados.
-O `.deb` é destinado a Debian/Ubuntu compatíveis; o `.rpm` atende distribuições
-RPM compatíveis, como Fedora. Outras distribuições podem usar o arquivo portátil
-e instalar as dependências indicadas no guia Linux.
+Filenames include the version from `Cargo.toml`; the release tag must match
+that version. The macOS `.pkg` contains Intel and Apple Silicon code. Windows
+uses separate installers and checks the OS's native architecture; the x64 driver
+is not offered through emulation on ARM64. On Linux, the minimum glibc version
+is extracted from the actual built binaries. The `.deb` targets compatible
+Debian/Ubuntu systems; the `.rpm` targets compatible RPM distributions such as
+Fedora. Other distributions can use the portable archive and install the
+dependencies listed in the Linux guide.
 
-Uma falha no build, nos testes do pacote ou na ausência de um arquivo obrigatório
-impede o upload daquele instalador. Logs de falhas WDK são preservados separadamente.
-Os artefatos são downloads da execução; o workflow não cria automaticamente uma
-GitHub Release nem publica arquivos em outro serviço.
+A build/package-test failure or missing required file prevents upload of that
+installer. WDK failure logs are preserved separately. A GitHub Release and its
+assets do not imply that development drivers have acquired production signing
+or passed hardware validation.
 
-## Motores de inferência incluídos
+## Included inference engines
 
-Antes dos instaladores, o job `local-runtime` compila whisper.cpp, llama.cpp e
-Piper a partir de arquivos fixados por commit, tamanho e SHA-256 em
-`scripts/local_runtime.lock.json`. A matriz tem cinco alvos:
+Before installers, the `local-runtime` job builds whisper.cpp, llama.cpp and
+Piper from archives pinned by commit, size and SHA-256 in
+`scripts/local_runtime.lock.json`. Its matrix has five targets:
 
-| Payload | Runner nativo |
+| Payload | Native runner |
 |---|---|
 | Linux x64 | `ubuntu-22.04` |
 | macOS ARM64 | `macos-15` |
@@ -53,121 +59,121 @@ Piper a partir de arquivos fixados por commit, tamanho e SHA-256 em
 | Windows x64 | `windows-2022` |
 | Windows ARM64 | `windows-11-arm` |
 
-Cada payload inclui bibliotecas nativas, dados eSpeak, licenças, fontes
-correspondentes Piper/eSpeak e manifesto de integridade. Os runtimes Windows
-incluem privadamente as DLLs Visual C++ necessárias ao ONNX; o usuário não
-precisa instalar um redistribuível separado. No macOS, os runtimes Intel/ARM64
-ficam separados dentro do app universal; após assinar seus binários, o pacote
-atualiza os hashes antes de assinar o bundle externo.
+Each payload includes native libraries, eSpeak data, licenses, corresponding
+Piper/eSpeak sources and an integrity manifest. Windows runtimes privately
+bundle the Visual C++ DLLs required by ONNX; users do not need to install a
+separate redistributable. On macOS, Intel/ARM64 runtimes remain separate inside
+the universal app; after signing their binaries, packaging refreshes hashes
+before signing the outer bundle.
 
-O job executa `scripts/test_bundled_inference.py` com pesos pinados do catálogo:
-Whisper recebe silêncio sintético, Qwen traduz uma frase fixa e o mesmo processo
-Piper produz dois WAVs. Isso verifica carregamento real, porta dinâmica, JSON,
-caminhos Unicode e áudio válido, sem microfone ou credenciais. Os modelos do
-teste usam cache pelo hash de `src/local_runtime/models.json` e não entram nos
-instaladores. A aprovação de todos esses jobs é requisito dos builds de pacotes.
+The job runs `scripts/test_bundled_inference.py` with pinned catalog weights:
+Whisper receives synthetic silence, Qwen translates a fixed sentence, and the
+same Piper process produces two WAV files. This checks real loading, dynamic
+ports, JSON, Unicode paths and valid audio, without a microphone or credentials.
+Test models use a cache keyed by the hash of `src/local_runtime/models.json`
+and are not included in installers. All these jobs must pass before package
+builds proceed.
 
-Os artefatos intermediários se chamam `babel-local-runtime-<sistema>-<arquitetura>`.
-Cada empacotador recebe somente os payloads do seu sistema e valida arquitetura,
-permissões aplicáveis e hashes. Assim, selecionar um provider local no app
-instalado não exige Python, Ollama, CMake ou instalação manual de servidores;
-precisa apenas baixar os pesos ainda ausentes na primeira preparação.
+Intermediate artifacts are named `babel-local-runtime-<system>-<architecture>`.
+Each packager receives only its system's payloads and verifies architecture,
+applicable permissions and hashes. Selecting a local provider in the installed
+app therefore needs no Python, Ollama, CMake or manual server installation;
+it only needs to download weights that are missing during initial preparation.
 
-## O que cada build verifica
+## What each build checks
 
 ### Linux
 
-Compila os executáveis de release, executa `--help`, `--version` e `init` com
-configuração temporária, monta e inspeciona o `.deb`, `.rpm` e `.tar.gz`. Confere layout,
-permissões e integridade dos binários. Inclui launcher, entrada de menu, ícone,
-documentação e licenças. O pacote não inicia Babel, ativa autostart ou altera o
-servidor de áudio durante a instalação. Os pacotes incluem `org.babel.audio.service`
-para o gerenciador systemd do usuário; a opção de início automático do Babel
-habilita/desabilita o serviço quando disponível e conserva XDG como alternativa.
-Não é um daemon de áudio executado como root. PulseAudio/PipeWire-pulse continua sendo
-o backend do Linux; `pulseaudio-utils` disponibiliza `pactl`.
+Builds release executables; runs `--help`, `--version` and `init` with temporary
+configuration; creates and inspects `.deb`, `.rpm` and `.tar.gz` packages.
+Checks layout, permissions and binary integrity. Includes launcher, menu entry,
+icon, documentation and licenses. Installation does not start Babel, enable
+autostart or change the audio server. Packages include `org.babel.audio.service`
+for the user's systemd manager; Babel's startup option enables/disables it
+when available and retains XDG as an alternative. This is not an audio daemon
+running as root. PulseAudio/PipeWire-pulse remains the Linux backend;
+`pulseaudio-utils` supplies `pactl` and the audio clients.
 
 ### macOS
 
-Compila o app e o HAL para `aarch64-apple-darwin` e `x86_64-apple-darwin`, reúne as
-slices com `lipo` e verifica as arquiteturas. O teste do HAL carrega o plug-in
-somente em um processo de teste, fora do CoreAudio do runner. O empacotador confere
-o bundle, seus binários e a expansão do `.pkg` antes de disponibilizá-lo.
-A entrada do aplicativo é o binário Rust `babel-tray`, com a declaração de acesso
-a microfone no `Info.plist`. O instalador inclui tanto o app em `/Applications`
-quanto o componente original do driver em `/Library/Audio/Plug-Ins/HAL`.
+Builds the app and HAL for `aarch64-apple-darwin` and `x86_64-apple-darwin`,
+combines slices using `lipo`, and verifies architectures. The HAL test loads
+the plugin only in a test process, outside the runner's CoreAudio service.
+Packaging checks the bundle, its binaries and expanded `.pkg` before upload.
+The app entry point is the Rust `babel-tray` binary, with a microphone access
+declaration in `Info.plist`. The installer includes both the app under
+`/Applications` and the original driver component under
+`/Library/Audio/Plug-Ins/HAL`.
 
 ### Windows
 
-O setup restaura **SDK e WDK oficiais via NuGet**, em versões e hashes fixados em
-`native/windows/wdk-packages.json`. Usa as ferramentas C++/WDK do Visual Studio
-2022 presentes na imagem hospedada e verifica os componentes antes do build.
-Headers, bibliotecas e ferramentas não dependem de downloads de uma branch mutável.
-O WDK gera e valida o pacote `INF/SYS/CAT`; o helper de instalação é compilado em
-Rust. O aplicativo usa o runtime C estático, evitando exigir um redistribuível
-Visual C++ separado para iniciar o app.
+Setup restores **official SDK and WDK packages through NuGet**, with versions
+and hashes pinned in `native/windows/wdk-packages.json`. It uses the Visual
+Studio 2022 C++/WDK tools in the hosted image and verifies components before
+building. Headers, libraries and tools do not depend on mutable-branch downloads.
+The WDK creates and validates the `INF/SYS/CAT` package; the installation helper
+is built in Rust. The app uses the static C runtime, avoiding a separate Visual
+C++ redistributable requirement to start the app.
 
-O Inno Setup gera o instalador gráfico com app, pacote completo do driver,
-documentação, licenças e atalho. O empacotador rejeita mistura de arquiteturas,
-INF ainda não processado e ausência de catálogo/helper. Verifica todos os arquivos
-do ZIP contra o manifesto. O job x64 adicionalmente instala o **aplicativo** em
-uma pasta temporária do runner, compara seus arquivos com o manifesto, executa
-apenas `babel --version`, confirma que nenhum driver Babel foi criado e testa a
-desinstalação. Não abre áudio nem instala o driver no runner. ARM64 passa pelo
-build e inspeção do aplicativo/driver; eles não são executados no host x64.
-Os motores de inferência ARM64 são compilados e exercitados separadamente no
-runner nativo Windows ARM64 da matriz `local-runtime`.
+Inno Setup creates the graphical installer with the app, complete driver
+package, documentation, licenses and shortcut. Packaging rejects mixed
+architectures, an unprocessed INF or a missing catalog/helper. It verifies
+all ZIP files against the manifest. The x64 job additionally installs the
+**application** in a temporary runner directory, compares files with the
+manifest, runs only `babel --version`, confirms no Babel driver was created,
+and tests uninstallation. It does not open audio or install the driver on the
+runner. ARM64 receives application/driver builds and inspection; these are not
+executed on the x64 host. ARM64 inference engines are built and exercised
+separately on the native Windows ARM64 `local-runtime` runner.
 
-## Assinatura e alcance da validação
+## Signing and validation scope
 
-Os pacotes macOS/Windows são explicitamente identificados como **development**.
-Não contêm credenciais de assinatura e não se apresentam como uma distribuição
-assinada/notarizada:
+macOS/Windows packages are explicitly marked **development**. They do not
+include signing credentials and are not presented as signed/notarized
+production distributions:
 
-- No macOS, a assinatura ad-hoc permite verificar a estrutura no CI. Distribuição
-  pública exige as identidades Developer ID apropriadas e notarização.
-- No Windows, gerar `.cat` não equivale a assiná-lo. O `.exe` instala o aplicativo
-  e disponibiliza os arquivos do driver, mas o driver sem assinatura não é
-  ativado automaticamente. A ativação normal requer o pacote assinado segundo
-  a política Microsoft e execução explícita de `install.ps1` como administrador.
-  O instalador não muda Secure Boot, não habilita test-signing e não instala
-  certificados. Para remover o app após ativar o driver, execute primeiro
-  `uninstall.ps1`; o desinstalador preserva o helper enquanto existir um devnode.
+- On macOS, ad-hoc signing lets CI inspect the structure. Public distribution
+  requires appropriate Developer ID identities and notarization.
+- On Windows, generating a `.cat` does not sign it. The `.exe` installs the app
+  and provides driver files, but does not automatically activate an unsigned
+  driver. Normal activation requires a package signed under Microsoft policy
+  and explicitly running `install.ps1` as administrator. The installer does not
+  change Secure Boot, enable test signing or install certificates. If the driver
+  was activated, run `uninstall.ps1` before removing the app; the uninstaller
+  preserves the helper while a devnode exists.
 
-Um job verde comprova as verificações descritas, não a estabilidade de áudio em
-hardware. Permissões de microfone, qualidade, latência, suspensão/retomada,
-Driver Verifier e uso em chamadas continuam exigindo os cenários de
-[teste nativo](testing.md). A primeira execução no GitHub precisa ser consultada;
-validação local de YAML/scripts não é um run hospedado bem-sucedido.
+A green job proves the listed checks, not audio stability on hardware.
+Microphone permissions, quality, latency, suspend/resume, Driver Verifier and
+use in calls still require the [native test scenarios](testing.md). Check the
+actual GitHub run; local YAML/script validation is not a successful hosted run.
 
-## Configuração do aplicativo instalado
+## Installed application configuration
 
-A bandeja usa uma configuração gravável por usuário, sem depender do diretório
-corrente ou da pasta protegida do aplicativo:
+The tray uses a writable per-user configuration, independently of the current
+directory or protected application folder:
 
-- Linux: `$XDG_CONFIG_HOME/babel/babel.toml`, se o prefixo for absoluto; caso
-  contrário, `~/.config/babel/babel.toml`.
+- Linux: `$XDG_CONFIG_HOME/babel/babel.toml` if the prefix is absolute;
+  otherwise `~/.config/babel/babel.toml`.
 - macOS: `~/Library/Application Support/Babel/babel.toml`.
-- Windows: `%APPDATA%\Babel\babel.toml`, com fallback para a pasta Roaming do usuário.
+- Windows: `%APPDATA%\Babel\babel.toml`, falling back to the user's Roaming folder.
 
-`--config` continua permitindo escolher outro arquivo. A CLI `babel` mantém o
-comportamento explícito de desenvolvimento com `babel.toml` no diretório corrente.
-Autostart é uma escolha do usuário nas configurações. O painel continua usando
-porta dinâmica. Os pacotes incluem os motores, mas não os pesos dos modelos,
-API keys, gravações, transcrições ou configurações da máquina de desenvolvimento.
-Pesos são preparados automaticamente ao salvar a seleção local; veja
-[armazenamento, downloads e uso offline](local-inference.md).
+`--config` still selects a different file. The `babel` CLI keeps its explicit
+development behavior with `babel.toml` in the current directory. Autostart is a
+user choice in Settings. The dashboard still uses a dynamic port. Packages
+include engines, but not model weights, API keys, recordings, transcripts or
+the development machine's configuration. Weights are prepared automatically
+when a local selection is saved; see [storage, downloads and offline use](local-inference.md).
 
-## Reproduzir localmente
+## Reproducing locally
 
-As instruções e argumentos estão em:
+Instructions and arguments are in:
 
 - [Linux](../packaging/linux/README.md).
 - [macOS](../packaging/macos/README.md).
 - [Windows](../packaging/windows/README.md).
-- [Drivers nativos](native-drivers.md), incluindo compilação e assinatura.
+- [Native drivers](native-drivers.md), including builds and signing.
 
-Referências primárias: [runners hospedados](https://docs.github.com/en/actions/reference/runners/github-hosted-runners),
-[imagem Windows 2022](https://github.com/actions/runner-images/blob/main/images/windows/Windows2022-Readme.md),
-[WDK em CI](https://techcommunity.microsoft.com/blog/windowsdriverdev/building-windows-driver-projects-with-ci-and-cd/4379200)
-e [arquiteturas de instaladores de drivers](https://jrsoftware.org/ishelp/topic_setup_architecturesallowed.htm).
+Primary references: [hosted runners](https://docs.github.com/en/actions/reference/runners/github-hosted-runners),
+[Windows 2022 image](https://github.com/actions/runner-images/blob/main/images/windows/Windows2022-Readme.md),
+[WDK in CI](https://techcommunity.microsoft.com/blog/windowsdriverdev/building-windows-driver-projects-with-ci-and-cd/4379200)
+and [driver-installer architectures](https://jrsoftware.org/ishelp/topic_setup_architecturesallowed.htm).

@@ -130,14 +130,9 @@ def stage_bundle(destination, binaries, driver_directory, version, runtime_dir=N
         copy_file(binaries / name, contents / "MacOS" / name, executable=True)
     with (contents / "Info.plist").open("wb") as handle:
         plistlib.dump(app_info(version), handle)
-    for language, text in {
-        "en": app_info(version)["NSMicrophoneUsageDescription"],
-        "pt": "O Babel usa seu microfone para rotear áudio, traduzir falas e ouvir comandos de voz habilitados.",
-    }.items():
-        localized = resources / (language + ".lproj")
-        localized.mkdir()
-        (localized / "InfoPlist.strings").write_text(
-            '"NSMicrophoneUsageDescription" = "' + text + '";\n', encoding="utf-8")
+    for language in app_info(version)["CFBundleLocalizations"]:
+        relative = Path(language + ".lproj") / "InfoPlist.strings"
+        copy_file(HERE / "locales" / relative, resources / relative)
     drivers = resources / "drivers" / "macos"
     copy_file(driver_directory / "BabelAudio.pkg", drivers / "BabelAudio.pkg")
     copy_file(driver_directory / "uninstall.sh", drivers / "uninstall.sh", executable=True)

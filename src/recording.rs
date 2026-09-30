@@ -67,18 +67,15 @@ impl SessionAudioRecorder {
         microphone: bool,
         speaker: bool,
     ) -> Result<Self> {
-        ensure!(
-            microphone || speaker,
-            "Selecione ao menos uma entrada para gravar"
-        );
+        ensure!(microphone || speaker, "Select at least one input to record");
         ensure!(
             origin <= Instant::now(),
-            "Relógio de início da gravação está no futuro"
+            "Recording start time is in the future"
         );
         crate::session::validate_file_stem(stem)?;
         fs::create_dir_all(directory)
             .await
-            .context("Não foi possível criar a pasta de gravações")?;
+            .context("Could not create the recording folder")?;
         let path = directory.join(format!("{stem}.wav"));
         let mut options = OpenOptions::new();
         options.write(true).create_new(true);
@@ -86,7 +83,7 @@ impl SessionAudioRecorder {
         options.mode(0o600);
         let file = options.open(&path).await.with_context(|| {
             format!(
-                "Não foi possível criar a gravação em {}; nenhum arquivo existente é sobrescrito",
+                "Could not create the recording at {}; existing files are never overwritten",
                 path.display()
             )
         })?;
@@ -114,12 +111,9 @@ impl SessionAudioRecorder {
     pub(crate) fn set_origin(&mut self, origin: Instant) -> Result<()> {
         ensure!(
             self.written == 0 && self.latest_end == 0 && self.pending.is_empty(),
-            "Não é possível alterar o início após receber áudio"
+            "Cannot change the start after receiving audio"
         );
-        ensure!(
-            origin <= Instant::now(),
-            "Relógio da gravação está no futuro"
-        );
+        ensure!(origin <= Instant::now(), "Recording time is in the future");
         self.origin = origin;
         Ok(())
     }
@@ -165,21 +159,21 @@ impl SessionAudioRecorder {
         }
         ensure!(
             !record.samples.is_empty() && record.samples.len() <= MAX_FRAME_SAMPLES,
-            "Quadro de gravação inválido; máximo de 1 segundo PCM16 a 16 kHz"
+            "Invalid recording frame; maximum 1 second of PCM16 at 16 kHz"
         );
         ensure!(
             record.captured_at <= Instant::now(),
-            "Quadro de gravação com horário de captura no futuro"
+            "Recording frame has a capture time in the future"
         );
         let elapsed = record
             .captured_at
             .checked_duration_since(self.origin)
-            .context("Quadro de gravação anterior ao início da sessão")?;
+            .context("Recording frame predates the session start")?;
         ensure!(
             self.clocks[lane]
                 .last_capture
                 .is_none_or(|previous| record.captured_at >= previous),
-            "Relógio da captura de gravação retrocedeu"
+            "Recording capture clock moved backwards"
         );
         let end_by_clock = (elapsed.as_nanos() * u128::from(SAMPLE_RATE) / 1_000_000_000)
             .min(u128::from(u64::MAX)) as u64;
@@ -190,14 +184,14 @@ impl SessionAudioRecorder {
         };
         let end = start
             .checked_add(record.samples.len() as u64)
-            .context("Duração da gravação excedida")?;
+            .context("Recording duration exceeded")?;
         ensure!(
             end <= MAX_WAV_SAMPLES,
-            "Gravação atingiu o limite WAV RIFF de aproximadamente 37 horas; inicie uma nova sessão"
+            "Recording reached the WAV RIFF limit of approximately 37 hours; start a new session"
         );
         ensure!(
             start >= self.written,
-            "Uma captura chegou mais de 2 segundos atrasada para a gravação; a sessão foi interrompida para evitar perda silenciosa"
+            "A capture arrived more than 2 seconds late for recording; the session stopped to prevent silent data loss"
         );
         let latest = self.latest_end.max(end);
         self.flush_until(latest.saturating_sub(HOLDBACK_SAMPLES))
@@ -205,7 +199,7 @@ impl SessionAudioRecorder {
         let needed = end.saturating_sub(self.written) as usize;
         ensure!(
             needed <= (HOLDBACK_SAMPLES + SAMPLE_RATE) as usize,
-            "Janela de mixagem excedeu o limite de memória"
+            "Mixing window exceeded the memory limit"
         );
         if self.pending.len() < needed {
             self.pending.resize(needed, 0);
@@ -220,10 +214,7 @@ impl SessionAudioRecorder {
         Ok(())
     }
     async fn flush_until(&mut self, end: u64) -> Result<()> {
-        ensure!(
-            end <= MAX_WAV_SAMPLES,
-            "Duração máxima do arquivo WAV excedida"
-        );
+        ensure!(end <= MAX_WAV_SAMPLES, "Maximum WAV file duration exceeded");
         while self.written < end {
             let count = (end - self.written).min(WRITE_SAMPLES as u64) as usize;
             self.bytes.clear();
@@ -235,7 +226,7 @@ impl SessionAudioRecorder {
             self.file
                 .write_all(&self.bytes)
                 .await
-                .context("Falha ao escrever áudio da sessão")?;
+                .context("Failed to write session audio")?;
             self.written += count as u64;
         }
         Ok(())
@@ -244,7 +235,7 @@ impl SessionAudioRecorder {
         self.file
             .flush()
             .await
-            .context("Falha ao descarregar a gravação")?;
+            .context("Failed to flush the recording")?;
         self.file.seek(std::io::SeekFrom::Start(0)).await?;
         self.file.write_all(&wav_header(self.written)?).await?;
         self.file.flush().await?;
@@ -260,13 +251,13 @@ impl SessionAudioRecorder {
             .get_ref()
             .sync_data()
             .await
-            .context("Falha ao finalizar a gravação em disco")
+            .context("Failed to finalize the recording on disk")
     }
 }
 fn wav_header(samples: u64) -> Result<[u8; 44]> {
     ensure!(
         samples <= MAX_WAV_SAMPLES,
-        "Duração máxima do arquivo WAV excedida"
+        "Maximum WAV file duration exceeded"
     );
     let data_bytes = (samples * 2) as u32;
     let mut header = [0_u8; 44];
@@ -489,7 +480,7 @@ mod tests {
                 .await
                 .unwrap_err()
                 .to_string()
-                .contains("atrasada")
+                .contains("late")
         );
         // Even the error path finalizes accepted data into a valid WAV.
         assert_eq!(pcm(&path).len(), 81600);
@@ -600,7 +591,7 @@ mod tests {
                 .await
                 .unwrap_err()
                 .to_string()
-                .contains("máximo")
+                .contains("maximum")
         );
         assert!(wav_header(MAX_WAV_SAMPLES + 1).is_err());
     }
@@ -659,12 +650,12 @@ mod tests {
             (
                 "before-start",
                 origin - Duration::from_millis(1),
-                "anterior",
+                "predates",
             ),
             (
                 "future-frame",
                 Instant::now() + Duration::from_secs(3600),
-                "futuro",
+                "future",
             ),
         ] {
             let recorder =
@@ -721,7 +712,7 @@ mod tests {
                 .await
                 .unwrap_err()
                 .to_string()
-                .contains("retrocedeu")
+                .contains("moved backwards")
         );
         assert_eq!(pcm(&path).len(), 3200);
     }

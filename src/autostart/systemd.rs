@@ -15,11 +15,12 @@ use std::{
 
 const UNIT: &str = "org.babel.audio.service";
 const PACKAGED: &str = include_str!("../../packaging/linux/org.babel.audio.service");
-const MANAGER_ERROR: &str = "Não foi possível consultar ou configurar o systemd de usuário.";
-const IDENTITY_ERROR: &str = "A unidade systemd existente não corresponde ao serviço empacotado do Babel; nada foi alterado.";
+const MANAGER_ERROR: &str = "Could not query or configure the user systemd manager.";
+const IDENTITY_ERROR: &str =
+    "The existing systemd unit does not match the packaged Babel service; nothing was changed.";
 const OVERRIDE_ERROR: &str =
-    "O serviço Babel possui uma substituição systemd não gerenciada; nada foi alterado.";
-const OFFLINE_ERROR: &str = "O serviço Babel já possui uma entrada systemd, mas o gerenciador de usuário está indisponível; tente novamente na sessão gráfica.";
+    "The Babel service has an unmanaged systemd override; nothing was changed.";
+const OFFLINE_ERROR: &str = "Babel already has a systemd entry, but the user manager is unavailable; try again in your graphical session.";
 
 struct Paths {
     package: PathBuf,
@@ -35,7 +36,7 @@ impl Paths {
         let base = desktop
             .parent()
             .and_then(Path::parent)
-            .context("Diretório da entrada de login indisponível")?;
+            .context("Login entry directory unavailable")?;
         let user = base.join("systemd/user");
         // /lib may be a directory alias on merged-/usr distributions. The
         // final file must still be regular, root-owned and non-writable by users.
@@ -287,9 +288,9 @@ fn service_status(paths: &Paths, enabled: bool) -> Result<AutostartStatus> {
         method: "systemd_user",
         entry_path: Some(path_text(&paths.dropin)?.to_owned()),
         description: if enabled {
-            "Início automático pelo serviço de usuário systemd habilitado para o próximo login gráfico.".into()
+            "Automatic startup through the systemd user service is enabled for the next graphical login.".into()
         } else {
-            "Início automático pelo serviço de usuário systemd desativado.".into()
+            "Automatic startup through the systemd user service is disabled.".into()
         },
     })
 }
@@ -297,7 +298,7 @@ fn service_status(paths: &Paths, enabled: bool) -> Result<AutostartStatus> {
 fn unit_arg(value: &str) -> Result<String> {
     ensure!(
         !value.chars().any(char::is_control),
-        "Caminho de inicialização vazio ou com caracteres de controle"
+        "Startup path is empty or contains control characters"
     );
     let mut result = String::from("\"");
     for c in value.chars() {
@@ -318,7 +319,7 @@ fn dropin(spec: &LaunchSpec) -> Result<String> {
     let working = path_text(&spec.working_dir)?;
     ensure!(
         spec.config.is_absolute() && spec.working_dir.is_absolute(),
-        "Caminho da configuração inválido"
+        "Invalid configuration path"
     );
     // ':' disables systemd environment expansion; %% disables specifiers. The
     // packaged launcher passes argv directly to babel-tray, which changes cwd.
@@ -346,13 +347,13 @@ fn change(
     let refreshed = snapshot(paths, manager)?.context(IDENTITY_ERROR)?;
     ensure!(
         refreshed.enabled == before.enabled,
-        "A entrada de login mudou durante a operação; tente novamente"
+        "The login entry changed during the operation; try again"
     );
     if enabled {
-        let content = dropin(spec.context("Caminho da configuração inválido")?)?;
+        let content = dropin(spec.context("Invalid configuration path")?)?;
         ensure!(
             read_owned_file(&paths.dropin)? == previous,
-            "A entrada de login mudou durante a operação; tente novamente"
+            "The login entry changed during the operation; try again"
         );
         set_file(&paths.dropin, Some(&content))?;
         let apply = (|| -> Result<()> {
@@ -365,7 +366,7 @@ fn change(
             );
             ensure!(
                 read_owned_file(&paths.desktop)? == desktop,
-                "A entrada de login mudou durante a operação; tente novamente"
+                "The login entry changed during the operation; try again"
             );
             set_file(&paths.desktop, None)?;
             Ok(())
@@ -378,10 +379,10 @@ fn change(
             }
             ensure!(
                 read_owned_file(&paths.dropin)?.as_deref() == Some(content.as_str()),
-                "A entrada de login mudou durante a operação; tente novamente"
+                "The login entry changed during the operation; try again"
             );
             set_file(&paths.dropin, previous.as_deref())
-                .context("Falha ao restaurar a entrada de login após erro do systemd.")?;
+                .context("Could not restore the login entry after a systemd error.")?;
             let _ = manager.run(&["daemon-reload"]);
             return Err(error);
         }
@@ -393,7 +394,7 @@ fn change(
         );
         ensure!(
             read_owned_file(&paths.desktop)? == desktop,
-            "A entrada de login mudou durante a operação; tente novamente"
+            "The login entry changed during the operation; try again"
         );
         set_file(&paths.desktop, None)?;
         // Keep the owned drop-in for diagnosis/custom-config preservation. It

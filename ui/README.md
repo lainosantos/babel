@@ -1,141 +1,138 @@
-# Painel local
+# Local dashboard
 
-O binário Rust incorpora `index.html`, `style.css` e `app.js` diretamente. O painel
-usa JavaScript nativo e não precisa de Node.js, npm, CDN ou instalação de pacotes
-para funcionar.
+The Rust binary embeds `index.html`, `style.css` and `app.js` directly. The
+dashboard uses plain JavaScript and needs no Node.js, npm, CDN or package
+installation at runtime.
 
-## Testes de desenvolvimento
+## Development tests
 
-Com Node.js 22.12 ou posterior, na pasta `ui`:
+With Node.js 22.12 or later, from the `ui` directory:
 
 ```sh
 npm ci
 npm test
 ```
 
-`jsdom` é uma dependência exclusiva dos testes. As respostas HTTP são simuladas
-em memória: os testes não acessam provedores, não usam áudio do usuário e não
-criam vozes reais.
+`jsdom` is a test-only dependency. HTTP responses are simulated in memory:
+tests do not access providers, use the user's audio or create real voices.
 
-Os testes cobrem perfis independentes, restrições de modelos contínuos, seleção
-de vozes, escape de conteúdo remoto, chaves temporárias, nomes de sessão,
-inicialização explícita no login, texto e gravação independentes, padrão de nomes
-e sincronização de mudanças da bandeja sem sobrescrever rascunhos. Salvamento e
-início usam a revisão da configuração para rejeitar alterações concorrentes.
-Há regressões para áudio original sem sessão, gravação ou transcrição com ambas
-as traduções desligadas e erros de roteamento apresentados de forma segura.
-Os testes Rust em `src/dashboard.rs` cobrem autenticação, origem local, limites
-dos uploads e ausência de persistência das credenciais.
+Tests cover independent profiles, continuous-model restrictions, voice
+selection, escaping remote content, temporary keys, session names, explicit
+login startup, independent text and recording, filename patterns and tray
+changes synchronized without overwriting drafts. Saving and starting use the
+configuration revision to reject concurrent changes. Regressions cover original
+audio without a session, recording or transcription with both translations off,
+and safely presented routing errors. Rust tests in `src/dashboard.rs` cover
+authentication, local origins, upload limits and non-persistence of credentials.
 
-## Idioma da interface
+## Interface language
 
-O seletor no cabeçalho oferece **Padrão do sistema**, **English** e **Português**.
-Ele funciona durante uma sessão e salva apenas `interface.language`, sem iniciar,
-encerrar ou reconfigurar o áudio. A preferência usa o locale do processo/sistema
-resolvido pelo backend em `/api/interface`, nunca `navigator.language` do navegador.
-Idiomas de fala, prompts, nomes de sessões/vozes, transcrições, dispositivos e
-arquivos são conteúdo do usuário e não mudam com o idioma da interface.
+The header selector offers **System default**, **English** and **Português**.
+It works during a session and saves only `interface.language`, without starting,
+stopping or reconfiguring audio. The preference uses the process/system locale
+resolved by the backend at `/api/interface`, never the browser's
+`navigator.language`. Speech languages, prompts, session/voice names,
+transcripts, devices and files are user content and do not change with the
+interface language.
 
-O HTML inicial está em inglês. `i18n.js` carrega os catálogos locais incorporados
-no binário em `locales/en.json` e `locales/pt.json`. Os textos usam chaves estáveis
-com parâmetros nomeados, como `session.identity` com `{name}`. Uma chave ausente
-no catálogo escolhido usa a versão inglesa. Catálogos contêm apenas texto;
-parâmetros são inseridos via `textContent`, nunca como HTML. Números, percentuais
-e a API de datas usam `Intl` com o idioma resolvido.
+Initial HTML is English. `i18n.js` loads the local catalogs embedded in the
+binary at `locales/en.json` and `locales/pt.json`. Text uses stable keys with
+named parameters, such as `session.identity` with `{name}`. A missing key in
+the selected catalog falls back to English. Catalogs contain text only;
+parameters are inserted through `textContent`, never as HTML. Numbers,
+percentages and dates use `Intl` with the resolved language.
 
-Para acrescentar um idioma:
+To add a language:
 
-1. Copie `locales/en.json` para o código do idioma, traduza os valores e preserve
-   chaves e parâmetros. Mantenha nomes de produtos, identificadores e unidades.
-2. Registre o idioma, nome nativo, resolução do locale e catálogo no módulo de
-   localização/backend Rust e exponha `/locales/<código>.json`.
-3. O seletor adiciona os idiomas informados por `/api/interface`; nenhuma mudança
-   no JavaScript é necessária para o novo código. Textos fixos usam `data-i18n`,
-   `data-i18n-placeholder`, `data-i18n-title` ou `data-i18n-aria-label`. Textos
-   dinâmicos usam `t(chave, parâmetros)`.
-4. Adicione a tradução dos menus da bandeja ao catálogo Rust e execute os testes
-   de interface e do backend. Os links de ajuda identificam os documentos atuais
-   como português, mesmo quando a interface está em inglês.
+1. Copy `locales/en.json` to the language code, translate values and preserve
+   keys and parameters. Keep product names, identifiers and units unchanged.
+2. Register the language, native name, locale resolution and catalog in the
+   Rust localization/backend module and expose `/locales/<code>.json`.
+3. The selector adds languages reported by `/api/interface`; the new code
+   needs no JavaScript change. Static text uses `data-i18n`,
+   `data-i18n-placeholder`, `data-i18n-title` or `data-i18n-aria-label`.
+   Dynamic text uses `t(key, parameters)`.
+4. Add the tray menu translation to the Rust catalog and run interface and
+   backend tests. Help documents use English regardless of interface language.
 
-A mudança de idioma atualiza texto e atributos sem recriar formulários: rascunhos,
-foco, arquivos de clonagem e diálogos abertos são preservados. `If-Match` protege
-alterações simultâneas; uma preferência salva atualiza a revisão local sem salvar
-rascunhos de áudio. Os testes incluem inglês/português, fallback, troca durante
-sessão e edição, conflitos, preservação de uploads e cobertura dos catálogos.
+Language changes update text and attributes without rebuilding forms: drafts,
+focus, cloning files and open dialogs are preserved. `If-Match` protects
+concurrent changes; saving a preference updates the local revision without
+saving audio drafts. Tests include English/Portuguese, fallback, switching during
+a session or editing, conflicts, upload preservation and catalog coverage.
 
-## Comandos de voz e MCP
+## Voice commands and MCP
 
-A ativação considera apenas o microfone físico original. O áudio da saída,
-incluindo o que chega de outros participantes, nunca alimenta o agente.
+Activation uses only the original physical microphone. Output audio, including
+other participants' incoming speech, never feeds the agent.
 
-`agent.js` controla uma seção separada do formulário de áudio. `GET/PUT /api/agent`
-usam uma revisão própria; salvar estes ajustes não salva rascunhos de áudio nem
-reinicia a sessão. O status consultado em `/api/agent/status` exibe ativação,
-reconhecimento local, decisão do Needle3, execução, resultado e falha. O painel
-flutuante é dispensável, não move o foco e renderiza respostas como texto simples.
-Atualizações idênticas não repetem anúncios no leitor de tela.
+`agent.js` controls a section separate from the audio form. `GET/PUT /api/agent`
+use their own revision; saving these settings neither saves audio drafts nor
+restarts the session. Status from `/api/agent/status` shows activation, local
+recognition, Needle3 decisions, execution, results and failures. The floating
+panel can be dismissed, does not move focus and renders responses as plain text.
+Identical updates do not repeat screen-reader announcements.
 
-Integrações podem usar HTTP Streamable ou processos stdio, com lista opcional de
-ferramentas permitidas. A descoberta usa `tools/list`, sem executar ferramentas.
-O botão fica indisponível até salvar o servidor para evitar testar configurações
-anteriores. Contas OAuth têm ação explícita de conexão, link para autorização e
-acompanhamento do retorno; também podem ser desconectadas. Tokens Bearer,
-cabeçalhos e variáveis secretas usam referências. Valores temporários trafegam
-por uma API separada e nunca são incluídos no JSON salvo.
+Integrations support Streamable HTTP or stdio processes, with an optional tool
+allowlist. Discovery uses `tools/list` without executing tools. The button stays
+disabled until the server is saved, avoiding tests against an older configuration.
+OAuth accounts have an explicit connection action, authorization link and
+callback monitoring; they can also be disconnected. Bearer tokens, headers and
+secret variables use references. Temporary values travel through a separate API
+and never enter saved JSON.
 
-Os onze testes em `agent-tests.cjs` verificam estes fluxos com respostas em memória,
-sem chamar servidores MCP, capturar áudio ou acessar contas reais. Os catálogos
-em inglês e português também abrangem todos os estados do agente e seus campos.
+`agent-tests.cjs` exercises these flows using in-memory responses, without MCP
+servers, audio capture or real accounts. English and Portuguese catalogs cover
+all agent states and fields.
 
-## Controles por sistema operacional
+## Operating-system controls
 
-O painel consulta `/api/platform` autenticado para identificar **o computador que
-executa o Babel**. Ele não consulta o user-agent nem a plataforma do navegador.
-Os textos de instalação, permissões, nomes de endpoints e método de inicialização
-acompanham Linux, macOS ou Windows. No Windows, o diagrama usa rótulos genéricos
-para não confundir os lados Input/Output do cabo; as instruções mostram cada lado.
-No macOS, nomes dos dispositivos virtuais selecionados podem aparecer no diagrama.
+The dashboard queries authenticated `/api/platform` to identify **the computer
+running Babel**. It does not inspect the browser's user agent or platform.
+Installation text, permissions, endpoint names and startup methods follow Linux,
+macOS or Windows. On Windows, the diagram uses generic labels to avoid confusing
+a cable's Input/Output sides; instructions identify each side. On macOS, selected
+virtual device names may appear in the diagram.
 
-Criar/remover dispositivos só fica disponível para Linux quando o backend informa
-essa capacidade. Essa indicação não garante que o servidor de áudio ou suas
-ferramentas estejam instalados. macOS/Windows apresentam o guia de instalação
-externa. `/help/platforms` é o guia do sistema atual; `/help/platforms/all` mantém
-a documentação completa. O guia de inicialização é identificado como completo.
+Device creation/removal is available only on Linux when the backend reports that
+capability. This does not guarantee the audio server or its tools are installed.
+macOS/Windows show the driver installation guide. `/help/platforms` is the guide
+for the current OS; `/help/platforms/all` retains the complete documentation.
+The startup guide is identified as the complete guide.
 
-Falha ou plataforma desconhecida mantém os rótulos genéricos e a gestão de drivers
-desabilitada. Atualizar a lista também tenta detectar a plataforma novamente,
-sem alterar escolhas ou rascunhos. Testes verificam os três sistemas, user-agent
-divergente, falha/recuperação e mudança de idioma durante edição.
+Failure or an unknown platform keeps generic labels and disables driver
+management. Refreshing devices also retries platform detection, without changing
+selections or drafts. Tests cover all three systems, a mismatched user agent,
+failure/recovery and changing language while editing.
 
-## Organização do workspace
+## Workspace organization
 
-O painel usa seis telas: roteamento, tradução e vozes, transcrição, gravação, comandos
-de voz e ajustes do computador. A barra da sessão permanece disponível durante a
-navegação. Os campos continuam nos mesmos formulários; trocar de tela ou idioma
-não recria inputs, não descarta rascunhos e não inicia nem interrompe áudio.
+The dashboard has six views: routing, translation and voices, transcription,
+recording, voice commands and host settings. The session bar stays available
+while navigating. Fields remain in the same forms; changing view or language
+does not rebuild inputs, discard drafts or start/stop audio.
 
-Roteamento concentra dispositivos e medidores. Tradução e vozes reúne idiomas,
-prompts, provedores, credenciais e biblioteca. Transcrição e gravação mantêm
-suas fontes e destinos próprios. A pasta base e o padrão de nomes comuns ficam
-em Ajustes, acessíveis por atalhos nas duas páginas. `data-workspace-field`
-revela o campo de destino, abre seus detalhes e posiciona o foco, inclusive em
-atalhos para a mesma página. Os nomes de navegação antigos são migrados sem
-alterar configurações.
+Routing groups devices and meters. Translation and voices groups languages,
+prompts, providers, credentials and the library. Transcription and recording
+retain their own sources and destinations. The shared base folder and filename
+pattern live in Settings, linked from both pages. `data-workspace-field`
+reveals a target field, opens its details and moves focus, including shortcuts
+to the same page. Old navigation names migrate without changing settings.
 
-`files.base_path` exige um caminho absoluto. Configurações novas usam `Babel`
-dentro da pasta pessoal do usuário; o frontend não calcula caminhos a partir
-do navegador nem do diretório de execução. A prévia autenticada em
-`POST /api/file-paths` resolve os destinos de transcrição e gravação na máquina
-do Babel, sem criar pastas. Esses dois destinos podem ser relativos à base ou
-absolutos. A migração de bases antigas é feita pelo backend ao carregar o TOML,
-antes de entregar a configuração ao painel.
+`files.base_path` requires an absolute path. New configurations use `Babel`
+inside the user's home directory; the frontend does not calculate paths from
+the browser or launch directory. Authenticated `POST /api/file-paths` resolves
+transcript and recording destinations on the Babel host without creating
+folders. Both destinations may be relative to the base or absolute. The backend
+migrates legacy bases when loading the TOML before sending configuration to the
+dashboard.
 
-`workspace.js` controla apenas a navegação, o foco e a apresentação de erros de
-validação. Se um campo de outra tela estiver inválido, a tela, o perfil e os
-detalhes correspondentes são abertos antes de apresentar a validação. Configurações
-do agente continuam independentes do formulário de áudio durante uma sessão.
+`workspace.js` controls navigation, focus and validation-error presentation only.
+If a field in another view is invalid, its view, profile and details open before
+validation is presented. Agent settings remain independent of the audio form
+during a session.
 
-O desenho e os tokens visuais estão em [DESIGN.md](DESIGN.md). A fonte Manrope
-fica incluída no executável, com sua licença em `fonts/OFL.txt`; o painel não
-busca fontes nem outros recursos visuais externos ao abrir. Os medidores usam
-os níveis reais recebidos do backend, sem animações simulando atividade.
+The design direction and visual tokens are in [DESIGN.md](DESIGN.md). The
+executable includes Manrope and its license at `fonts/OFL.txt`; opening the
+dashboard does not fetch fonts or other external visual assets. Meters use real
+levels from the backend, without animations that simulate activity.

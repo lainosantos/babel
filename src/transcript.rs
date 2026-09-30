@@ -36,8 +36,8 @@ pub enum TranscriptOrigin {
 impl TranscriptOrigin {
     fn label(self) -> &'static str {
         match self {
-            Self::Microphone => "microfone",
-            Self::Speaker => "saída recebida",
+            Self::Microphone => "microphone",
+            Self::Speaker => "received output",
         }
     }
 }
@@ -60,9 +60,10 @@ impl TextFile {
         options.write(true).create_new(true);
         #[cfg(unix)]
         options.mode(0o600);
-        let file = options.open(path).await.with_context(|| {
-            format!("Não foi possível criar a transcrição em {}", path.display())
-        })?;
+        let file = options
+            .open(path)
+            .await
+            .with_context(|| format!("Could not create the transcript at {}", path.display()))?;
         let mut writer = Self {
             file: BufWriter::new(file),
             line_open: false,
@@ -70,7 +71,7 @@ impl TextFile {
             speaker: None,
             origin: None,
         };
-        writer.file.write_all(format!("Babel · {label}\nInício: {}\nTexto incremental fornecido pelo modelo; não é uma transcrição revisada.\n\n", Utc::now().to_rfc3339()).as_bytes()).await?;
+        writer.file.write_all(format!("Babel · {label}\nStarted: {}\nIncremental text supplied by the model; not a reviewed transcript.\n\n", Utc::now().to_rfc3339()).as_bytes()).await?;
         writer.file.flush().await?;
         Ok(writer)
     }
@@ -98,19 +99,19 @@ impl TextFile {
             if self.timestamps {
                 let stamp = if let Some(start) = metadata.start_ms {
                     match metadata.end_ms {
-                        Some(end) => format!("[áudio +{}–{}s] ", seconds(start), seconds(end)),
-                        None => format!("[áudio +{}s] ", seconds(start)),
+                        Some(end) => format!("[audio +{}–{}s] ", seconds(start), seconds(end)),
+                        None => format!("[audio +{}s] ", seconds(start)),
                     }
                 } else if let Some(alignment) = metadata.alignment_ms {
-                    format!("[alinhamento +{}s] ", seconds(alignment))
+                    format!("[alignment +{}s] ", seconds(alignment))
                 } else {
-                    format!("[recebido {received_at}] ")
+                    format!("[received at {received_at}] ")
                 };
                 self.file.write_all(stamp.as_bytes()).await?;
             }
             if let Some(speaker) = &metadata.speaker {
                 self.file
-                    .write_all(format!("[falante {speaker}] ").as_bytes())
+                    .write_all(format!("[speaker {speaker}] ").as_bytes())
                     .await?;
             }
         }
@@ -156,14 +157,14 @@ impl TranscriptWriter {
             !session.is_empty()
                 && session.len() <= 128
                 && session.chars().all(|c| c.is_alphanumeric() || c == '-'),
-            "Identificador da sessão inválido"
+            "Invalid session identifier"
         );
         let directory = PathBuf::from(&config.directory);
         fs::create_dir_all(&directory)
             .await
-            .context("Não foi possível criar a pasta de transcrições")?;
+            .context("Could not create the transcript folder")?;
         let label = format!(
-            "originais do microfone e da saída\nSessão: {name}\nIdentificador: {session}\nOrdem: chegada dos fragmentos; rótulos indicam a origem, não a identidade da pessoa"
+            "original microphone and output audio\nSession: {name}\nIdentifier: {session}\nOrder: fragment arrival; labels identify the source, not the person"
         );
         let original = TextFile::create(
             &directory.join(format!("{stem}.txt")),
@@ -187,20 +188,20 @@ impl TranscriptWriter {
         }
         ensure!(
             matches!(route, "microphone" | "speaker"),
-            "Fluxo de transcrição inválido"
+            "Invalid transcription route"
         );
         ensure!(
             !session.is_empty()
                 && session.len() <= 128
                 && session.chars().all(|c| c.is_alphanumeric() || c == '-'),
-            "Sessão de transcrição inválida"
+            "Invalid transcription session"
         );
         let directory = PathBuf::from(&config.directory);
         fs::create_dir_all(&directory)
             .await
-            .context("Não foi possível criar a pasta de transcrições")?;
+            .context("Could not create the transcript folder")?;
         let label = match name {
-            Some(name) => format!("{route} / original\nSessão: {name}\nIdentificador: {session}"),
+            Some(name) => format!("{route} / original\nSession: {name}\nIdentifier: {session}"),
             None => format!("{route} / original"),
         };
         let original = TextFile::create(
@@ -228,7 +229,7 @@ impl TranscriptWriter {
             };
             match record {
                 TranscriptRecord::Section(title) => {
-                    ensure!(title.len() <= 8192, "Seção de transcrição excede o limite");
+                    ensure!(title.len() <= 8192, "Transcript section exceeds the limit");
                     self.original.newline().await?;
                     self.original.set_origin(None).await?;
                     self.original
@@ -246,10 +247,10 @@ impl TranscriptWriter {
                         continue;
                     }
                     self.original.set_origin(origin).await?;
-                    ensure!(text.len() <= 32768, "Trecho de transcrição excede 32 KiB");
+                    ensure!(text.len() <= 32768, "Transcript segment exceeds 32 KiB");
                     ensure!(
                         received_at.len() <= 128 && !received_at.chars().any(char::is_control),
-                        "Horário de recebimento da transcrição inválido"
+                        "Invalid transcript receipt time"
                     );
                     ensure!(
                         metadata
@@ -258,14 +259,14 @@ impl TranscriptWriter {
                             .is_none_or(|speaker| !speaker.is_empty()
                                 && speaker.len() <= 128
                                 && !speaker.chars().any(char::is_control)),
-                        "Identificador de participante da transcrição inválido"
+                        "Invalid transcript speaker identifier"
                     );
                     ensure!(
                         metadata
                             .start_ms
                             .zip(metadata.end_ms)
                             .is_none_or(|(start, end)| end >= start),
-                        "Intervalo temporal da transcrição inválido"
+                        "Invalid transcript time interval"
                     );
                     self.original.append(&text, &metadata, &received_at).await?;
                 }
@@ -279,7 +280,7 @@ impl TranscriptWriter {
                     self.original.newline().await?;
                     self.original
                         .append(
-                            "[reconexão/interrupção: os offsets da sessão podem reiniciar]",
+                            "[reconnection/interruption: session offsets may restart]",
                             &TranscriptMetadata::default(),
                             &Utc::now().to_rfc3339(),
                         )
@@ -287,7 +288,7 @@ impl TranscriptWriter {
                     self.original.newline().await?;
                 }
                 TranscriptRecord::Routed { .. } => {
-                    anyhow::bail!("Origem de transcrição aninhada inválida")
+                    anyhow::bail!("Invalid nested transcript source")
                 }
             }
         }
@@ -338,10 +339,10 @@ mod tests {
             .await
             .unwrap();
         assert!(text.contains(
-            "[microfone] Olá, equipe.\n[saída recebida] Hello, team.\n[microfone]  Como estão?"
+            "[microphone] Olá, equipe.\n[received output] Hello, team.\n[microphone]  Como estão?"
         ));
         assert!(!text.contains("TRADUÇÃO NÃO SALVAR"));
-        assert!(!text.contains("[recebido"));
+        assert!(!text.contains("[received at "));
         assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 1);
     }
     #[tokio::test]
@@ -452,7 +453,7 @@ mod tests {
         )
         .await;
         assert!(text.ends_with("Versão 1.23: U.S. mantém o texto\n"));
-        assert!(!text.contains("[recebido") && !text.contains("[falante"));
+        assert!(!text.contains("[received at ") && !text.contains("[speaker"));
     }
     #[tokio::test]
     async fn authentic_speakers_and_timestamp_sources_remain_distinct() {
@@ -488,12 +489,12 @@ mod tests {
             true,
         )
         .await;
-        assert!(text.contains("[áudio +1.250–1.875s] [falante speaker-a] áudio\n"));
-        assert!(text.contains("[alinhamento +2.500s] alinhado\n"));
-        assert!(text.contains("[recebido 2026-09-29T00:00:00Z] recebimento\n"));
-        assert_eq!(text.matches("[falante").count(), 1);
-        assert!(text.contains("offsets da sessão podem reiniciar"));
-        assert!(text.ends_with("[áudio +0.010s] sessão nova\n"));
+        assert!(text.contains("[audio +1.250–1.875s] [speaker speaker-a] áudio\n"));
+        assert!(text.contains("[alignment +2.500s] alinhado\n"));
+        assert!(text.contains("[received at 2026-09-29T00:00:00Z] recebimento\n"));
+        assert_eq!(text.matches("[speaker").count(), 1);
+        assert!(text.contains("session offsets may restart"));
+        assert!(text.ends_with("[audio +0.010s] sessão nova\n"));
     }
     #[tokio::test]
     async fn timestamp_toggle_does_not_remove_real_speaker_labels() {
@@ -510,11 +511,11 @@ mod tests {
             false,
         )
         .await;
-        assert!(text.ends_with("[falante 42] fala\n"));
+        assert!(text.ends_with("[speaker 42] fala\n"));
         assert!(
-            !text.contains("[áudio")
-                && !text.contains("[recebido")
-                && !text.contains("[alinhamento")
+            !text.contains("[audio")
+                && !text.contains("[received at ")
+                && !text.contains("[alignment")
         );
     }
     #[test]
@@ -606,10 +607,10 @@ mod tests {
         )
         .await
         .unwrap();
-        assert!(text.contains("Sessão: Reunião João / cliente\n"));
-        assert!(text.contains(&format!("Identificador: {}\n", session.id)));
+        assert!(text.contains("Session: Reunião João / cliente\n"));
+        assert!(text.contains(&format!("Identifier: {}\n", session.id)));
         assert!(text.contains("Olá"));
-        assert!(!text.contains("[recebido"));
+        assert!(!text.contains("[received at "));
         assert!(
             TranscriptWriter::create_with_name(&cfg, "speaker", "valid-id", Some("Título\nfalso"))
                 .await

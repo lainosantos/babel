@@ -42,7 +42,7 @@ fn open_settings() {
     if !url.is_empty()
         && let Err(error) = open::that_detached(url)
     {
-        tracing::warn!("Não foi possível abrir o navegador: {error}");
+        tracing::warn!("Could not open the browser: {error}");
     }
 }
 
@@ -188,7 +188,7 @@ fn monitor(
                     job = None;
                     state.devices = Some(Arc::new(result.unwrap_or_else(|_| DeviceSnapshot {
                         revision: requested_revision, input: String::new(), output: String::new(),
-                        devices: Err("A consulta de dispositivos foi interrompida".into()),
+                        devices: Err("Device query interrupted".into()),
                     })));
                     state.loading = false;
                     updates.send_replace(state.clone());
@@ -236,7 +236,7 @@ async fn fetch_devices(controller: Arc<Controller>, requested_revision: u64) -> 
         revision: requested_revision,
         input: String::new(),
         output: String::new(),
-        devices: Err("Tempo limite ao listar dispositivos de áudio".into()),
+        devices: Err("Timed out while listing audio devices".into()),
     })
 }
 
@@ -452,7 +452,7 @@ impl TrayUi {
                     }
                 }
                 Err(error) => {
-                    tracing::warn!("Dispositivos da bandeja: {error}");
+                    tracing::warn!("Tray devices: {error}");
                     submenu.append(&MenuItem::new(
                         text(language, "physical.failed"),
                         false,
@@ -471,10 +471,10 @@ fn apply_snapshot(
     runtime: &tokio::runtime::Handle,
 ) {
     if let Err(error) = ui.update(state) {
-        tracing::warn!("Não foi possível atualizar o menu de áudio: {error:#}");
+        tracing::warn!("Could not update the audio menu: {error:#}");
         runtime.spawn(async move {
             controller
-                .report_error(format!("Menu de dispositivos: {error:#}"))
+                .report_error(format!("Device menu: {error:#}"))
                 .await;
         });
     }
@@ -491,7 +491,7 @@ fn dispatch(
         let refresh = refresh.clone();
         runtime.spawn(async move {
             if let Err(error) = controller.select_physical_device(direction, device).await {
-                tracing::warn!("Seleção de dispositivo na bandeja: {error:#}");
+                tracing::warn!("Tray device selection: {error:#}");
                 controller.report_error(format!("{error:#}")).await;
                 open_settings();
             }
@@ -516,7 +516,7 @@ fn dispatch(
                     controller.stop().await
                 };
                 if let Err(error) = result {
-                    tracing::warn!("Controle da bandeja: {error:#}");
+                    tracing::warn!("Tray control: {error:#}");
                     controller.report_error(format!("{error:#}")).await;
                     open_settings();
                 }
@@ -540,14 +540,14 @@ fn wait_for_linux_tray<T>(
         match create() {
             Ok(tray) => {
                 if warned {
-                    tracing::info!("Bandeja registrada após o desktop ficar disponível");
+                    tracing::info!("Tray registered after the desktop became available");
                 }
                 return Some(tray);
             }
             Err(error) => {
                 if !warned {
                     tracing::warn!(
-                        "Bandeja indisponível; nova tentativa em 3 s. O painel permanece disponível: {error:#}"
+                        "Tray unavailable; retrying in 3 s. The dashboard remains available: {error:#}"
                     );
                     warned = true;
                 }
@@ -617,7 +617,7 @@ pub async fn start(
         })?;
     ready_rx
         .await
-        .context("Não foi possível iniciar a bandeja")?
+        .context("Could not start the tray")?
         .map_err(|error| anyhow::anyhow!(error))?;
     Ok(handle)
 }
@@ -747,7 +747,7 @@ pub fn run_native(path: std::path::PathBuf, port: u16) -> Result<()> {
     runtime.block_on(controller.shutdown())?;
     runtime
         .block_on(server)
-        .context("Servidor do painel interrompido")??;
+        .context("Dashboard server interrupted")??;
     if let Some(error) = tray_error {
         return Err(error);
     }

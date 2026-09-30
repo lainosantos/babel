@@ -9,13 +9,13 @@ use std::path::PathBuf;
 #[derive(Parser)]
 #[command(
     name = "babel-tray",
-    about = "Bandeja e painel do Babel; tradução inicia manualmente"
+    about = "Babel tray and dashboard; translation starts manually"
 )]
 struct Args {
     /// Configuration file; defaults to the current user's platform configuration folder.
     #[arg(long)]
     config: Option<PathBuf>,
-    /// Porta do painel; 0 deixa o sistema escolher uma porta livre.
+    /// Dashboard port; 0 lets the operating system choose a free port.
     #[arg(long, default_value_t = 0)]
     port: u16,
     #[arg(long)]
@@ -29,12 +29,11 @@ fn main() -> Result<()> {
     if let Some(owner) = args.autostart_owner {
         ensure!(
             owner == babel_audio::autostart::OWNER,
-            "Identificador de inicialização inválido"
+            "Invalid startup identifier"
         );
     }
     if let Some(directory) = args.working_dir {
-        std::env::set_current_dir(directory)
-            .context("Diretório de trabalho da inicialização indisponível")?;
+        std::env::set_current_dir(directory).context("Startup working directory unavailable")?;
     }
     let path = match args.config {
         Some(path) => std::path::absolute(path)?,
@@ -72,7 +71,7 @@ fn main() -> Result<()> {
             let tray = match babel_audio::tray::start(controller.clone(), cancel.clone()).await {
                 Ok(tray) => Some(tray),
                 Err(error) => {
-                    tracing::warn!("Bandeja indisponível; painel continua disponível: {error:#}");
+                    tracing::warn!("Tray unavailable; dashboard remains available: {error:#}");
                     None
                 }
             };

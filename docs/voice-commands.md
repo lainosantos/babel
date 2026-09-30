@@ -1,155 +1,152 @@
-# Comandos de voz locais com Needle 3 e MCP
+# Local voice commands with Needle 3 and MCP
 
-O agente usa uma cópia do **microfone físico original que alimenta o Babel**. Funciona durante o encaminhamento de áudio original e durante sessões de tradução, transcrição ou gravação. Não abre outro microfone, não ouve a saída dos interlocutores e não depende de uma sessão de gravação. A opção `agent.enabled` vem ligada. Depois da instalação dos serviços locais descrita abaixo, o Babel pode iniciá-los e descobrir suas portas automaticamente. A escuta fica ativa quando Babel é o microfone padrão do sistema ou quando um aplicativo usa explicitamente o microfone virtual Babel; a rota de saída nunca ativa o agente.
+The agent uses a copy of the **original physical microphone feeding Babel**. It works during original audio forwarding and during translation, transcription, or recording sessions. It does not open another microphone, listen to other participants' output, or depend on a recording session. `agent.enabled` is on by default. After installing the local services described below, Babel can start them and discover their ports automatically. Listening is active when Babel is the system's default microphone or an application explicitly uses Babel's virtual microphone; the output route never activates the agent.
 
-Para usar comandos sem abrir um aplicativo de chamada ou gravação, escolha
-**Babel como microfone padrão nas configurações de áudio do sistema** e mantenha
-**Escutar comandos de voz** habilitado em Comandos. O Babel captura o microfone
-físico escolhido em Roteamento. Não é necessário iniciar uma sessão.
+To use commands without opening a calling or recording application, choose
+**Babel as the default microphone in system audio settings** and keep **Listen
+for voice commands** enabled under Commands. Babel captures the physical microphone
+chosen in Routing. You do not need to start a session.
 
-Escolher o microfone físico como padrão pausa a captura e a escuta do Babel,
-a menos que algum aplicativo ainda esteja usando explicitamente o microfone
-virtual. Nesse caso, altere também o microfone desse aplicativo ou encerre sua
-captura. Desligar **Escutar comandos de voz** pausa somente o agente; o áudio
-ainda pode ser encaminhado. A saída continua dependendo de áudio enviado por
-um aplicativo ao Babel e nunca ativa comandos. Isso vale nos três sistemas.
+Choosing the physical microphone as the default pauses Babel's capture and listening,
+unless an application still explicitly uses the virtual microphone. In that case,
+also change that application's microphone or stop its capture. Turning off **Listen
+for voice commands** pauses only the agent; audio may still be forwarded. Output
+continues to depend on audio sent to Babel by an application and never activates
+commands. This applies to all three systems.
 
-Diga **“Babel, acenda a luz da cozinha”**, ou diga **“Babel”**, espere a indicação de ativação e então dê o comando. O nome é configurável. A comparação ignora maiúsculas/minúsculas, exige palavras completas e aceita um cumprimento inicial como “Oi, Babel” ou “Hey, Babel”. Uma menção no meio de uma conversa (“eu uso o Babel”) não ativa ferramentas. Depois de uma ativação sem comando, o prazo padrão para a próxima fala é oito segundos. “Babel, cancelar” cancela essa ativação; durante uma chamada em processamento, use o botão de cancelar no painel.
+Say **“Babel, turn on the kitchen light”**, or say **“Babel”**, wait for the activation indicator, and then give the command. The name is configurable. Matching is case-insensitive, requires whole words, and accepts an initial greeting such as “Hey, Babel” or the Portuguese “Oi, Babel”. Mentioning the name in the middle of a conversation (“I use Babel”) does not activate tools. After activation without a command, the default deadline for the next utterance is eight seconds. “Babel, cancel” cancels that activation; during a call in progress, use the dashboard's cancel button.
 
-## Retorno visual dos comandos
+## Visual command feedback
 
-Em **Comandos**, habilite **Mostrar notificações no desktop** para receber o
-retorno visual mesmo com as configurações fechadas. O Babel mostra um painel
-compacto com a logo e uma indicação de estado, sem tomar o foco do aplicativo
-que você está usando e sem emitir som. O painel segue o idioma da interface,
-português ou inglês. No Windows e macOS, acompanha o tema claro ou escuro
-informado pelo sistema; no X11/XWayland, usa a versão clara.
+Under **Commands**, enable **Show desktop notifications** to receive visual feedback
+even with settings closed. Babel shows a compact panel with its logo and a state
+indicator, without taking focus from your current application or playing a sound.
+The panel follows the interface language, Portuguese or English. On Windows and
+macOS, it follows the light or dark theme reported by the system; on X11/XWayland,
+it uses the light version.
 
-| Estado | O que significa | Duração |
+| State | Meaning | Duration |
 | --- | --- | --- |
-| Ativação | O nome foi reconhecido; diga o comando, caso ainda não o tenha dito. | A ativação fica visível por pelo menos 300 ms, inclusive em comandos rápidos. |
-| Processamento | O Babel reconhece a fala seguinte, prepara/carrega o modelo, escolhe a ferramenta ou aguarda sua resposta. | Permanece enquanto o comando está ativo. |
-| Sucesso | As chamadas do comando foram concluídas. | Desaparece após cinco segundos. |
-| Falha | O comando foi recusado, cancelado, expirou ou uma etapa falhou. | Desaparece após nove segundos. Consulte os detalhes em Comandos. |
+| Activation | The name was recognized; say the command if you have not already done so. | Activation remains visible for at least 300 ms, including fast commands. |
+| Processing | Babel is recognizing the next utterance, preparing/loading the model, choosing the tool, or waiting for its response. | Remains while the command is active. |
+| Success | The command's calls completed. | Disappears after five seconds. |
+| Failure | The command was refused, canceled, timed out, or a stage failed. | Disappears after nine seconds. Check details under Commands. |
 
-O painel nativo contém **somente mensagens genéricas de estado**. Não recebe a
-fala reconhecida, argumentos, nomes de ferramentas nem resultados. Esses detalhes
-continuam na página Comandos. O indicador da página usa os mesmos estados e
-preserva o resultado de comandos rápidos, mesmo quando eles terminam entre duas
-atualizações da tela. Abrir as configurações novamente não reproduz resultados
-antigos. Problemas de instalação ou disponibilidade anteriores à ativação ficam
-como diagnóstico na página, sem simular uma falha de comando.
+The native panel contains **only generic state messages**. It does not receive
+recognized speech, arguments, tool names, or results. Those details remain on
+the Commands page. The page indicator uses the same states and preserves results
+from fast commands, even when they finish between two screen updates. Reopening
+settings does not replay old results. Installation or availability problems that
+precede activation remain diagnostic information on the page, without simulating
+a command failure.
 
-Desligar **Mostrar notificações no desktop** oculta o aviso atual; ligá-lo
-novamente vale para os próximos eventos. Desabilitar o agente ou perder a rota
-do microfone também encerra um aviso em andamento. Nenhuma dessas ações repete
-chamadas MCP. Fechar um aviso não cancela a ferramenta: para isso, use o controle
-de cancelamento em Comandos, observando que uma ação já enviada pode ter sido
-concluída.
+Turning off **Show desktop notifications** hides the current notice; turning it
+back on applies to future events. Disabling the agent or losing the microphone
+route also ends an active notice. None of these actions repeats MCP calls.
+Closing a notice does not cancel the tool: use the cancellation control under
+Commands, remembering that an action already sent may have completed.
 
-### Sistemas, movimento e consumo
+### Systems, motion, and resource use
 
-O painel usa janelas nativas em **Windows e macOS** e em **Linux com X11 ou
-XWayland**. Em uma sessão Wayland sem XWayland, ou se o painel não puder iniciar,
-o Babel usa as notificações do sistema. Nesse modo alternativo, aparência,
-posição, duração e visibilidade seguem também as políticas do desktop, inclusive
-Não Perturbe e permissões de notificações. Não é necessário instalar um navegador
-ou habilitar notificações do navegador.
+The panel uses native windows on **Windows and macOS** and on **Linux with X11 or
+XWayland**. In a Wayland session without XWayland, or if the panel cannot start,
+Babel uses system notifications. In that fallback mode, appearance, position,
+duration, and visibility also follow desktop policies, including Do Not Disturb
+and notification permissions. You do not need to install a browser or enable
+browser notifications.
 
-O efeito na logo é breve: no máximo 20 quadros por segundo durante 1,4 segundo
-por mudança visual. Depois disso, o estado permanece estático até o próximo
-evento; um comando demorado não mantém uma animação contínua. O Babel respeita
-as preferências de reduzir movimento do Windows/macOS e de desabilitar animações
-do GNOME. Quando não consegue consultar a preferência do desktop, usa a versão
-estática. `BABEL_REDUCED_MOTION=1` também força essa versão. O indicador dentro da
-página respeita a preferência de movimento reduzido do navegador.
+The logo effect is brief: at most 20 frames per second for 1.4 seconds per visual
+change. The state then remains static until the next event; a long command does
+not keep an animation running continuously. Babel respects Windows/macOS reduced
+motion preferences and GNOME's disabled-animation preference. When it cannot read
+the desktop preference, it uses the static version. `BABEL_REDUCED_MOTION=1` also
+forces that version. The in-page indicator respects the browser's reduced-motion
+preference.
 
-O executável `babel-feedback` (`babel-feedback.exe` no Windows) acompanha os
-instaladores e inicia somente quando há um aviso para mostrar. A renderização
-é feita por software, sem WebView nem contexto de GPU criado pelo helper; o
-compositor do sistema ainda pode usar sua própria aceleração. O helper encerra
-após 30 segundos sem painel visível e volta sob demanda. Enquanto mostra um
-comando em processamento, permanece disponível até o resultado ou o encerramento
-desse estado. Não abre dispositivos de áudio nem carrega modelos de IA.
+The `babel-feedback` executable (`babel-feedback.exe` on Windows) ships with the
+installers and starts only when there is a notice to show. Rendering is software
+based, without a WebView or a GPU context created by the helper; the system
+compositor may still use its own acceleration. The helper exits after 30 seconds
+with no visible panel and returns on demand. While showing a processing command,
+it stays available until the result or that state's termination. It does not open
+audio devices or load AI models.
 
-Para uma compilação local, use `cargo build --release --bins` e mantenha o helper
-ao lado dos demais executáveis do Babel. A ausência dele permite o retorno por
-notificações do sistema, mas não o painel personalizado. A fila de feedback tem
-tamanho limitado e é independente da captura, da inferência e das ferramentas;
-um desktop lento não bloqueia o áudio nem acumula uma sequência de avisos antigos.
+For a local build, use `cargo build --release --bins` and keep the helper alongside
+Babel's other executables. Without it, system notification feedback is available,
+but the custom panel is not. The feedback queue is bounded and independent of
+capture, inference, and tools; a slow desktop neither blocks audio nor accumulates
+a sequence of old notices.
 
-## Escuta e processamento
+## Listening and processing
 
-Enquanto a rota do microfone está ativa, o Babel captura continuamente o PCM do
-microfone físico selecionado. O agente aproveita uma cópia dessa mesma captura;
-não abre um segundo microfone. Selecionar Babel como microfone padrão mantém
-essa rota ativa mesmo sem um aplicativo de chamada. Desabilitar comandos de voz
-interrompe a escuta do agente, mas não desativa uma rota ainda necessária ao
-sistema ou a um aplicativo.
+While the microphone route is active, Babel continuously captures PCM from the
+selected physical microphone. The agent reuses a copy of that same capture; it
+does not open a second microphone. Selecting Babel as the default microphone
+keeps this route active even without a calling application. Disabling voice commands
+stops agent listening but does not deactivate a route still required by the system
+or an application.
 
-O filtro atual usa o nível de energia RMS para separar trechos com som e
-silêncio. Trechos não silenciosos seguem para o Whisper local, que reconhece o
-texto; o Babel então procura o nome de ativação. Assim, uma fala sem “Babel”
-também pode passar pelo Whisper, mas não aciona o Needle nem ferramentas. O
-Needle só é chamado depois do nome de ativação e de um comando. Esse filtro de
-energia não é um classificador dedicado de palavra de ativação; o Babel ainda
-não implementa esse tipo de detector.
+The current filter uses RMS energy to separate sound from silence. Non-silent
+segments go to local Whisper for text recognition; Babel then looks for the wake
+name. Speech without “Babel” may therefore also pass through Whisper, but does
+not invoke Needle or tools. Needle is called only after the wake name and a command.
+This energy filter is not a dedicated wake-word classifier; Babel does not yet
+implement that type of detector.
 
-Whisper permanece carregado enquanto essa escuta está ativa, inclusive durante
-silêncios; o filtro evita inferência em silêncio, mas não descarrega o modelo
-entre frases. Quando o microfone deixa de ser elegível, a escuta pausa e o Babel
-libera seus helpers após `agent.idle_unload_secs` (60 segundos por padrão).
-Needle tem um prazo adicional baseado no último comando: pode liberar seus
-pesos mesmo enquanto Whisper continua escutando. Desabilitar o agente encerra
-os helpers gerenciados imediatamente. Servidores externos seguem sua própria
-política de recursos.
+Whisper remains loaded while listening is active, including during silence; the
+filter avoids inference on silence but does not unload the model between sentences.
+When the microphone is no longer eligible, listening pauses and Babel releases
+its helpers after `agent.idle_unload_secs` (60 seconds by default). Needle has an
+additional deadline based on the last command: it may release its weights while
+Whisper continues listening. Disabling the agent immediately stops managed helpers.
+External servers follow their own resource policies.
 
-A escuta de comandos não cria WAV ou TXT. A gravação e a transcrição de arquivos
-dependem de uma sessão com esses recursos habilitados separadamente. A retenção
-opcional de áudio recente fica limitada à memória; só entra nos arquivos de
-uma sessão quando você marca **Incluir histórico recente** naquele início.
-Nenhuma dessas escolhas é ativada automaticamente pelo nome de ativação.
+Command listening does not create WAV or TXT files. File recording and transcription
+require a session with those features enabled separately. Optional recent audio
+retention remains bounded in memory; it enters session files only when you select
+**Include recent history** for that start. None of these choices is automatically
+activated by the wake name.
 
-## Fluxo
+## Flow
 
-1. O worker de áudio copia quadros para uma fila limitada, sem aguardar a IA.
-2. Um worker separado converte para PCM mono de 16 kHz e separa falas por energia e silêncio.
-3. O servidor **whisper.cpp local** transcreve a fala original, sem tradução. O Babel procura o nome de ativação no texto.
-4. O Babel reúne as ferramentas das integrações MCP habilitadas e envia somente o comando e os esquemas ao **Needle 3 local**.
-5. Needle escolhe ferramentas e preenche argumentos. O Babel verifica confiança, recusa, identificação exata, campos sem suporte na fala e os JSON Schemas antes de executar.
-6. O painel mostra ativação, transcrição da fala seguinte, decisão, execução, sucesso ou falha. Resultados são texto/JSON das ferramentas, não uma resposta falada inventada.
+1. The audio worker copies frames to a bounded queue without waiting for AI.
+2. A separate worker converts to mono PCM at 16 kHz and segments utterances using energy and silence.
+3. The **local whisper.cpp server** transcribes original speech without translation. Babel looks for the wake name in the text.
+4. Babel gathers tools from enabled MCP integrations and sends only the command and schemas to **local Needle 3**.
+5. Needle chooses tools and fills in arguments. Before execution, Babel checks confidence, refusal, exact identification, fields not grounded in the utterance, and JSON Schemas.
+6. The dashboard shows activation, recognition of the next utterance, decision, execution, success, or failure. Results are tool text/JSON, not an invented spoken response.
 
-O agente executa no máximo quatro chamadas por comando por padrão, em sequência. Todas passam por validação antes da primeira execução; cada integração é validada novamente antes da chamada. Uma falha interrompe as chamadas seguintes, sem desfazer aquelas que já ocorreram. Timeout ou cancelamento **não repetem uma ferramenta**: o servidor pode já ter concluído a ação. Configurações alteradas, troca de microfone, desligamento do agente e encerramento do app cancelam trabalho pendente e descartam a fala antiga.
+The agent executes at most four calls per command by default, sequentially. All are validated before the first execution; each integration is checked again before its call. A failure stops subsequent calls without undoing those already completed. Timeouts or cancellation **do not repeat a tool**: the server may already have completed the action. Changed settings, microphone switching, disabling the agent, and application shutdown cancel pending work and discard old speech.
 
-Enquanto Needle/MCP processa um comando, novas falas para o agente são descartadas para impedir uma fila de ações atrasadas. O áudio normal da conversa continua encaminhado. Os comandos também permanecem no áudio encaminhado; este recurso não silencia a palavra de ativação na chamada.
+While Needle/MCP processes a command, new speech for the agent is discarded to prevent a queue of delayed actions. Normal conversation audio continues to be forwarded. Commands also remain in forwarded audio; this feature does not mute the wake word in the call.
 
-## Serviços gerenciados e portas dinâmicas
+## Managed services and dynamic ports
 
-O Babel usa **dois processos locais separados**: whisper.cpp reconhece a fala e
-o nome de ativação; Needle bridge escolhe as ferramentas MCP. Tradução por
-Gemini/OpenAI não substitui esses serviços. Ambos executam no computador do
-Babel, mesmo quando o painel é aberto em outro computador.
+Babel uses **two separate local processes**: whisper.cpp recognizes speech and
+the wake name; Needle bridge chooses MCP tools. Gemini/OpenAI translation does
+not replace these services. Both run on Babel's computer, even when the dashboard
+is opened on another computer.
 
-Em **Comandos → Serviços locais de fala e decisão**, mantenha os dois endpoints
-como `auto`. O Babel inicia os helpers já instalados com `--port 0`: o sistema
-operacional escolhe uma porta livre e mantém o socket reservado. Cada processo
-anuncia sua identidade e seu endpoint real por uma linha `BABEL_SERVICE_READY`
-seguida de JSON. O Babel valida esse anúncio antes de usar o serviço; não tenta
-adivinhar uma porta nem se conectar a um número padrão.
+Under **Commands → Local speech and decision services**, keep both endpoints at
+`auto`. Babel starts previously installed helpers with `--port 0`: the operating
+system chooses a free port and keeps its socket reserved. Each process announces
+its identity and actual endpoint in a `BABEL_SERVICE_READY` line followed by JSON.
+Babel validates that announcement before using the service; it does not guess a
+port or connect to a default number.
 
-Os endpoints efetivos aparecem no **status da página Comandos**. São dados da
-execução atual: não copie essas portas para a configuração gerenciada. O TOML
-continua com `whisper_endpoint = "auto"` e `needle_endpoint = "auto"`, inclusive
-quando um helper reinicia e recebe outra porta.
+Effective endpoints appear in the **Commands page status**. They describe the
+current run: do not copy those ports into managed configuration. TOML remains
+`whisper_endpoint = "auto"` and `needle_endpoint = "auto"`, including when a helper
+restarts and receives another port.
 
-O campo **Pasta dos serviços locais** corresponde a `agent.services_directory`.
-Vazio, usa a pasta absoluta do arquivo TOML carregado. Para uma instalação em
-outro lugar, informe a pasta absoluta do Babel que contém `scripts` e `.tools`;
-não informe apenas a pasta do binário ou do modelo. Caminhos relativos não são
-aceitos nesse campo. Essa pasta é independente de `files.base_path`, que
-controla os arquivos de transcrição e gravação.
+The **Local services folder** field corresponds to `agent.services_directory`.
+An empty value uses the absolute directory of the loaded TOML file. For installation
+elsewhere, enter the absolute Babel folder containing `scripts` and `.tools`;
+do not enter only the binary or model folder. Relative paths are not accepted
+in this field. This folder is independent of `files.base_path`, which controls
+transcript and recording files.
 
-Estrutura esperada dentro dessa pasta:
+Expected structure inside that folder:
 
 ```text
 scripts/needle_bridge.py
@@ -157,205 +154,202 @@ scripts/needle_bridge.py
 .tools/needle/Scripts/python.exe                 # Windows
 .tools/whisper.cpp/models/ggml-base-q5_1.bin
 .tools/whisper.cpp/build/bin/whisper-server       # Linux/macOS
-.tools/whisper.cpp/build/bin/whisper-server.exe   # Windows, configuração única
+.tools/whisper.cpp/build/bin/whisper-server.exe   # Windows, single configuration
 .tools/whisper.cpp/build/bin/Release/whisper-server.exe  # Windows, Visual Studio
 ```
 
-Os helpers são iniciados quando o agente habilitado precisa atender ao microfone
-virtual ativo, por ser o padrão do sistema ou estar em uso por um aplicativo.
-Quando nenhuma dessas condições permanece, o Babel pausa a escuta, descarta
-falas pendentes e mantém os processos pelo prazo configurável de inatividade
-(60 segundos por padrão). O retorno do microfone nesse intervalo os reutiliza;
-ao expirar o prazo, são encerrados e sua memória é liberada.
-Desabilitar o agente ou sair normalmente do aplicativo encerra os helpers que
-ele iniciou. Fechar apenas a janela de configurações não encerra o app. Com o
-tray configurado para iniciar no login, a mesma política vale na próxima
-execução; não é necessário criar um serviço separado para os helpers gerenciados.
+Helpers start when the enabled agent needs to serve an active virtual microphone,
+either because it is the system default or because an application uses it.
+When neither condition holds, Babel pauses listening, discards pending utterances,
+and keeps the processes for the configurable idle delay (60 seconds by default).
+If the microphone returns within that interval, they are reused; after expiry,
+they terminate and release their memory.
+Disabling the agent or exiting the application normally stops helpers it started.
+Closing only the settings window does not exit the app. With the tray configured
+to start at login, the same policy applies on the next run; a separate service is
+not needed for managed helpers.
 
-`agent.whisper_model` escolhe o arquivo `ggml-<modelo>.bin` nessa pasta. O padrão
-novo é `base-q5_1`. Para compatibilidade, se esse arquivo não existir e houver
-somente `ggml-base.bin`, o padrão reutiliza o Base original já instalado.
-Essa alternativa não se aplica a uma escolha explícita de Tiny ou Small.
-Os identificadores aceitos são `tiny-q5_1`, `base-q5_1`, `small-q5_1`, `tiny`,
-`base` e `small`; o arquivo correspondente deve estar instalado. O script abaixo
-prepara Base Q5_1. Configurações e arquivos existentes não são sobrescritos.
+`agent.whisper_model` selects the `ggml-<model>.bin` file in this folder. The new
+default is `base-q5_1`. For compatibility, if that file is missing and only
+`ggml-base.bin` exists, the default reuses the already-installed original Base.
+This fallback does not apply to an explicit Tiny or Small selection. Accepted
+identifiers are `tiny-q5_1`, `base-q5_1`, `small-q5_1`, `tiny`, `base`, and `small`;
+the corresponding file must be installed. The script below prepares Base Q5_1.
+Existing configurations and files are not overwritten.
 
-O app não instala pacotes, baixa Whisper nem compila ferramentas ao abrir as
-configurações. Prepare os binários, o ambiente Python e os modelos explicitamente
-antes do uso, com as instruções seguintes. Instalação ausente produz um
-diagnóstico em Comandos e não interrompe o encaminhamento normal de áudio.
+The app does not install packages, download Whisper, or compile tools when settings
+open. Explicitly prepare binaries, the Python environment, and models before use
+with the following instructions. A missing installation produces a diagnostic
+under Commands and does not interrupt normal audio forwarding.
 
-Um endpoint HTTP(S) local escrito explicitamente no lugar de `auto` seleciona
-um **serviço externo ao gerenciamento do Babel**. Nesse caso, você administra a
-inicialização, a porta e o encerramento dele. Os dois campos são independentes:
-é possível gerenciar um helper e usar outro externamente. O endpoint de
-reconhecimento do provider Local, na página **Tradução e vozes**, também é uma
-configuração separada e não acompanha automaticamente o endpoint do agente.
+An explicit local HTTP(S) endpoint instead of `auto` selects a **service outside
+Babel's management**. In that case, you manage its startup, port, and shutdown.
+The two fields are independent: one helper can be managed while the other is external.
+The Local provider's recognition endpoint under **Translation and voices** is
+also a separate setting and does not automatically follow the agent endpoint.
 
-## Instalar Whisper local
+## Installing local Whisper
 
-O [instalador do Babel](../scripts/setup_whisper.py) usa o servidor HTTP oficial
-[whisper.cpp v1.9.4](https://github.com/ggml-org/whisper.cpp/releases/tag/v1.9.4),
-fixa o commit `927cfce34f31707e17f2bff35c349632fb9e2c3a` e baixa o modelo
-multilíngue `base-q5_1`, de aproximadamente 59,7 MB. A URL, o tamanho e o SHA-256
-vêm do mesmo catálogo fixado usado pela transcrição integrada. Verifica o SHA-256 antes de
-usá-lo e aplica o [patch de descoberta da porta](../scripts/patches/whisper-dynamic-port.patch).
-Executá-lo novamente reaproveita a instalação compatível. Um checkout alterado
-ou modelo divergente é preservado e gera erro em vez de ser sobrescrito.
+The [Babel installer script](../scripts/setup_whisper.py) uses the official
+[whisper.cpp v1.9.4](https://github.com/ggml-org/whisper.cpp/releases/tag/v1.9.4)
+HTTP server, pins commit `927cfce34f31707e17f2bff35c349632fb9e2c3a`, and downloads
+the approximately 59.7 MB multilingual `base-q5_1` model. Its URL, size, and SHA-256
+come from the same pinned catalog used by embedded transcription. It verifies
+SHA-256 before use and applies the [port discovery patch](../scripts/patches/whisper-dynamic-port.patch).
+Running it again reuses a compatible installation. A modified checkout or different
+model is preserved and causes an error instead of being overwritten.
 
-Execute os comandos a partir da pasta do repositório Babel. O instalador usa
-somente a biblioteca padrão do Python; requer **Python 3.9+, Git, CMake e um
-compilador C/C++**. Não inicia o servidor nem modifica a configuração do Babel.
+Run commands from the Babel repository folder. The installer uses only Python's
+standard library; it requires **Python 3.9+, Git, CMake, and a C/C++ compiler**.
+It neither starts the server nor changes Babel configuration.
 
 ### Linux
 
-Tenha um compilador C/C++ e um gerador de build, como Make ou Ninja, instalados.
-Em Debian/Ubuntu, os requisitos geralmente vêm de `python3`, `git`, `cmake` e
-`build-essential`; a instalação desses pacotes é administrada pelo usuário.
+Have a C/C++ compiler and a build generator such as Make or Ninja installed.
+On Debian/Ubuntu, requirements usually come from `python3`, `git`, `cmake`, and
+`build-essential`; installation of those packages is managed by the user.
 
 ```bash
 python3 scripts/setup_whisper.py --backend cpu --jobs 4
 ```
 
-Para NVIDIA com toolkit CUDA e compilador compatível já instalados:
+For NVIDIA with a CUDA toolkit and compatible compiler already installed:
 
 ```bash
 python3 scripts/setup_whisper.py --backend cuda --jobs 4
 ```
 
-O instalador não instala CUDA. Ter somente o driver da GPU não basta para
-compilar esse backend.
+The installer does not install CUDA. Having only the GPU driver is insufficient
+to compile this backend.
 
 ### macOS
 
-Tenha Python, Git, CMake e as ferramentas de compilação do Xcode disponíveis.
-Para CPU:
+Have Python, Git, CMake, and Xcode build tools available. For CPU:
 
 ```bash
 python3 scripts/setup_whisper.py --backend cpu --jobs 4
 ```
 
-Para aceleração Metal em hardware e ferramentas compatíveis:
+For Metal acceleration with compatible hardware and tools:
 
 ```bash
 python3 scripts/setup_whisper.py --backend metal --jobs 4
 ```
 
-O servidor recebe WAV por HTTP local; a permissão de captura do microfone é do
-Babel. Estes comandos e a inferência não foram validados em hardware macOS neste
-ambiente.
+The server receives WAV over local HTTP; microphone capture permission belongs
+to Babel. These commands and inference have not been validated on macOS hardware
+in this environment.
 
 ### Windows
 
-Tenha Python, Git, CMake e Visual Studio Build Tools com suporte a C/C++.
-Use um terminal de desenvolvimento da arquitetura do computador. No PowerShell:
+Have Python, Git, CMake, and Visual Studio Build Tools with C/C++ support available.
+Use a developer terminal matching the computer's architecture. In PowerShell:
 
 ```powershell
 py -3 scripts/setup_whisper.py --backend cpu --jobs 4
 ```
 
-Com toolkit CUDA e compilador compatível instalados, use `--backend cuda`.
-Com o gerador Visual Studio, o executável costuma ficar em `build/bin/Release`;
-geradores de configuração única podem usar `build/bin`. O instalador informa o
-caminho final e o Babel procura ambas as formas. Mantenha as DLLs produzidas
-junto ao executável. Não é necessário WSL. Build e inferência nativos no Windows
-ainda não foram validados neste ambiente.
+With a CUDA toolkit and compatible compiler installed, use `--backend cuda`.
+With the Visual Studio generator, the executable is usually under `build/bin/Release`;
+single-configuration generators may use `build/bin`. The installer reports the
+final path, and Babel checks both forms. Keep produced DLLs alongside the executable.
+WSL is unnecessary. Native Windows builds and inference have not yet been validated
+in this environment.
 
-Todos os builds usam otimizações para a CPU da máquina (`GGML_NATIVE=ON`). Não
-transfira esse binário para outra CPU sem conferir compatibilidade. `--jobs`
-limita o paralelismo da compilação, não o tempo de resposta da inferência. O
-helper gerenciado usa `agent.local_threads`, padrão 2, limitado às CPUs
-disponíveis. Esse campo aceita 1–32 e controla somente o Whisper dos comandos;
-não altera o runtime interno do Needle nem os threads da tradução/transcrição.
+All builds use optimizations for the machine's CPU (`GGML_NATIVE=ON`). Do not move
+this binary to another CPU without checking compatibility. `--jobs` limits build
+parallelism, not inference response time. The managed helper uses
+`agent.local_threads`, default 2, capped by available CPUs. This field accepts
+1–32 and controls only command Whisper; it does not change Needle's internal
+runtime or translation/transcription threads.
 
-### Execução manual e verificação sem áudio
+### Manual execution and verification without audio
 
-Normalmente basta instalar e deixar o endpoint em `auto`. Para diagnóstico de
-uma instalação externa, inicie manualmente o **binário com o patch do Babel**:
+Normally, install the helper and leave the endpoint at `auto`. To diagnose an
+external installation, manually start the **binary with Babel's patch**:
 
 ```bash
 .tools/whisper.cpp/build/bin/whisper-server -m .tools/whisper.cpp/models/ggml-base-q5_1.bin -t 2 -l auto --host 127.0.0.1 --port 0
 ```
 
-No Windows, use o executável `.exe` indicado pelo instalador. Leia a linha
-`BABEL_SERVICE_READY` e obtenha `endpoint` do JSON. O campo `port` contém o número
-atribuído pelo SO; não use `:0` como URL de conexão. O servidor original v1.9.4
-sem o patch não publica esse contrato de descoberta. Não use `--no-prints` nem
-`--no-context`: essas opções não são aceitas pelo servidor dessa versão.
+On Windows, use the `.exe` reported by the installer. Read the
+`BABEL_SERVICE_READY` line and obtain `endpoint` from its JSON. The `port` field
+contains the OS-assigned number; do not use `:0` as a connection URL. The original
+unpatched v1.9.4 server does not publish this discovery contract. Do not use
+`--no-prints` or `--no-context`: that server version does not accept those options.
 
-Para validar sem enviar áudio, defina `WHISPER_ENDPOINT` com o endpoint real
-anunciado e execute em Linux/macOS:
+To validate without sending audio, set `WHISPER_ENDPOINT` to the actual announced
+endpoint and run on Linux/macOS:
 
 ```bash
 curl --max-time 5 -i "${WHISPER_ENDPOINT%/inference}/health"
 curl --max-time 5 -i -F response_format=json "$WHISPER_ENDPOINT"
 ```
 
-No PowerShell, atribua o endpoint anunciado a `$WhisperEndpoint` e use:
+In PowerShell, assign the announced endpoint to `$WhisperEndpoint` and use:
 
 ```powershell
 curl.exe --max-time 5 -i ($WhisperEndpoint -replace '/inference$', '/health')
 curl.exe --max-time 5 -i -F response_format=json $WhisperEndpoint
 ```
 
-O primeiro pedido precisa retornar HTTP 200, `Server: whisper.cpp` e JSON com
-`status: ok`. O segundo não inclui arquivo de áudio: o resultado esperado é
-HTTP 400 com `Invalid request` ou o JSON oficial indicando ausência de `file`.
-Um `/health` genérico que responde 200 não confirma a identidade do serviço.
+The first request must return HTTP 200, `Server: whisper.cpp`, and JSON with
+`status: ok`. The second includes no audio file: the expected result is HTTP 400
+with `Invalid request` or official JSON indicating a missing `file`. A generic
+`/health` returning 200 does not confirm service identity.
 
-O Babel faz essas duas verificações antes de transmitir uma fala. A confirmação
-é reutilizada durante a mesma configuração/rota e invalidada após falha de
-transcrição. Se usar proxy local num endpoint explícito, preserve o cabeçalho e
-os caminhos: `/asr/inference` exige `/asr/health`. Respostas de inferência
-precisam ter `Content-Type: application/json`.
+Babel performs both checks before transmitting an utterance. Confirmation is
+reused under the same configuration/route and invalidated after transcription
+failure. If using a local proxy at an explicit endpoint, preserve the header
+and paths: `/asr/inference` requires `/asr/health`. Inference responses must have
+`Content-Type: application/json`.
 
-Depois da verificação, o Babel envia WAV PCM16 mono/16 kHz em multipart,
-`response_format=json`, `translate=false` e o idioma selecionado. `auto`
-identifica o idioma; `pt` e `en` o fixam. Para português, use modelo multilíngue:
-as variantes `.en` atendem inglês.
+After verification, Babel sends mono PCM16/16 kHz WAV in multipart form,
+`response_format=json`, `translate=false`, and the selected language. `auto`
+detects the language; `pt` and `en` fix it. For Portuguese, use a multilingual
+model: `.en` variants serve English.
 
-O Whisper gerenciado não usa chave de API; mantenha `whisper_api_key_env` vazio.
-Para um servidor externo autenticado, configure um endpoint explícito e informe
-nesse campo o **nome** de uma credencial disponível ao Babel. O segredo permanece
-na memória do app ou no ambiente, nunca no TOML.
+Managed Whisper uses no API key; keep `whisper_api_key_env` empty. For an
+authenticated external server, configure an explicit endpoint and enter the
+**name** of a credential available to Babel in that field. The secret remains
+in app memory or the environment, never TOML.
 
-Whisper também reconhece a palavra inicial. Esta implementação não usa um
-pequeno detector acústico dedicado: cada trecho com voz passa pelo ASR local.
-Consumo e demora dependem de CPU/GPU, modelo, duração e ruído. Sem Whisper, o
-áudio principal continua funcionando. O modo gerenciado descarta stdout e
-stderr dos helpers, exceto o anúncio necessário à descoberta; não salva falas
-nesses logs. Em execução manual, não ative `--print-realtime`,
-`--print-progress` ou depuração se não quiser expor conteúdo no terminal.
+Whisper also recognizes the initial word. This implementation does not use a
+small dedicated acoustic detector: every speech segment passes through local ASR.
+Resource use and delay depend on CPU/GPU, model, duration, and noise. Without
+Whisper, main audio continues working. Managed mode discards helper stdout and
+stderr except the announcement needed for discovery; it does not save utterances
+in those logs. During manual execution, do not enable `--print-realtime`,
+`--print-progress`, or debugging if you do not want content exposed in the terminal.
 
-### Interpretar os diagnósticos de Whisper
+### Interpreting Whisper diagnostics
 
-| Diagnóstico nos detalhes | Significado e ação |
+| Diagnostic detail | Meaning and action |
 | --- | --- |
-| `Whisper is not installed in the local services folder` | Confira a pasta dos serviços e execute o instalador nela. |
-| `Whisper model is missing` | Execute novamente o instalador; ele verifica o modelo antes de usá-lo. |
-| `Local voice service did not announce its bound port` | Confira o build com o patch do Babel, o modelo e os requisitos do runtime. Um servidor original sem o marcador não atende ao modo gerenciado. |
-| `Whisper local service is unavailable or timed out` | Confira o estado do processo e o timeout. Em modo externo, use o endpoint efetivamente anunciado pelo processo atual. |
-| `Whisper endpoint is not a verified whisper.cpp server` | A resposta não identifica o protocolo esperado: pode ser outro aplicativo, caminho incorreto ou proxy removendo cabeçalhos. Nenhum áudio é enviado nessa verificação. |
-| `Whisper model is not ready` | O serviço identificado ainda não respondeu com sucesso ao health check; confira a instalação e o arquivo do modelo. |
+| `Whisper is not installed in the local services folder` | Check the services folder and run the installer there. |
+| `Whisper model is missing` | Run the installer again; it verifies the model before use. |
+| `Local voice service did not announce its bound port` | Check the build with Babel's patch, model, and runtime requirements. An original server without the marker does not support managed mode. |
+| `Whisper local service is unavailable or timed out` | Check process status and timeout. In external mode, use the endpoint actually announced by the current process. |
+| `Whisper endpoint is not a verified whisper.cpp server` | The response does not identify the expected protocol: it may be another application, an incorrect path, or a proxy stripping headers. No audio is sent during this check. |
+| `Whisper model is not ready` | The identified service has not yet passed its health check; check installation and the model file. |
 
-Após corrigir uma instalação, o Babel tenta iniciar/usar os helpers novamente
-enquanto o agente está habilitado e o microfone virtual é o padrão do sistema
-ou está em uso por um aplicativo. A página de
-configurações apenas consulta o estado: não captura uma gravação de teste nem
-executa ferramentas MCP por conta própria.
+After an installation is fixed, Babel retries starting/using helpers while the
+agent is enabled and the virtual microphone is the system default or used by
+an application. The settings page only queries status: it does not capture a
+test recording or execute MCP tools on its own.
 
-Falhas de ASR anteriores ao nome de ativação aparecem como diagnóstico na aba
-**Comandos**, sem aviso flutuante ou notificação de comando. Falhas após uma
-ativação mantêm o retorno visual correspondente. A API distingue os casos por
-`error_scope: "service"` ou `"command"`.
+ASR failures before the wake name appear as diagnostics under **Commands**, without
+a floating notice or command notification. Failures after activation retain the
+corresponding visual feedback. The API distinguishes them with
+`error_scope: "service"` or `"command"`.
 
-## Needle 3 local
+## Local Needle 3
 
-O modelo correto desta integração é [Cactus Compute Needle 3](https://huggingface.co/Cactus-Compute/needle3). Ele usa seu próprio runtime `.cact`; não se deve tratá-lo como um modelo GGUF de Ollama/llama.cpp. A [API Python oficial](https://github.com/cactus-compute/needle/blob/main/llms.txt) recebe esquemas em `Needle(tools=...)` e devolve chamadas e argumentos com `complete(...)`.
+The correct model for this integration is [Cactus Compute Needle 3](https://huggingface.co/Cactus-Compute/needle3). It uses its own `.cact` runtime; it should not be treated as an Ollama/llama.cpp GGUF model. The [official Python API](https://github.com/cactus-compute/needle/blob/main/llms.txt) receives schemas through `Needle(tools=...)` and returns calls and arguments through `complete(...)`.
 
-O projeto inclui **`scripts/needle_bridge.py`**, um adaptador HTTP do Babel sobre essa API. `/complete` é um protocolo deste adaptador, não uma API HTTP oficial do Needle. O programa roda em um processo separado e usa apenas `complete`, nunca `run`: quem executa MCP é o cliente Rust do Babel.
+The project includes **`scripts/needle_bridge.py`**, a Babel HTTP adapter over that API. `/complete` is this adapter's protocol, not an official Needle HTTP API. The program runs in a separate process and uses only `complete`, never `run`: Babel's Rust client executes MCP.
 
-Crie o ambiente Python na pasta dos serviços. No Linux e macOS:
+Create the Python environment in the services folder. On Linux and macOS:
 
 ```bash
 python3 -m venv .tools/needle
@@ -363,17 +357,17 @@ python3 -m venv .tools/needle
 .tools/needle/bin/python -c "import os; os.environ['NEEDLE_TELEMETRY']='0'; os.environ['DO_NOT_TRACK']='1'; from needle import Needle; Needle(tools=[]).close()"
 ```
 
-O pacote Python `cactus-needle==3.0.6` seleciona o motor nativo **3.0.2**. Os arquivos necessários estão [publicados no repositório oficial](https://huggingface.co/Cactus-Compute/needle3/tree/main/python), e o [seletor de plataformas do SDK](https://github.com/cactus-compute/needle/blob/main/needle/agent/fetch.py) inclui Windows nativo:
+The `cactus-needle==3.0.6` Python package selects native engine **3.0.2**. Required files are [published in the official repository](https://huggingface.co/Cactus-Compute/needle3/tree/main/python), and the [SDK platform selector](https://github.com/cactus-compute/needle/blob/main/needle/agent/fetch.py) includes native Windows:
 
-| Sistema / arquitetura | Motor fornecido | Verificação no Babel |
+| System / architecture | Provided engine | Babel verification |
 | --- | --- | --- |
-| Linux x86_64, glibc | `manylinux2014_x86_64`, biblioteca `.so` | Inferência real testada neste host |
-| Linux ARM64, glibc | `manylinux2014_aarch64`, biblioteca `.so` | Arquivo oficial disponível; não executado aqui |
-| Linux x86_64 / ARM64, musl | `musllinux_1_2_x86_64` / `musllinux_1_2_aarch64` | Arquivos oficiais disponíveis; não executados aqui |
-| macOS 11+, Apple Silicon / Intel | `macosx_11_0_arm64` / `macosx_11_0_x86_64`, biblioteca `.dylib` | Arquivos oficiais disponíveis; não executados aqui |
-| Windows x86_64 / ARM64 | `win_amd64` / `win_arm64`, biblioteca `.dll` | SDK e arquivos nativos disponíveis; não executados aqui |
+| Linux x86_64, glibc | `manylinux2014_x86_64`, `.so` library | Real inference tested on this host |
+| Linux ARM64, glibc | `manylinux2014_aarch64`, `.so` library | Official file available; not executed here |
+| Linux x86_64 / ARM64, musl | `musllinux_1_2_x86_64` / `musllinux_1_2_aarch64` | Official files available; not executed here |
+| macOS 11+, Apple Silicon / Intel | `macosx_11_0_arm64` / `macosx_11_0_x86_64`, `.dylib` library | Official files available; not executed here |
+| Windows x86_64 / ARM64 | `win_amd64` / `win_arm64`, `.dll` library | SDK and native files available; not executed here |
 
-No Windows, use Python da arquitetura correspondente e estes comandos no PowerShell; não é necessário WSL para o runtime publicado:
+On Windows, use Python matching the architecture and these PowerShell commands; the published runtime does not require WSL:
 
 ```powershell
 py -3 -m venv .tools\needle
@@ -381,57 +375,58 @@ py -3 -m venv .tools\needle
 .tools\needle\Scripts\python.exe -c "import os; os.environ['NEEDLE_TELEMETRY']='0'; os.environ['DO_NOT_TRACK']='1'; from needle import Needle; Needle(tools=[]).close()"
 ```
 
-O último comando prepara o motor nativo e os pesos oficiais no cache do usuário
-usando a API Python. Pode baixar arquivos nessa etapa explícita; não transcreve
-áudio nem executa ferramentas. Faça a preparação com o mesmo usuário que inicia
-o Babel e antes de depender dos comandos numa chamada. Somente instalar o
-pacote `cactus-needle` não garante que o motor e os pesos já estejam disponíveis.
-No modo gerenciado, o Babel inicia o Needle com `HF_HUB_OFFLINE=1`: se faltar
-algo no cache, a solicitação falha sem iniciar um download. Conclua a preparação
-explícita acima e tente novamente. O cache pertence ao usuário do processo;
-prepará-lo em outra conta não instala os pesos para a conta que executa o Babel.
+The last command prepares the native engine and official weights in the user's
+cache through the Python API. It may download files during this explicit step;
+it neither transcribes audio nor executes tools. Prepare using the same user
+that starts Babel, before relying on commands during a call. Installing only the
+`cactus-needle` package does not guarantee the engine and weights are available.
+In managed mode, Babel starts Needle with `HF_HUB_OFFLINE=1`: if anything is missing
+from the cache, the request fails without starting a download. Complete the
+explicit preparation above and try again. The cache belongs to the process user;
+preparing it under another account does not install weights for the account
+running Babel.
 
-Com os arquivos preparados, deixe `needle_endpoint = "auto"`: o Babel inicia
-`needle_bridge.py --port 0`. O adaptador se vincula somente a `127.0.0.1` e
-anuncia o endpoint real em `BABEL_SERVICE_READY`, sem porta fixa. `/health`
-confirma a identidade do bridge. Ele mantém um servidor HTTP leve; o modelo só
-carrega em um processo de inferência separado na primeira solicitação de
-planejamento, por isso essa etapa ainda pode demorar.
+With files prepared, leave `needle_endpoint = "auto"`: Babel starts
+`needle_bridge.py --port 0`. The adapter binds only to `127.0.0.1` and announces
+the actual endpoint through `BABEL_SERVICE_READY`, without a fixed port. `/health`
+confirms bridge identity. It maintains a lightweight HTTP server; the model loads
+in a separate inference process only on the first planning request, so that stage
+may still take time.
 
-Para administrar o helper separadamente, por exemplo com pesos próprios:
+To manage the helper separately, for example with your own weights:
 
 ```bash
-.tools/needle/bin/python scripts/needle_bridge.py --port 0 --weights /caminho/needle3.cact --idle-unload-secs 60 --timeout-secs 20
+.tools/needle/bin/python scripts/needle_bridge.py --port 0 --weights /path/to/needle3.cact --idle-unload-secs 60 --timeout-secs 20
 ```
 
-Copie o `endpoint` anunciado para o campo do Needle somente nesse modo externo.
-No Windows, substitua o Python pelo de `.tools\needle\Scripts\python.exe`.
-WSL2 pode hospedar um helper Linux externo, sujeito ao encaminhamento de
-[localhost do WSL](https://learn.microsoft.com/en-us/windows/wsl/networking#accessing-linux-networking-apps-from-windows-localhost).
-Esse arranjo não foi testado aqui e não é iniciado pelo gerenciador nativo do
-Babel. Use o endpoint loopback real acessível no Windows; endereços privados da
-VM são recusados pela política de inferência local.
+Copy the announced `endpoint` into the Needle field only in this external mode.
+On Windows, substitute Python from `.tools\needle\Scripts\python.exe`.
+WSL2 can host an external Linux helper, subject to
+[WSL localhost forwarding](https://learn.microsoft.com/en-us/windows/wsl/networking#accessing-linux-networking-apps-from-windows-localhost).
+This arrangement has not been tested here and is not started by Babel's native
+manager. Use the actual loopback endpoint accessible from Windows; VM private
+addresses are rejected by the local inference policy.
 
-O modelo pode ser reutilizado entre comandos próximos. Após 60 segundos sem
-comando por padrão, o bridge encerra e recolhe o processo de inferência, devolvendo
-ao sistema a memória dos pesos. Apenas chamar `close()` do SDK não garantia
-isso, pois o runtime preservava estado nativo global. O servidor HTTP e `/health`
-continuam disponíveis sem os pesos carregados; a próxima solicitação cria outro
-processo. No modo gerenciado, o prazo segue `agent.idle_unload_secs` (1–3600).
-Um comando em processamento não é interrompido por essa liberação por inatividade.
-O limite `timeout_secs` inclui carregamento e inferência; timeout ou desconexão
-do pedido encerra o processo de inferência.
+The model can be reused between nearby commands. After 60 seconds without a command
+by default, the bridge terminates and reaps the inference process, returning weight
+memory to the system. Calling the SDK's `close()` alone did not guarantee this,
+because the runtime retained global native state. The HTTP server and `/health`
+remain available without loaded weights; the next request creates another process.
+In managed mode, the delay follows `agent.idle_unload_secs` (1–3600). An in-progress
+command is not interrupted by this idle release. The `timeout_secs` limit includes
+loading and inference; request timeout or disconnection terminates the inference
+process.
 
-O adaptador reutiliza o catálogo enquanto ele é igual e reinicia o histórico de
-cada comando. A telemetria opcional é desabilitada por `NEEDLE_TELEMETRY=0` e
-`DO_NOT_TRACK=1`. O motor nativo fica fora do processo Rust, isolando sua memória
-do roteamento de áudio, sem afirmar que dependências nativas sejam escritas em Rust.
+The adapter reuses the catalog while it is unchanged and resets history for each
+command. Optional telemetry is disabled with `NEEDLE_TELEMETRY=0` and
+`DO_NOT_TRACK=1`. The native engine remains outside the Rust process, isolating
+its memory from audio routing without claiming native dependencies are written in Rust.
 
-Para autenticar o adaptador, configure `needle_api_key_env` com uma referência de credencial, por exemplo `BABEL_NEEDLE_TOKEN`. No modo gerenciado, o Babel passa essa credencial ao próprio helper. No modo externo, disponibilize o mesmo segredo aos dois processos e inicie o bridge com `--api-key-env BABEL_NEEDLE_TOKEN`. O adaptador rejeita requisições originadas diretamente por páginas do navegador; apenas o backend local faz as chamadas.
+To authenticate the adapter, configure `needle_api_key_env` with a credential reference such as `BABEL_NEEDLE_TOKEN`. In managed mode, Babel passes that credential to the helper itself. In external mode, make the same secret available to both processes and start the bridge with `--api-key-env BABEL_NEEDLE_TOKEN`. The adapter rejects requests originating directly from browser pages; only the local backend makes calls.
 
-Inferência de voz aceita somente HTTP(S) em endereço literal de loopback ou `localhost`, sem proxy nem redirecionamentos. Integrações MCP têm suas próprias regras e podem acessar serviços remotos autenticados.
+Voice inference accepts only HTTP(S) at a literal loopback address or `localhost`, without proxies or redirects. MCP integrations have their own rules and may access authenticated remote services.
 
-## Configuração
+## Configuration
 
 ```toml
 [agent]
@@ -456,43 +451,43 @@ timeout_secs = 20
 vad_threshold = 0.012
 ```
 
-- `whisper_endpoint` e `needle_endpoint`: `auto` para helpers gerenciados e portas escolhidas pelo SO; URL explícita para serviço externo local. Portas descobertas aparecem no status, sem substituir `auto` na configuração.
-- `whisper_model`: modelo do Whisper gerenciado; padrão `base-q5_1`, com alternativa legada descrita acima. Não troca o modelo de um servidor externo.
-- `local_threads`: 1–32, padrão 2, limitado às CPUs disponíveis; somente o Whisper gerenciado dos comandos.
-- `idle_unload_secs`: 1–3600 segundos, padrão 60. Libera os helpers quando o microfone deixa de ser elegível e, independentemente disso, os pesos Needle depois do último comando. O filtro de silêncio não torna um microfone elegível inativo para essa política.
-- `services_directory`: vazio usa a pasta absoluta do TOML carregado; um valor personalizado deve ser absoluto e conter a estrutura de instalação acima. Não depende da pasta de onde o app foi iniciado.
-- `min_confidence`: limiar de execução, de 0 a 1. Needle sem confiança numérica, com `suppressed_calls`, com `validation.ungrounded`, com negação sinalizada ou sem chamadas resulta em recusa. O intervalo 0–1 ajusta a política do Babel; o runtime possui sua própria recusa interna, documentada para confiança abaixo de 0,1 e falhas de fundamentação. `complete()` não expõe um parâmetro para desligar essa recusa, e chamadas em `suppressed_calls` não são promovidas a execução. Um limiar é uma escolha do aplicativo, não garantia de acerto.
-- `max_calls`: de uma a oito chamadas por comando. O padrão é quatro.
-- `silence_ms`: silêncio que encerra uma fala, de 200 a 2000 ms. Uma pausa mais curta melhora a resposta, mas pode dividir frases naturais.
-- `max_utterance_ms`: limite de fala, de 1000 a 15000 ms. Falas acima dele são descartadas em vez de executar um comando cortado.
-- `command_window_secs`: prazo após dizer somente o nome, de dois a trinta segundos.
-- `timeout_secs`: limite para cada requisição/etapa de rede, de um a 120 segundos.
-- `vad_threshold`: energia mínima normalizada, de 0,0001 a 0,5. Aumentar reduz ruído e pode perder fala baixa.
-- `desktop_notifications`: habilita o painel nativo de estados fora das configurações, com notificações do sistema como alternativa. Desligar oculta o aviso atual; reativar não reproduz comandos antigos. Não altera a escuta, o roteamento nem os detalhes na página Comandos.
+- `whisper_endpoint` and `needle_endpoint`: `auto` for managed helpers and OS-selected ports; an explicit URL for a local external service. Discovered ports appear in status without replacing `auto` in configuration.
+- `whisper_model`: managed Whisper model; default `base-q5_1`, with the legacy fallback described above. Does not change an external server's model.
+- `local_threads`: 1–32, default 2, capped by available CPUs; only managed command Whisper.
+- `idle_unload_secs`: 1–3600 seconds, default 60. Releases helpers when the microphone becomes ineligible and, independently, Needle weights after the last command. The silence filter does not make an eligible microphone inactive for this policy.
+- `services_directory`: empty uses the absolute directory of the loaded TOML; a custom value must be absolute and contain the installation structure above. It does not depend on the application's starting folder.
+- `min_confidence`: execution threshold from 0 to 1. Needle without numeric confidence, with `suppressed_calls`, with `validation.ungrounded`, with a negation flag, or without calls results in refusal. The 0–1 interval adjusts Babel's policy; the runtime has its own internal refusal, documented for confidence below 0.1 and grounding failures. `complete()` exposes no parameter to disable that refusal, and calls in `suppressed_calls` are not promoted to execution. A threshold is an application choice, not a correctness guarantee.
+- `max_calls`: one to eight calls per command. Default four.
+- `silence_ms`: silence ending an utterance, from 200 to 2000 ms. A shorter pause improves responsiveness but may split natural sentences.
+- `max_utterance_ms`: utterance limit, from 1000 to 15000 ms. Longer utterances are discarded instead of executing a truncated command.
+- `command_window_secs`: deadline after saying only the name, from two to thirty seconds.
+- `timeout_secs`: limit for each network request/stage, from one to 120 seconds.
+- `vad_threshold`: minimum normalized energy, from 0.0001 to 0.5. Increasing it reduces noise but may miss quiet speech.
+- `desktop_notifications`: enables the native state panel outside settings, with system notifications as fallback. Turning it off hides the current notice; re-enabling does not replay old commands. It changes neither listening, routing, nor details on the Commands page.
 
-A interface guarda as referências de credenciais e as integrações na configuração do agente. Os valores de chaves devem ser fornecidos pelo painel ou ambiente. Os textos da interface seguem o idioma do aplicativo; `whisper_language` controla somente o reconhecimento da voz.
+The interface stores credential references and integrations in agent configuration. Key values must be provided through the dashboard or environment. Interface text follows the application language; `whisper_language` controls only speech recognition.
 
-## Integrações MCP e autenticação
+## MCP integrations and authentication
 
-Adicione várias integrações no painel de configurações do agente, habilitando somente aquelas cujas ferramentas deseja disponibilizar. O catálogo é construído a partir de `tools/list`; o modelo não inventa nomes nem executa comandos de shell diretamente. Duas ferramentas com o mesmo nome em servidores diferentes recebem identidades distintas. Quando não há integrações habilitadas, nenhuma ação externa pode ser executada.
+Add multiple integrations in the agent settings dashboard, enabling only those whose tools you want to make available. The catalog is built from `tools/list`; the model does not invent names or execute shell commands directly. Two tools with the same name on different servers receive distinct identities. With no enabled integrations, no external action can be executed.
 
-Para um servidor **stdio**, informe executável e argumentos separadamente, diretório de trabalho se necessário e variáveis de ambiente. Use referências a credenciais para valores secretos. O Babel inicia o executável diretamente, sem interpolar uma linha em shell.
+For a **stdio** server, enter the executable and arguments separately, a working directory if needed, and environment variables. Use credential references for secret values. Babel starts the executable directly without interpolating a shell command line.
 
-Para um servidor **HTTP MCP**, informe seu endpoint Streamable HTTP e selecione autenticação sem chave, Bearer ou OAuth conforme o servidor. Bearer usa uma referência de credencial; OAuth usa o fluxo de conectar/autorizar do painel, com os scopes e client ID/client secret que o servidor exigir. Não confunda a autenticação MCP com a chave do adaptador Needle. A disponibilidade de uma ferramenta depende da integração conectada e das permissões concedidas pelo provedor.
+For an **HTTP MCP** server, enter its Streamable HTTP endpoint and select no-key, Bearer, or OAuth authentication according to the server. Bearer uses a credential reference; OAuth uses the dashboard's connect/authorize flow with the scopes and client ID/client secret required by the server. Do not confuse MCP authentication with the Needle adapter key. Tool availability depends on the connected integration and permissions granted by the provider.
 
-As ferramentas e seus resultados são dados. Resultados de uma ferramenta não viram instruções para novas ações autônomas: esta versão executa o plano da fala inicial e exibe o resultado. Planos que dependem do resultado de uma ferramenta anterior exigem um novo comando do usuário.
+Tools and their results are data. Tool results do not become instructions for new autonomous actions: this version executes the initial utterance's plan and displays its result. Plans depending on the result of an earlier tool require a new user command.
 
-## Limites e operação
+## Limits and operation
 
-- O reconhecimento ocorre após silêncio e inferência local; não há promessa de despertar instantâneo. Voz baixa, fala simultânea, sotaques e ruído podem produzir transcrição incorreta. A ativação não identifica nem autentica o locutor.
-- Não há filtro acústico de eco nem autenticação por voz. Áudio reproduzido perto do microfone pode ser captado por ele, embora o Babel nunca envie diretamente a sua rota de saída ao agente.
-- Os esquemas ajudam a restringir argumentos, mas nenhum modelo garante intenção correta. Verifique a qualidade do Needle com suas ferramentas e idiomas. Pesos personalizados sem confiança calibrada são recusados pela política atual.
-- O catálogo aceita até 128 ferramentas e até 256 KiB de requisição. O Needle possui recuperação interna para catálogos grandes; descrições claras e catálogos menores facilitam escolhas corretas.
-- O agente descarta áudio com mais de 500 ms na fila e segmentos antigos, mantém somente um segmento aguardando ASR, limita resposta JSON a 256 KiB e nunca bloqueia a rota de áudio esperando IA.
-- Ativar o agente não ativa salvamento de transcrição ou gravação. A transcrição temporária de reconhecimento fica em memória; só o comando e o resultado atual aparecem no status. O adaptador não registra texto/argumentos em logs.
-- Fechar o painel não encerra o Babel nem seu agente. Sair normalmente encerra roteamento, escuta e os helpers gerenciados. Servidores configurados por endpoint explícito continuam sob administração externa.
+- Recognition occurs after silence and local inference; instant wake-up is not promised. Quiet speech, overlapping speakers, accents, and noise may produce incorrect transcription. Activation neither identifies nor authenticates the speaker.
+- There is no acoustic echo filter or voice authentication. Audio played near the microphone may be captured by it, although Babel never sends its output route directly to the agent.
+- Schemas help constrain arguments, but no model guarantees correct intent. Check Needle's quality with your tools and languages. Custom weights without calibrated confidence are refused by the current policy.
+- The catalog accepts up to 128 tools and requests up to 256 KiB. Needle has internal retrieval for large catalogs; clear descriptions and smaller catalogs make correct choices easier.
+- The agent discards queued audio older than 500 ms and old segments, retains only one segment awaiting ASR, limits JSON responses to 256 KiB, and never blocks the audio route waiting for AI.
+- Enabling the agent does not enable transcript or recording storage. Temporary recognition text stays in memory; only the current command and result appear in status. The adapter does not log text/arguments.
+- Closing the dashboard does not stop Babel or its agent. Normal exit stops routing, listening, and managed helpers. Servers configured through explicit endpoints remain externally managed.
 
-## Verificação de desenvolvimento
+## Development verification
 
 ```bash
 cargo test --lib commands::
@@ -502,37 +497,37 @@ python3 -m unittest discover -s scripts -p test_needle_bridge.py -v
 python3 -m unittest discover -s scripts -p test_setup_whisper.py -v
 ```
 
-A suíte usa áudio sintético e servidores locais simulados para verificar palavra inteira/endereço, fala em duas etapas, recusa, argumentos inválidos, cancelamento, troca de microfone, limites de fila e contrato do helper. Esses testes não executam ações em contas reais nem medem a acurácia de um modelo carregado.
+The suite uses synthetic audio and simulated local servers to check whole-word matching/addressing, two-stage speech, refusal, invalid arguments, cancellation, microphone switching, queue limits, and the helper contract. These tests neither perform actions in real accounts nor measure a loaded model's accuracy.
 
-Os testes de feedback verificam comandos que terminam rapidamente, retenção do
-resultado para a página, descarte de eventos antigos, desativação/troca de
-microfone, protocolo limitado do helper, tempos de exibição, movimento reduzido
-e renderização em escalas/temas diferentes. São testes determinísticos sem
-captura do microfone; não substituem a verificação visual de janelas, foco e
-políticas de notificações em cada desktop. Compilar e executar testes no CI de
-macOS/Windows não comprova, por si só, essa validação visual em hardware.
+Feedback tests check rapidly completed commands, result retention for the page,
+discarding old events, disabling/microphone switching, the bounded helper protocol,
+display durations, reduced motion, and rendering at different scales/themes.
+These are deterministic tests without microphone capture; they do not replace
+visual verification of windows, focus, and notification policies on each desktop.
+Building and running tests in macOS/Windows CI does not itself establish that
+visual validation on hardware.
 
-### Inferência real verificada neste ambiente
+### Real inference verified in this environment
 
-Além dos testes simulados, foi carregado o pacote oficial `cactus-needle==3.0.6` em um ambiente isolado e chamado o `Planner.complete` do helper com uma única ferramenta fictícia de consulta de clima. Nenhuma ferramenta foi executada. O modelo produziu corretamente `city=Lisbon` para a pergunta em inglês e `city=Lisboa` para a pergunta em português. A confiança foi 0,9417 em inglês e 0,5413 em português; portanto, **o limiar padrão de 0,85 recusaria esse exemplo em português**. Isso demonstra a integração real e uma limitação concreta de acurácia/confiança, não uma certificação dos idiomas.
+Beyond simulated tests, the official `cactus-needle==3.0.6` package was loaded in an isolated environment, and the helper's `Planner.complete` was called with one fictional weather lookup tool. No tool was executed. The model correctly produced `city=Lisbon` for the English question and `city=Lisboa` for the Portuguese question. Confidence was 0.9417 in English and 0.5413 in Portuguese; therefore, **the default 0.85 threshold would refuse this Portuguese example**. This demonstrates real integration and a concrete accuracy/confidence limitation, not language certification.
 
-A chamada inicial levou 13,751 segundos incluindo preparação/download/carregamento, e a chamada seguinte em português levou 4,355 segundos neste host. O runtime relatou pico de RAM de 153,6 MB. Esses valores dependem da máquina e do catálogo; não são uma promessa de latência. A capacidade de manter áudio encaminhado não depende dessa inferência. Ações em serviços MCP externos continuam dependendo das integrações e credenciais do usuário.
+The initial call took 13.751 seconds including preparation/download/loading, and the following Portuguese call took 4.355 seconds on this host. The runtime reported peak RAM of 153.6 MB. These values depend on the machine and catalog; they are not a latency promise. The ability to keep audio forwarded does not depend on that inference. Actions in external MCP services still depend on the user's integrations and credentials.
 
-O Whisper v1.9.4 com o patch foi compilado e testado neste Linux com CPU
-Intel i7-12700H, quatro threads e modelo `base` multilíngue. O servidor recebeu
-uma porta do SO, publicou o marcador e passou pelos dois testes de identidade.
-Transcreveu corretamente o sample público JFK incluído no projeto, sem capturar
-o microfone: um trecho de quatro segundos levou 4,81 s na primeira inferência e
-3,46 s na seguinte; o sample de onze segundos levou 3,30 s. O RSS observado foi
-aproximadamente 245 MiB. Isso demonstra execução real e também um atraso
-perceptível em CPU; não mede precisão para todo idioma nem comprova desempenho
-em macOS, Windows ou GPU.
+Whisper v1.9.4 with the patch was built and tested on this Linux host with an
+Intel i7-12700H CPU, four threads, and the multilingual `base` model. The server
+received an OS-assigned port, published the marker, and passed both identity
+checks. It correctly transcribed the public JFK sample included in the project,
+without microphone capture: a four-second interval took 4.81 s on first inference
+and 3.46 s on the next; the eleven-second sample took 3.30 s. Observed RSS was
+approximately 245 MiB. This demonstrates real execution and noticeable CPU delay;
+it does not measure accuracy for every language or prove performance on macOS,
+Windows, or GPU.
 
-Em 29/09/2026, uma comparação com dois threads neste Linux transcreveu o sample
-JFK inteiro da mesma forma com Base original e Base Q5_1. O RSS após inferência
-foi de 245.268 para 156.728 KiB, com tempos de 2,19 s e 2,14 s, respectivamente.
-O modelo quantizado ocupa 59.707.625 bytes, contra 147.951.465 do original.
-São medições pontuais de uma amostra em inglês, sem captura de microfone;
-não demonstram a mesma precisão em português nem desempenho em outras máquinas.
-A escolha segue o suporte de [quantização do whisper.cpp](https://github.com/ggml-org/whisper.cpp#quantization),
-com versões e hashes fixados no catálogo do Babel.
+On 2026-09-29, a two-thread comparison on this Linux host transcribed the complete
+JFK sample identically with original Base and Base Q5_1. Post-inference RSS fell
+from 245,268 to 156,728 KiB, with times of 2.19 s and 2.14 s, respectively.
+The quantized model occupies 59,707,625 bytes, compared with 147,951,465 for the
+original. These are individual measurements of one English sample, without
+microphone capture; they do not demonstrate equal Portuguese accuracy or performance
+on other machines. The choice follows [whisper.cpp quantization support](https://github.com/ggml-org/whisper.cpp#quantization),
+with versions and hashes pinned in Babel's catalog.

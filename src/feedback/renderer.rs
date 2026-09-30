@@ -971,8 +971,8 @@ mod tests {
         FeedbackMessage {
             activation_id: id,
             phase,
-            title: "Comando reconhecido".into(),
-            detail: "Babel está ouvindo".into(),
+            title: "Command recognized".into(),
+            detail: "Babel is listening".into(),
             motion: true,
         }
     }
@@ -1040,7 +1040,7 @@ mod tests {
         let mut reader = std::io::BufReader::with_capacity(2, bytes.as_slice());
         assert_eq!(
             read_message(&mut reader).unwrap().unwrap().title,
-            "Comando reconhecido"
+            "Command recognized"
         );
         assert!(read_message(&mut reader).unwrap().is_none());
         let oversized = vec![b'x'; MAX_LINE + 1];

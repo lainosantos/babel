@@ -321,7 +321,7 @@
   "interface.using": "Usando {language}. Isso altera apenas a interface.",
   "interface.saved": "Idioma da interface salvo.",
   "interface.unavailable": "Não foi possível carregar o idioma da interface: {error}",
-  "help.portuguese": "Documentação em português",
+  "help.documentation": "Documentação em inglês",
   "error.http": "A operação falhou (HTTP {status}).",
   "device.virtual": "{name} · virtual",
   "device.unavailable": "{name} · indisponível",

@@ -78,7 +78,7 @@ async fn supervise_original(
         let playback = devices.playback.borrow().clone();
         ensure!(
             !capture.trim().is_empty() && !playback.trim().is_empty(),
-            "A passagem de áudio exige dispositivos explícitos de captura e reprodução"
+            "Audio passthrough requires explicit capture and playback devices"
         );
         let format = tokio::select! {
             biased;
@@ -175,7 +175,7 @@ async fn run_route_inner(
     let playback = devices.playback.borrow().clone();
     ensure!(
         !capture.trim().is_empty() && !playback.trim().is_empty(),
-        "A passagem de áudio exige dispositivos explícitos de captura e reprodução"
+        "Audio passthrough requires explicit capture and playback devices"
     );
     // A failed route cancels its own workers, never its supervisor's token.
     let cancel = cancel.child_token();
@@ -200,7 +200,7 @@ async fn run_route_inner(
                 worker_stats,
             )
             .await
-            .context("Captura da passagem original")
+            .context("Original passthrough capture")
         },
         &runtime,
     );
@@ -217,7 +217,7 @@ async fn run_route_inner(
                 worker_stats,
             )
             .await
-            .context("Reprodução da passagem original")
+            .context("Original passthrough playback")
         },
         &runtime,
     );
@@ -246,16 +246,16 @@ async fn run_route_inner(
         _=cancel.cancelled()=>Ok(()),
         completed=jobs.join_next()=>match completed {
             Some(Ok(Err(error)))=>Err(error),
-            Some(Err(error))=>Err(anyhow!(error).context("Worker da passagem original interrompido")),
+            Some(Err(error))=>Err(anyhow!(error).context("Original passthrough worker interrupted")),
             _ if cancel.is_cancelled()=>Ok(()),
-            _=>Err(anyhow!("A passagem original encerrou inesperadamente")),
+            _=>Err(anyhow!("Original passthrough ended unexpectedly")),
         },
     };
     cancel.cancel();
     let shutdown = tokio::time::timeout(Duration::from_secs(3), async {
         while let Some(completed) = jobs.join_next().await {
             let completed = completed
-                .context("Worker da passagem original interrompido")
+                .context("Original passthrough worker interrupted")
                 .and_then(|r| r);
             if result.is_ok() && completed.is_err() {
                 result = completed;
@@ -267,7 +267,7 @@ async fn run_route_inner(
         jobs.abort_all();
         while jobs.join_next().await.is_some() {}
         return Err(anyhow!(
-            "A passagem original não encerrou seus dispositivos dentro de 3 segundos"
+            "Original passthrough did not stop its devices within 3 seconds"
         ));
     }
     result
@@ -348,14 +348,14 @@ pub(crate) async fn forward_original(
             frame = captured.recv() => match frame {
                 Some(frame) => frame,
                 None if cancel.is_cancelled() => return Ok(()),
-                None => return Err(anyhow!("A captura da passagem original foi encerrada")),
+                None => return Err(anyhow!("Original passthrough capture ended")),
             },
         };
         ensure!(
             frame.sample_rate == options.sample_rate
                 && frame.channels == options.channels
                 && frame.samples.len() == options.frame_samples(),
-            "Formato PCM inesperado na passagem original"
+            "Unexpected PCM format in original passthrough"
         );
         if frame.captured_at.elapsed() > Duration::from_millis(100) {
             stats.dropped_frames.fetch_add(1, Ordering::Relaxed);
@@ -372,7 +372,7 @@ pub(crate) async fn forward_original(
             }
             Err(mpsc::error::TrySendError::Closed(_)) if cancel.is_cancelled() => return Ok(()),
             Err(mpsc::error::TrySendError::Closed(_)) => {
-                return Err(anyhow!("A reprodução da passagem original foi encerrada"));
+                return Err(anyhow!("Original passthrough playback ended"));
             }
         }
         let level = (frame
@@ -473,6 +473,17 @@ mod tests {
         cancel.cancel();
         worker.await.unwrap().unwrap();
     }
+    // A heavily loaded host can expire a synthetic frame before the bridge
+    // processes it. Report the missing delivery instead of hanging the suite.
+    async fn next_history_playback(
+        receiver: &mut mpsc::Receiver<PlaybackCommand>,
+    ) -> PlaybackCommand {
+        tokio::time::timeout(Duration::from_secs(2), receiver.recv())
+            .await
+            .expect("history fixture playback timed out; the synthetic frame may have expired")
+            .expect("history fixture playback channel closed")
+    }
+
     #[tokio::test]
     async fn original_history_resamples_without_changing_live_playback() {
         let (capture_tx, capture_rx) = mpsc::channel(2);
@@ -494,7 +505,9 @@ mod tests {
         });
         for _ in 0..2 {
             capture_tx.send(frame(4000)).await.unwrap();
-            let Some(PlaybackCommand::Original { samples, .. }) = play_rx.recv().await else {
+            let PlaybackCommand::Original { samples, .. } =
+                next_history_playback(&mut play_rx).await
+            else {
                 panic!("missing original playback")
             };
             assert_eq!(samples.as_ref(), vec![4000.0 / 32768.0; 480]);
@@ -546,7 +559,7 @@ mod tests {
             .await
         });
         capture_tx.send(frame(10000)).await.unwrap();
-        assert!(play_rx.recv().await.is_some());
+        let _ = next_history_playback(&mut play_rx).await;
         tokio::time::timeout(Duration::from_secs(1), async {
             while history.snapshot(600, Instant::now()).frames.is_empty() {
                 tokio::task::yield_now().await;
@@ -559,11 +572,11 @@ mod tests {
             ..HistoryConfig::default()
         });
         capture_tx.send(frame(20000)).await.unwrap();
-        assert!(play_rx.recv().await.is_some());
+        let _ = next_history_playback(&mut play_rx).await;
         assert!(history.snapshot(600, Instant::now()).frames.is_empty());
         history.configure(&HistoryConfig::default());
         capture_tx.send(frame(0)).await.unwrap();
-        assert!(play_rx.recv().await.is_some());
+        let _ = next_history_playback(&mut play_rx).await;
         tokio::time::timeout(Duration::from_secs(1), async {
             while history.snapshot(600, Instant::now()).frames.is_empty() {
                 tokio::task::yield_now().await;
@@ -670,7 +683,7 @@ mod tests {
             .await
             .unwrap_err()
             .to_string()
-            .contains("captura")
+            .contains("capture")
         );
         let (tx, rx) = mpsc::channel(1);
         let (play_tx, _play_rx) = mpsc::channel(1);
