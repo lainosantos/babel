@@ -52,10 +52,12 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          if ! command -v Xvfb >/dev/null; then
-            sudo apt-get update
-            sudo apt-get install -y --no-install-recommends xvfb
-          fi
+          # winit and softbuffer load these desktop libraries at runtime, so
+          # successful linking (or Xvfb already being installed) is insufficient.
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            xvfb libx11-6 libx11-xcb1 libxcursor1 libxi6 \
+            libxkbcommon0 libxkbcommon-x11-0
           python scripts/test_native_feedback.py --xvfb "$(command -v Xvfb)" 2>&1 | tee artifacts/native-feedback-window.log
       - name: Preserve test evidence
         if: always()

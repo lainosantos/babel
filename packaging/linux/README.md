@@ -30,7 +30,7 @@ sem a variável, o timestamp é zero. Para uma versão de exemplo `0.1.0`, gera:
 - `babel-audio-0.1.0-linux-amd64.tar.gz`;
 - `babel-audio-0.1.0-linux-amd64.manifest.json`, com SHA-256 dos artefatos.
 
-A geração inspeciona os dois executáveis como ELF amd64 e extrai seus requisitos
+A geração inspeciona os três executáveis como ELF amd64 e extrai seus requisitos
 de glibc. Uma biblioteca dinâmica desconhecida interrompe o build até receber
 um mapeamento de dependência explícito. Gerar em Ubuntu 22.04 amplia a compatibilidade;
 compilar em uma distribuição mais nova pode exigir glibc mais nova também.
@@ -62,6 +62,11 @@ O helper opcional Needle fica em
 
 Dependências declaradas: glibc compatível com o build, `libgcc-s1` quando usado
 pelos binários, `libstdc++6` para os motores nativos, `pulseaudio-utils`, `xdg-utils` e um provedor de D-Bus de sessão.
+O painel nativo de comandos também declara `libx11-6`, `libx11-xcb1`, `libxcursor1`,
+`libxi6`, `libxkbcommon0` e `libxkbcommon-x11-0`. São bibliotecas padrão do desktop,
+carregadas em execução; por isso não aparecem necessariamente em `ldd` ou no
+`NEEDED` do executável. O pacote as declara explicitamente. Xvfb é usado somente
+nos testes de CI e não é dependência de execução do aplicativo.
 O servidor `pipewire-pulse` ou `pulseaudio` aparece somente como **Suggests**:
 o pacote Babel não deve escolher, substituir ou iniciar seu servidor de áudio.
 Use o servidor já configurado no desktop. A bandeja precisa de suporte
@@ -83,8 +88,11 @@ Em openSUSE, use `sudo zypper install ./babel-audio-0.1.0-1.x86_64.rpm`.
 O RPM instala os mesmos arquivos, launcher e unidade de usuário do DEB.
 Declara glibc compatível, a biblioteca `libgcc_s.so.1` quando usada, `/bin/sh`,
 D-Bus e as ferramentas pelos caminhos `/usr/bin/pactl`, `/usr/bin/parec`,
-`/usr/bin/pacat` e `/usr/bin/xdg-open`. O gerenciador resolve os pacotes que
-fornecem esses caminhos. Um desktop com servidor PulseAudio/PipeWire-pulse e
+`/usr/bin/pacat` e `/usr/bin/xdg-open`. Para o painel de comandos, também exige as
+capacidades de bibliotecas de 64 bits `libX11.so.6`, `libX11-xcb.so.1`,
+`libXcursor.so.1`, `libXi.so.6`, `libxkbcommon.so.0` e `libxkbcommon-x11.so.0`.
+O gerenciador resolve os pacotes que fornecem esses caminhos e bibliotecas.
+Um desktop com servidor PulseAudio/PipeWire-pulse e
 suporte à bandeja deve já estar configurado. O RPM não escolhe nem inicia o
 servidor de áudio, e não possui scriptlets ou triggers de instalação/remoção.
 
@@ -129,7 +137,8 @@ Instale as ferramentas PulseAudio da sua distribuição (`pactl`, `parec`, `paca
 `xdg-open` e D-Bus de sessão. Em Debian/Ubuntu, se preferir o tarball:
 
 ```sh
-sudo apt install pulseaudio-utils xdg-utils dbus-user-session
+sudo apt install pulseaudio-utils xdg-utils dbus-user-session \
+  libx11-6 libx11-xcb1 libxcursor1 libxi6 libxkbcommon0 libxkbcommon-x11-0
 ```
 
 Verifique no manifesto a glibc mínima e mantenha um servidor PulseAudio ou
@@ -145,6 +154,11 @@ se copiado manualmente para `~/.config/systemd/user`, seu `ExecStart` precisa
 apontar para o caminho absoluto e devidamente escapado do launcher extraído.
 O autostart do aplicativo usa a integração empacotada somente quando ela está
 instalada e validada; para uma extração portátil, prefira o autostart XDG.
+
+O painel nativo usa X11 ou XWayland. Sem essas bibliotecas ou sem um display X11
+disponível, o processo principal permanece funcionando e tenta apresentar os
+estados dos comandos pelas notificações do desktop. Os pacotes DEB/RPM garantem
+as bibliotecas; uma sessão Wayland sem XWayland continua usando essa alternativa.
 
 ## Primeiro uso e configuração
 

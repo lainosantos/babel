@@ -5,6 +5,7 @@ This optional Linux integration check uses only Python's standard library. The
 cross-platform renderer snapshot smoke test does not need an X server.
 """
 import argparse
+import ctypes
 import json
 import os
 from pathlib import Path
@@ -35,6 +36,14 @@ def read_line(descriptor, timeout=15):
 
 
 def run(helper, xvfb):
+    # These are dlopened by winit/softbuffer, not exposed by `ldd helper`.
+    # Name an absent desktop runtime before starting an opaque GUI subprocess.
+    for library in ["libX11.so.6", "libX11-xcb.so.1", "libXcursor.so.1", "libXi.so.6",
+                    "libxkbcommon.so.0", "libxkbcommon-x11.so.0"]:
+        try:
+            ctypes.CDLL(library)
+        except OSError as error:
+            raise RuntimeError(f"Native feedback desktop runtime unavailable: {library}") from error
     read_fd, write_fd = os.pipe()
     with tempfile.TemporaryFile() as display_log, tempfile.TemporaryFile() as helper_log:
         server = subprocess.Popen(
@@ -76,6 +85,20 @@ def run(helper, xvfb):
             assert child.wait(timeout=10) == 0, "Native feedback did not close cleanly on stdin EOF"
             assert child.stdout.read() == b"", "Helper unexpectedly wrote more protocol output"
             print("Native feedback: private X11 readiness, four phases, dismissal and EOF passed")
+        except Exception:
+            # Only this isolated synthetic test's subprocess logs are printed.
+            # Never read application logs or user audio/configuration; bound the
+            # combined diagnostic output even if a display server becomes noisy.
+            remaining = 8192
+            for label, log in [("feedback helper", helper_log), ("private Xvfb", display_log)]:
+                log.seek(0)
+                diagnostics = log.read(remaining)
+                remaining -= len(diagnostics)
+                if diagnostics:
+                    print(f"{label}:\n{diagnostics.decode('utf-8', errors='replace')}", file=sys.stderr)
+            if child is not None:
+                print(f"Feedback helper exit status: {child.poll()}", file=sys.stderr)
+            raise
         finally:
             os.close(read_fd)
             if child is not None and child.poll() is None:

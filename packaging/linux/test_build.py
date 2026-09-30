@@ -10,6 +10,7 @@ import subprocess
 import tarfile
 import tempfile
 import unittest
+from unittest import mock
 
 HERE = Path(__file__).resolve().parent
 spec = importlib.util.spec_from_file_location("babel_linux_build", HERE / "build.py")
@@ -18,6 +19,27 @@ spec.loader.exec_module(build)
 
 
 class PolicyTests(unittest.TestCase):
+    def test_native_feedback_desktop_runtimes_are_declared_even_without_elf_needed_entries(self):
+        debian = {"libx11-6", "libx11-xcb1", "libxcursor1", "libxi6",
+                  "libxkbcommon0", "libxkbcommon-x11-0"}
+        rpm = {f"{library}()(64bit)" for library in [
+            "libX11.so.6", "libX11-xcb.so.1", "libXcursor.so.1", "libXi.so.6",
+            "libxkbcommon.so.0", "libxkbcommon-x11.so.0",
+        ]}
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            binaries = root / "bin"
+            binaries.mkdir()
+            for name in build.BINARIES:
+                (binaries / name).write_bytes(b"inspected fixture, never executed")
+            # Model a binary linked only to glibc: dlopen dependencies must not
+            # disappear merely because readelf/ldd do not list desktop libraries.
+            with mock.patch.object(build, "elf_runtime", return_value=({"libc.so.6"}, {(2, 35)})):
+                manifest = build.stage_payload(binaries, root / "payload", "0.0.0")
+            self.assertTrue(debian.issubset(manifest["depends"]))
+            self.assertTrue(rpm.issubset(manifest["rpm_requires"]))
+            self.assertEqual(manifest["needed_libraries"], ["libc.so.6"])
+
     def test_versions_cannot_escape_staging_or_inject_debian_fields(self):
         self.assertEqual(build.package_version("1.2.3-rc.1+ci.4"), "1.2.3-rc.1+ci.4")
         self.assertEqual(build.deb_version("1.2.3-rc.1"), "1.2.3~rc.1")
@@ -164,6 +186,8 @@ class ArchiveTests(unittest.TestCase):
             self.assertIn(f"libc6 (>= {report['glibc_minimum']})", fields)
             self.assertIn("Suggests: pipewire-pulse | pulseaudio", fields)
             self.assertNotIn("Recommends:", fields)
+            for dependency in build.NATIVE_FEEDBACK_LIBRARIES.values():
+                self.assertIn(dependency, fields)
             tar = root / "artifacts/babel-audio-0.0.0-test.1-linux-amd64.tar.gz"
             with tarfile.open(tar, "r:gz") as archive:
                 prefix = "babel-audio-0.0.0-test.1-linux-amd64"
@@ -184,6 +208,8 @@ class ArchiveTests(unittest.TestCase):
             requirements = build.run("rpm", "-qp", "--requires", rpm).stdout
             self.assertIn(f"glibc >= {report['glibc_minimum']}", requirements)
             self.assertIn("/usr/bin/pactl", requirements)
+            for library in build.NATIVE_FEEDBACK_LIBRARIES:
+                self.assertIn(f"{library}()(64bit)", requirements.splitlines())
             self.assertEqual(build.run("rpm", "-qp", "--scripts", rpm).stdout.strip(), "")
             # Independent staging/build roots must yield byte-identical outputs.
             second = build.build(binaries, root / "second output", "0.0.0-test.1")
