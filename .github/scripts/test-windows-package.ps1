@@ -42,7 +42,7 @@ try {
         Invoke-Wait $uninstaller @('/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART',('/LOG="'+$uninstallLog+'"'))
     }
 }
-foreach ($name in @('babel.exe','babel-tray.exe','drivers\windows\babel-driver-installer.exe')) {
+foreach ($name in @('babel.exe','babel-tray.exe','babel-feedback.exe','drivers\windows\babel-driver-installer.exe')) {
     if (Test-Path -LiteralPath (Join-Path $destination $name)) { throw "Uninstall left a program payload: $name" }
 }
 Write-Host 'Actual x64 installer payload, CLI startup, absent driver and uninstall verified.'
