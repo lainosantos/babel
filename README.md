@@ -1,5 +1,9 @@
 # Babel
 
+[Website](https://lainosantos.github.io/babel/) ·
+[Documentation](https://lainosantos.github.io/babel/docs/index.html) ·
+[Releases](https://github.com/lainosantos/babel/releases)
+
 Virtual microphone and audio output for bidirectional speech translation. The
 core, AI adapters, dashboard server and tray controls are written in Rust. Each
 direction can use a different translation provider and voice. Transcription
