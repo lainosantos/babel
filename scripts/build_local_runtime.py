@@ -25,7 +25,7 @@ import zipfile
 
 ROOT = Path(__file__).resolve().parents[1]
 LOCK = Path(__file__).with_name("local_runtime.lock.json")
-PATCHES = {"whisper": "whisper-dynamic-port.patch", "llama": "llama-readiness.patch", "piper": "piper-managed.patch"}
+PATCHES = {"whisper": "whisper-dynamic-port.patch", "llama": "llama-readiness.patch", "piper": "piper-managed.patch", "espeak": "espeak-windows-io.patch"}
 
 
 def digest(path):
@@ -343,7 +343,7 @@ def build(args):
             copy_regular(path, payload / "sources/scripts" / path.name)
         for patch in PATCHES.values():
             copy_regular(ROOT / "scripts/patches" / patch, payload / "sources/scripts/patches" / patch)
-        (payload / "sources/README.txt").write_text("Corresponding source for the separate GPL-3.0 Piper/eSpeak subprocess is included here. Extract the two source archives and apply scripts/patches/piper-managed.patch. scripts/build_local_runtime.py and scripts/local_runtime.lock.json record the exact build flags and all dependency hashes. Build requires CMake 3.26+ (4.2+ when using Visual Studio 2026), a C++17 compiler (Visual Studio ClangCL tools on Windows ARM64), Git and Python 3.11+; none is required by the installed application. Whisper/llama.cpp/ONNX Runtime are MIT licensed. The Babel application communicates through separate-process IPC. Voice model licenses are supplied with model downloads.\n")
+        (payload / "sources/README.txt").write_text("Corresponding source for the separate GPL-3.0 Piper/eSpeak subprocess is included here. Extract the two source archives and apply scripts/patches/piper-managed.patch to Piper and scripts/patches/espeak-windows-io.patch to eSpeak. scripts/build_local_runtime.py and scripts/local_runtime.lock.json record the exact build flags and all dependency hashes. Build requires CMake 3.26+ (4.2+ when using Visual Studio 2026), a C++17 compiler (Visual Studio ClangCL tools on Windows ARM64), Git and Python 3.11+; none is required by the installed application. Whisper/llama.cpp/ONNX Runtime are MIT licensed. The Babel application communicates through separate-process IPC. Voice model licenses are supplied with model downloads.\n")
         if system == "windows":
             windows_runtime(payload, arch)
         elif system == "macos":

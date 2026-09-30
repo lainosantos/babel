@@ -1,0 +1,15 @@
+diff --git a/src/espeak-ng.c b/src/espeak-ng.c
+index 2ea3791..25f98dc 100644
+--- a/src/espeak-ng.c
++++ b/src/espeak-ng.c
+@@ -31,6 +31,10 @@
+ #include <fcntl.h>
+ #include <time.h>
+
++#ifdef _WIN32
++#include <io.h>
++#endif
++
+ #include <espeak-ng/espeak_ng.h>
+ #include <espeak-ng/speak_lib.h>
+
