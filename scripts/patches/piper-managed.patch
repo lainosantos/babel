@@ -87,6 +87,15 @@
        textToWavFile(piper, &local_options, line.c_str(), std::cout);
 --- a/libpiper/CMakeLists.txt
 +++ b/libpiper/CMakeLists.txt
+@@ -26,7 +26,7 @@
+
+ set(UCD_TOOLS_DIR ${ESPEAKNG_BUILD_DIR}/src/espeak_ng_external-build/src/ucd-tools)
+
+-if(CMAKE_CXX_COMPILER_ID STREQUAL "MSVC")
++if(MSVC)
+     # MSVC emits .lib files (espeak-ng is re-exported from piper.dll)
+     set(ESPEAKNG_STATIC_LIB ${ESPEAKNG_INSTALL_DIR}/lib/espeak-ng.lib)
+     set(UCD_STATIC_LIB ${UCD_TOOLS_DIR}/${UCD_CONFIG_SUBDIR}ucd.lib)
 @@ -36,12 +36,19 @@
  endif()
  
