@@ -1,3 +1,16 @@
+diff --git a/src/compat/getopt.c b/src/compat/getopt.c
+index 8585446..63653a2 100644
+--- a/src/compat/getopt.c
++++ b/src/compat/getopt.c
+@@ -41,7 +41,7 @@
+ #define REPLACE_GETOPT
+
+ #define _DIAGASSERT(x) assert(x)
+-#define __UNCONST(x) (char *)(x)
++#define __UNCONST(x) ((void *)(x))
+
+ #ifdef REPLACE_GETOPT
+ #ifdef __weak_alias
 diff --git a/src/espeak-ng.c b/src/espeak-ng.c
 index 2ea3791..25f98dc 100644
 --- a/src/espeak-ng.c
