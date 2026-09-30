@@ -1497,71 +1497,119 @@ mod tests {
 
     #[tokio::test]
     async fn session_files_write_real_txt_and_wav_under_base_and_absolute_override() {
-        let launch = tempfile::tempdir().unwrap();
-        let external = tempfile::tempdir().unwrap();
         for absolute_override in [false, true] {
+            for (transcribe, record) in [(true, false), (false, true), (true, true)] {
+                let launch = tempfile::tempdir().unwrap();
+                let external = tempfile::tempdir().unwrap();
+                let base = launch.path().join("new/base/archive");
+                let destination_base = if absolute_override {
+                    external.path().join("new/external/archive")
+                } else {
+                    base.clone()
+                };
+                let text_directory = destination_base.join("text/original");
+                let audio_directory = destination_base.join("audio/original");
+                let mut cfg = AppConfig::default();
+                cfg.files.base_path = base.to_str().unwrap().into();
+                cfg.transcription.enabled = transcribe;
+                cfg.transcription.directory = if absolute_override {
+                    text_directory.to_str().unwrap().into()
+                } else {
+                    "text/original".into()
+                };
+                cfg.recording.enabled = record;
+                cfg.recording.directory = if absolute_override {
+                    audio_directory.to_str().unwrap().into()
+                } else {
+                    "audio/original".into()
+                };
+                cfg.microphone.capture_device = "test-mic".into();
+                cfg.microphone.playback_device = "test-virtual-mic".into();
+                cfg.speaker.capture_device = "test-virtual-speaker".into();
+                cfg.speaker.playback_device = "test-speaker".into();
+                let before = toml::to_string(&cfg).unwrap();
+                let session = crate::session::SessionIdentity::new(Some("Storage test")).unwrap();
+                let stem = session.file_stem(&cfg.files.name_pattern).unwrap();
+                let origin = Instant::now() - Duration::from_secs(1);
+                assert!(!base.exists() && !destination_base.exists());
+                let files = create_session_files(&cfg, &session, origin).await.unwrap();
+                assert_eq!(files.transcript.is_some(), transcribe);
+                assert_eq!(files.audio.is_some(), record);
+                if let Some(transcript) = files.transcript {
+                    let (text_tx, text_rx) = mpsc::channel(1);
+                    text_tx
+                        .send(TranscriptRecord::Text {
+                            input: true,
+                            text: "original speech".into(),
+                            metadata: crate::provider::TranscriptMetadata::default(),
+                            received_at: "2026-09-29T12:00:00Z".into(),
+                        })
+                        .await
+                        .unwrap();
+                    drop(text_tx);
+                    transcript.run(text_rx).await.unwrap();
+                    let text =
+                        tokio::fs::read_to_string(text_directory.join(format!("{stem}.txt")))
+                            .await
+                            .unwrap();
+                    assert!(text.contains("original speech"));
+                    assert_eq!(text_directory.read_dir().unwrap().count(), 1);
+                } else {
+                    assert!(!destination_base.join("text").exists());
+                }
+                if let Some(audio) = files.audio {
+                    let expected_audio = audio_directory.join(format!("{stem}.wav"));
+                    assert_eq!(audio.path(), expected_audio);
+                    let (audio_tx, audio_rx) = mpsc::channel(1);
+                    audio_tx
+                        .send(AudioRecord {
+                            lane: RecordingLane::Microphone,
+                            samples: vec![1000; 320],
+                            captured_at: origin + Duration::from_millis(20),
+                        })
+                        .await
+                        .unwrap();
+                    drop(audio_tx);
+                    audio.run(audio_rx).await.unwrap();
+                    let mut wav = hound::WavReader::open(expected_audio).unwrap();
+                    assert_eq!(wav.spec().channels, 1);
+                    assert!(wav.samples::<i16>().any(|sample| sample.unwrap() != 0));
+                    assert_eq!(audio_directory.read_dir().unwrap().count(), 1);
+                } else {
+                    assert!(!destination_base.join("audio").exists());
+                }
+                assert_eq!(base.exists(), !absolute_override);
+                assert_eq!(toml::to_string(&cfg).unwrap(), before);
+                assert!(!launch.path().join("text").exists());
+                assert!(!launch.path().join("audio").exists());
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn session_files_report_blocked_directories_without_replacing_existing_data() {
+        for transcribe in [false, true] {
+            let root = tempfile::tempdir().unwrap();
+            let blocker = root.path().join("existing-file");
+            let existing = b"Existing user data must remain unchanged";
+            tokio::fs::write(&blocker, existing).await.unwrap();
             let mut cfg = AppConfig::default();
-            cfg.files.base_path = launch.path().join("archive").to_str().unwrap().into();
-            cfg.transcription.enabled = true;
-            cfg.transcription.directory = "text".into();
-            cfg.recording.enabled = true;
-            cfg.recording.directory = if absolute_override {
-                external.path().to_str().unwrap().into()
-            } else {
-                "audio".into()
-            };
+            cfg.files.base_path = root.path().to_str().unwrap().into();
+            cfg.transcription.enabled = transcribe;
+            cfg.transcription.directory = "existing-file/nested/text".into();
+            cfg.recording.enabled = !transcribe;
+            cfg.recording.directory = "existing-file/nested/audio".into();
             cfg.microphone.capture_device = "test-mic".into();
             cfg.microphone.playback_device = "test-virtual-mic".into();
-            cfg.speaker.capture_device = "test-virtual-speaker".into();
-            cfg.speaker.playback_device = "test-speaker".into();
-            let before = toml::to_string(&cfg).unwrap();
-            let session = crate::session::SessionIdentity::new(Some("Storage test")).unwrap();
-            let stem = session.file_stem(&cfg.files.name_pattern).unwrap();
-            let origin = Instant::now() - Duration::from_secs(1);
-            let files = create_session_files(&cfg, &session, origin).await.unwrap();
-            let transcript = files.transcript.unwrap();
-            let audio = files.audio.unwrap();
-            let expected_audio = if absolute_override {
-                external.path().join(format!("{stem}.wav"))
-            } else {
-                launch.path().join(format!("archive/audio/{stem}.wav"))
-            };
-            assert_eq!(audio.path(), expected_audio);
-            let (text_tx, text_rx) = mpsc::channel(1);
-            text_tx
-                .send(TranscriptRecord::Text {
-                    input: true,
-                    text: "original speech".into(),
-                    metadata: crate::provider::TranscriptMetadata::default(),
-                    received_at: "2026-09-29T12:00:00Z".into(),
-                })
+            let session = crate::session::SessionIdentity::new(Some("Blocked folder")).unwrap();
+            let error = create_session_files(&cfg, &session, Instant::now())
                 .await
-                .unwrap();
-            drop(text_tx);
-            transcript.run(text_rx).await.unwrap();
-            let (audio_tx, audio_rx) = mpsc::channel(1);
-            audio_tx
-                .send(AudioRecord {
-                    lane: RecordingLane::Microphone,
-                    samples: vec![1000; 320],
-                    captured_at: origin + Duration::from_millis(20),
-                })
-                .await
-                .unwrap();
-            drop(audio_tx);
-            audio.run(audio_rx).await.unwrap();
-            let text =
-                tokio::fs::read_to_string(launch.path().join(format!("archive/text/{stem}.txt")))
-                    .await
-                    .unwrap();
-            assert!(text.contains("original speech"));
-            let mut wav = hound::WavReader::open(expected_audio).unwrap();
-            assert_eq!(wav.spec().channels, 1);
-            assert!(wav.samples::<i16>().any(|sample| sample.unwrap() != 0));
-            assert_eq!(toml::to_string(&cfg).unwrap(), before);
+                .err()
+                .expect("A file used as a parent directory must fail");
+            assert!(error.downcast_ref::<std::io::Error>().is_some());
+            assert_eq!(tokio::fs::read(&blocker).await.unwrap(), existing);
+            assert_eq!(root.path().read_dir().unwrap().count(), 1);
         }
-        assert!(!launch.path().join("text").exists());
-        assert!(!launch.path().join("audio").exists());
     }
 
     #[tokio::test]

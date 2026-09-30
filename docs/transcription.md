@@ -263,6 +263,11 @@ Configure também `files.base_path` com um caminho absoluto válido no sistema,
 por exemplo `/home/usuario/Babel`, `/Users/usuario/Babel` ou `C:\Users\usuario\Babel`.
 Consulte [configuração](configuration.md) para o padrão do nome e a resolução de
 pastas; o destino não depende de onde o aplicativo foi iniciado.
+O caminho não precisa existir previamente. Ao iniciar uma sessão com transcrição,
+o Babel cria recursivamente a pasta de destino e todos os diretórios pais que
+faltarem, inclusive a base, no Linux, macOS e Windows. Isso também funciona com
+gravação de áudio desligada. Só há erro de acesso ao destino quando não é possível
+criar a pasta ou abrir o arquivo; a simples inexistência da pasta não impede a sessão.
 
 ## Arquivo, roteamento e limites
 

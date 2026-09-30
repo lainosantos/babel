@@ -472,9 +472,17 @@ movem nem apagam arquivos existentes.
   padrão não significa expansão de `~`, `$HOME` ou `%USERPROFILE%` nos campos:
   informe o caminho completo. No Windows, a base precisa de unidade completa ou
   UNC; formas ambíguas como `C:pasta` e `\pasta` são rejeitadas.
-- A prévia não cria pastas nem testa permissão de escrita. O início da sessão
-  cria as pastas necessárias e reporta falhas antes da captura. Links simbólicos
-  são seguidos pelo sistema de arquivos; a prévia não os resolve.
+- A pasta base e as pastas de destino não precisam existir previamente. Ao
+  iniciar uma sessão com gravação ou transcrição, o Babel cria recursivamente
+  todos os diretórios que faltarem no destino daquele recurso, inclusive os
+  diretórios pais da base. Isso também vale para destinos absolutos próprios,
+  no Linux, macOS e Windows. Pastas existentes são reutilizadas.
+- A prévia e o salvamento da configuração não criam pastas nem testam permissão
+  de escrita. Um destino inexistente, por si só, não é erro: a sessão só falha
+  se não conseguir criar a pasta ou abrir o arquivo, por exemplo por falta de
+  permissão ou por haver um arquivo no lugar de um diretório. Destinos de
+  recursos desligados não são criados. Links simbólicos são seguidos pelo
+  sistema de arquivos; a prévia não os resolve.
 
 Exemplos de base absoluta em TOML (aspas simples preservam as barras do Windows):
 

@@ -53,8 +53,11 @@ novas usam `Babel` dentro da pasta pessoal (`HOME` ou `USERPROFILE`), sem depend
 do diretório de execução. Uma pasta `directory` relativa usa essa base, e uma
 pasta `directory` absoluta usa seu próprio destino.
 O painel mostra os caminhos completos antes de salvar. A prévia não cria pastas
-nem verifica permissões; elas são verificadas ao criar os arquivos no início da
-sessão. Alterar a base não move arquivos existentes. Bases relativas antigas são
+nem verifica permissões. No início da gravação, o Babel cria recursivamente a
+pasta de destino e todos os diretórios pais que faltarem, inclusive a pasta base.
+Não é necessário criá-los manualmente: a inexistência não é erro; a impossibilidade
+de criar a pasta ou abrir o arquivo é. Isso vale para Linux, macOS e Windows.
+Alterar a base não move arquivos existentes. Bases relativas antigas são
 convertidas uma vez contra a pasta do TOML e salvas como absolutas. Se o diretório
 de execução antigo era diferente, confira o destino antes de gravar. Veja as
 [regras e exemplos para cada sistema](configuration.md#pasta-base-e-destinos).
