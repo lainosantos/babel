@@ -14,16 +14,16 @@ npm test
 ```
 
 `jsdom` is a test-only dependency. HTTP responses are simulated in memory:
-tests do not access providers, use the user's audio or create real voices.
+tests do not access providers or use the user's audio.
 
-Tests cover independent profiles, continuous-model restrictions, voice
-selection, escaping remote content, temporary keys, session names, explicit
+Tests cover independent profiles, continuous-model restrictions, native default
+voices, the absence of custom voice APIs, temporary keys, session names, explicit
 login startup, independent text and recording, filename patterns and tray
 changes synchronized without overwriting drafts. Saving and starting use the
 configuration revision to reject concurrent changes. Regressions cover original
 audio without a session, recording or transcription with both translations off,
 and safely presented routing errors. Rust tests in `src/dashboard.rs` cover
-authentication, local origins, upload limits and non-persistence of credentials.
+authentication, local origins, request limits and non-persistence of credentials.
 
 ## Interface language
 
@@ -31,7 +31,7 @@ The header selector offers **System default**, **English** and **Português**.
 It works during a session and saves only `interface.language`, without starting,
 stopping or reconfiguring audio. The preference uses the process/system locale
 resolved by the backend at `/api/interface`, never the browser's
-`navigator.language`. Speech languages, prompts, session/voice names,
+`navigator.language`. Speech languages, prompts, session names,
 transcripts, devices and files are user content and do not change with the
 interface language.
 
@@ -56,10 +56,10 @@ To add a language:
    backend tests. Help documents use English regardless of interface language.
 
 Language changes update text and attributes without rebuilding forms: drafts,
-focus, cloning files and open dialogs are preserved. `If-Match` protects
+focus and expanded options are preserved. `If-Match` protects
 concurrent changes; saving a preference updates the local revision without
 saving audio drafts. Tests include English/Portuguese, fallback, switching during
-a session or editing, conflicts, upload preservation and catalog coverage.
+a session or editing, conflicts, draft preservation and catalog coverage.
 
 ## Voice commands and MCP
 
@@ -107,14 +107,15 @@ failure/recovery and changing language while editing.
 
 ## Workspace organization
 
-The dashboard has six views: routing, translation and voices, transcription,
+The dashboard has six views: routing, translation, transcription,
 recording, voice commands and host settings. The session bar stays available
 while navigating. Fields remain in the same forms; changing view or language
 does not rebuild inputs, discard drafts or start/stop audio.
 
-Routing groups devices and meters. Translation and voices groups languages,
-prompts, providers, credentials and the library. Transcription and recording
-retain their own sources and destinations. The shared base folder and filename
+Routing groups devices and meters. Translation groups languages, prompts,
+providers and credentials; both directions use the model’s native default voice.
+Transcription and recording retain their own sources and destinations. The shared
+base folder and filename
 pattern live in Settings, linked from both pages. `data-workspace-field`
 reveals a target field, opens its details and moves focus, including shortcuts
 to the same page. Old navigation names migrate without changing settings.

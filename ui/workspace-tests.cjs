@@ -13,15 +13,15 @@ async function workspace(t, options = {}) {
     <nav aria-label="Workspace">${views.map(view => `<button id="nav-${view}" class="nav-item" data-workspace-target="${view}"><span>${view}</span></button>`).join('')}</nav>
     <main><h1 id="page-title">Audio routing</h1><p id="page-description"></p><div id="error" hidden></div>
     <form id="configuration"><fieldset id="settings">
-      <section id="workspace-routing" class="workspace-panel" data-workspace-panel="routing"><label><span>Physical microphone</span><select id="physical-mic"><option value="mic1">Mic one</option><option value="mic2">Mic two</option></select></label><button type="button" id="voice-shortcut" data-workspace-target="voices">Choose a voice</button><button type="button" id="mic-provider-shortcut" data-workspace-target="translation" data-workspace-field="microphone-provider">Microphone provider</button></section>
-      <section id="workspace-translation" class="workspace-panel" data-workspace-panel="translation"><label><span>Microphone language</span><input id="mic-language" required value="pt-BR"></label><textarea id="voice-style">Calm and clear</textarea><select id="microphone-provider"><option value="gemini">Gemini</option><option value="openai">OpenAI</option></select><button type="button" id="profile-shortcut" data-workspace-target="translation" data-workspace-field="profile-selector">Provider settings</button><select id="profile-selector"><option value="gemini">Gemini</option><option value="openai">OpenAI</option></select><details id="provider-details"><summary>Connection</summary><section class="provider-profile" id="profile-gemini"><input id="gemini-endpoint" value="https://example.test"></section><section class="provider-profile" id="profile-openai" hidden><label><span>OpenAI endpoint</span><input id="openai-endpoint" type="url" required value="https://api.example.test"></label></section></details></section>
+      <section id="workspace-routing" class="workspace-panel" data-workspace-panel="routing"><label><span>Physical microphone</span><select id="physical-mic"><option value="mic1">Mic one</option><option value="mic2">Mic two</option></select></label><button type="button" id="translation-shortcut" data-workspace-target="translation">Translation settings</button><button type="button" id="mic-provider-shortcut" data-workspace-target="translation" data-workspace-field="microphone-provider">Microphone provider</button></section>
+      <section id="workspace-translation" class="workspace-panel" data-workspace-panel="translation"><label><span>Microphone language</span><input id="mic-language" required value="pt-BR"></label><textarea id="translation-prompt">Calm and clear</textarea><select id="microphone-provider"><option value="gemini">Gemini</option><option value="openai">OpenAI</option></select><button type="button" id="profile-shortcut" data-workspace-target="translation" data-workspace-field="profile-selector">Provider settings</button><select id="profile-selector"><option value="gemini">Gemini</option><option value="openai">OpenAI</option></select><details id="provider-details"><summary>Connection</summary><section class="provider-profile" id="profile-gemini"><input id="gemini-endpoint" value="https://example.test"></section><section class="provider-profile" id="profile-openai" hidden><label><span>OpenAI endpoint</span><input id="openai-endpoint" type="url" required value="https://api.example.test"></label></section></details></section>
       <section id="workspace-transcription" class="workspace-panel" data-workspace-panel="transcription"><label><span>Transcript folder</span><input id="transcription-directory" value="transcripts"></label><button type="button" id="transcript-folder-shortcut" data-workspace-target="settings" data-workspace-field="files-base_path">Common folder</button></section>
       <section id="workspace-recording" class="workspace-panel" data-workspace-panel="recording"><input id="recording-directory" value="recordings"><button type="button" id="recording-folder-shortcut" data-workspace-field="files-base_path">Common folder</button></section>
       <section id="workspace-settings-files" class="workspace-panel" data-workspace-panel="settings"><label><span>Base folder</span><input id="files-base_path" required value="/home/test/Babel"></label><details id="file-details"><summary>Files</summary><label><span>Filename pattern</span><input id="file-pattern" required value="{session}-{id}"></label></details></section>
     </fieldset></form>
     <section id="workspace-commands" class="workspace-panel" data-workspace-panel="commands"><form id="agent-form"><details id="agent-details"><summary>Local service</summary><label><span>Speech service</span><input id="agent-endpoint" type="url" required value="http://127.0.0.1:8080"></label></details></form></section>
     <section id="workspace-settings" class="workspace-panel" data-workspace-panel="settings"><label><span>Start at login</span><input id="autostart-enabled" type="checkbox"></label></section>
-    </main><section class="session-dock">Session controls</section><dialog id="voice-library"><div class="dialog-header"><h2>Voice library</h2></div><input id="voice-upload" type="file"><textarea id="voice-description"></textarea></dialog>
+    </main><section class="session-dock">Session controls</section><dialog id="test-dialog"><div class="dialog-header"><h2>Test dialog</h2></div><input id="test-upload" type="file"><textarea id="test-description"></textarea></dialog>
     </body></html>`;
   const dom = new JSDOM(html, { url: 'http://127.0.0.1:9473/#token=fixture', runScripts: 'outside-only', pretendToBeVisual: true });
   t.after(() => dom.window.close());
@@ -44,11 +44,11 @@ async function workspace(t, options = {}) {
 test('six views switch immediately without backend requests or remounting controls, uploads and dialogs', async t => {
   const p = await workspace(t, { beforeLanguage: true });
   assert.equal(p.api.current, 'routing'); assert.equal(p.byId('page-title').textContent, 'Audio routing');
-  const input = p.byId('mic-language'); const style = p.byId('voice-style'); const file = p.byId('voice-upload');
+  const input = p.byId('mic-language'); const style = p.byId('translation-prompt'); const file = p.byId('test-upload');
   input.value = 'ja-JP'; p.byId('physical-mic').value = 'mic2'; style.value = 'My unsaved style';
-  const recording = new p.window.File(['fixture'], 'voice.wav', { type: 'audio/wav' });
+  const recording = new p.window.File(['fixture'], 'fixture.wav', { type: 'audio/wav' });
   Object.defineProperty(file, 'files', { value: [recording] });
-  p.byId('voice-library').open = true; p.byId('voice-description').value = 'Custom voice';
+  p.byId('test-dialog').open = true; p.byId('test-description').value = 'Draft text';
   for (const view of views) {
     p.nav(view).click(); assert.equal(p.api.current, view);
     assert.equal(p.doc.querySelectorAll('.nav-item[aria-current="page"]').length, 1);
@@ -58,8 +58,8 @@ test('six views switch immediately without backend requests or remounting contro
   }
   assert.equal(p.byId('mic-language'), input); assert.equal(input.value, 'ja-JP');
   assert.equal(p.byId('physical-mic').value, 'mic2'); assert.equal(style.value, 'My unsaved style');
-  assert.equal(p.byId('voice-upload'), file); assert.equal(file.files[0], recording);
-  assert.equal(p.byId('voice-library').open, true); assert.equal(p.byId('voice-description').value, 'Custom voice');
+  assert.equal(p.byId('test-upload'), file); assert.equal(file.files[0], recording);
+  assert.equal(p.byId('test-dialog').open, true); assert.equal(p.byId('test-description').value, 'Draft text');
   assert.equal(p.byId('settings').disabled, false); assert.equal(p.requests.length, 0);
   assert.equal(p.window.location.hash, '#token=fixture');
 });
@@ -96,7 +96,7 @@ test('keyboard arrows and Home/End navigate normal buttons with aria-current and
 });
 
 test('internal shortcuts and saved views work when storage is available, denied or invalid', async t => {
-  const p = await workspace(t); p.byId('voice-shortcut').focus(); p.byId('voice-shortcut').click();
+  const p = await workspace(t); p.byId('translation-shortcut').focus(); p.byId('translation-shortcut').click();
   assert.equal(p.api.current, 'translation'); assert.equal(p.doc.activeElement, p.byId('page-title'));
   assert.equal(p.window.sessionStorage.getItem('babel-workspace-view'), 'translation');
   let scrolls = 0; p.doc.documentElement.scrollTo = options => { assert.equal(options.top, 0); scrolls++; };
@@ -117,11 +117,11 @@ test('legacy stored views and navigate aliases migrate to canonical views withou
     assert.equal(p.api.current, canonical);
     assert.equal(p.window.sessionStorage.getItem('babel-workspace-view'), canonical);
     assert.equal(p.nav(canonical).getAttribute('aria-current'), 'page');
-    p.byId('voice-style').value = 'Preserve voice draft';
+    p.byId('translation-prompt').value = 'Preserve prompt draft';
     p.api.navigate('settings');
     assert.equal(p.api.navigate(legacy), true);
     assert.equal(p.api.current, canonical);
-    assert.equal(p.byId('voice-style').value, 'Preserve voice draft');
+    assert.equal(p.byId('translation-prompt').value, 'Preserve prompt draft');
     assert.equal(p.requests.length, 0);
   }
   const p = await workspace(t, { stored: 'transcription' });
@@ -135,7 +135,7 @@ test('field shortcuts reveal and focus the actual control even within the curren
   const scrolls = [];
   for (const id of targets) p.byId(id).scrollIntoView = options => { assert.equal(options.block, 'center'); scrolls.push(id); };
   let topScrolls = 0; p.doc.documentElement.scrollTo = () => { topScrolls++; };
-  const voice = p.byId('voice-style'); voice.value = 'Unsaved voice';
+  const prompt = p.byId('translation-prompt'); prompt.value = 'Unsaved prompt';
   p.byId('mic-provider-shortcut').click();
   assert.equal(p.api.current, 'translation'); assert.equal(p.doc.activeElement, p.byId('microphone-provider'));
   p.byId('profile-shortcut').click();
@@ -147,7 +147,7 @@ test('field shortcuts reveal and focus the actual control even within the curren
   assert.equal(p.api.current, 'settings'); assert.equal(p.doc.activeElement, p.byId('files-base_path'));
   assert.deepEqual(scrolls, ['microphone-provider', 'profile-selector', 'files-base_path', 'files-base_path']);
   assert.equal(topScrolls, 0, 'field shortcuts must scroll to their target rather than reset the page');
-  assert.equal(p.byId('voice-style'), voice); assert.equal(voice.value, 'Unsaved voice');
+  assert.equal(p.byId('translation-prompt'), prompt); assert.equal(prompt.value, 'Unsaved prompt');
   assert.equal(p.requests.length, 0);
 });
 
@@ -174,7 +174,7 @@ test('field shortcuts reveal hidden provider details and tolerate missing target
 
 test('save validation reveals only the first invalid field, including its details, without changing drafts', async t => {
   const p = await workspace(t);
-  p.byId('mic-language').value = ''; p.byId('file-pattern').value = ''; p.byId('voice-style').value = 'Keep this';
+  p.byId('mic-language').value = ''; p.byId('file-pattern').value = ''; p.byId('translation-prompt').value = 'Keep this';
   p.nav('settings').click();
   assert.equal(p.api.reportValidity(p.byId('configuration')), false);
   assert.equal(p.api.current, 'translation'); assert.equal(p.doc.activeElement, p.byId('mic-language'));
@@ -183,7 +183,7 @@ test('save validation reveals only the first invalid field, including its detail
   p.byId('mic-language').value = 'pt-BR';
   assert.equal(p.api.reportValidity(p.byId('configuration')), false);
   assert.equal(p.api.current, 'settings'); assert.equal(p.byId('file-details').open, true); assert.equal(p.doc.activeElement, p.byId('file-pattern'));
-  assert.equal(p.byId('voice-style').value, 'Keep this');
+  assert.equal(p.byId('translation-prompt').value, 'Keep this');
   p.byId('file-pattern').value = '{id}'; p.byId('file-pattern').dispatchEvent(new p.window.Event('input', { bubbles: true }));
   assert.equal(p.byId('workspace-validation').hidden, true); assert.equal(p.byId('file-pattern').hasAttribute('aria-invalid'), false);
   assert.equal(p.api.reportValidity(p.byId('configuration')), true);
@@ -218,17 +218,17 @@ test('validation opens transcription and recording separately and reveals common
   assert.equal(p.api.reportValidity(p.byId('configuration')), true);
 });
 
-test('agent validation and modal validation open the right controls without closing the voice library', async t => {
+test('agent validation and modal validation open the right controls without closing a separate dialog', async t => {
   const p = await workspace(t, { language: 'pt' });
   p.byId('agent-endpoint').value = '';
   const invalid = new p.window.Event('invalid', { cancelable: true }); p.byId('agent-endpoint').dispatchEvent(invalid);
   assert.equal(p.api.current, 'commands'); assert.equal(p.byId('agent-details').open, true);
   assert.equal(p.doc.activeElement, p.byId('agent-endpoint')); assert.match(p.byId('workspace-validation').textContent, /Revise/);
-  p.byId('voice-library').open = true; p.byId('voice-description').required = true;
-  assert.equal(p.api.reportValidity(p.byId('voice-description')), false);
-  assert.equal(p.byId('voice-library').open, true);
-  assert.equal(p.byId('workspace-validation-voice-library').hidden, false);
-  assert.equal(p.doc.activeElement, p.byId('voice-description'));
+  p.byId('test-dialog').open = true; p.byId('test-description').required = true;
+  assert.equal(p.api.reportValidity(p.byId('test-description')), false);
+  assert.equal(p.byId('test-dialog').open, true);
+  assert.equal(p.byId('workspace-validation-test-dialog').hidden, false);
+  assert.equal(p.doc.activeElement, p.byId('test-description'));
 });
 
 test('the session dock reserves its measured height and observes only size changes without touching drafts', async t => {
@@ -240,14 +240,14 @@ test('the session dock reserves its measured height and observes only size chang
   const style = p.doc.documentElement.style;
   assert.equal(style.getPropertyValue('--session-dock-height'), '101px');
   assert.deepEqual(observed, [p.doc.querySelector('.session-dock')]);
-  p.byId('voice-style').value = 'Unsaved voice'; p.nav('recording').click();
+  p.byId('translation-prompt').value = 'Unsaved prompt'; p.nav('recording').click();
   let writes = 0; const setProperty = style.setProperty.bind(style);
   style.setProperty = (...args) => { writes++; return setProperty(...args); };
   callback(); assert.equal(writes, 0);
   height = 210.5; callback();
   assert.equal(style.getPropertyValue('--session-dock-height'), '211px'); assert.equal(writes, 1);
   callback(); assert.equal(writes, 1);
-  assert.equal(p.byId('voice-style').value, 'Unsaved voice'); assert.equal(p.api.current, 'recording');
+  assert.equal(p.byId('translation-prompt').value, 'Unsaved prompt'); assert.equal(p.api.current, 'recording');
   const fallback = await workspace(t);
   assert.equal(fallback.doc.documentElement.style.getPropertyValue('--session-dock-height'), '');
   fallback.doc.querySelector('.session-dock').getBoundingClientRect = () => ({ height: 150 });

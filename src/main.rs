@@ -102,7 +102,6 @@ async fn run(cli: Cli, command: Command) -> Result<()> {
             for (name, profile) in [
                 ("Gemini", &cfg.providers.gemini),
                 ("OpenAI", &cfg.providers.openai),
-                ("ElevenLabs", &cfg.providers.elevenlabs),
             ] {
                 println!(
                     "{name}: model={}, credential {}: {}",

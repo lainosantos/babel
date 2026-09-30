@@ -8,9 +8,9 @@ The dashboard separates controls into six pages:
   for each direction. Original audio forwarding works without starting a session.
   The microphone activates when Babel is the system default or an application
   uses it; output activates when an application sends audio to Babel.
-- **Translation and voices:** enable translation for each direction, choose
-  languages, providers, and voices, and configure shared AI profiles and credentials.
-  The voice library is on this page.
+- **Translation:** enable translation for each direction, choose languages and
+  providers, and configure shared AI profiles, supported prompts and credentials.
+  Both directions use the selected model's native default voice.
 - **Transcription:** choose each source's recognizer and language, configure its
   profiles and credentials, optional timestamps, and TXT folder, and follow the
   most recently received segments.
@@ -22,8 +22,8 @@ The dashboard separates controls into six pages:
 **Transcription** and **Recording** have a **Base folder and filenames** shortcut
 to **Settings → Session files**. Features remain independent: you can record or
 transcribe without enabling translation. Transcription has its own providers,
-models, languages, endpoints, and credentials, independently of **Translation
-and voices**. Changing pages preserves unsaved settings.
+models, languages, endpoints, and credentials, independently of **Translation**.
+Changing pages preserves unsaved settings.
 
 ## Interface language
 
@@ -41,7 +41,7 @@ language = "system" # system, en, or pt
 
 The choice is saved immediately and can change during a session while preserving
 capture, playback, AI connections, the session name, and open files. It does not
-change speech/translation languages, prompts, voices, or drafts of other settings.
+change speech/translation languages, prompts, or drafts of other settings.
 Older configuration files without an `interface` section use `system`.
 User-provided text, device names, technical identifiers, transcripts, and external
 provider/system messages are not translated. Technical documentation linked from
@@ -58,11 +58,10 @@ values, and incompatible capability combinations are errors. Writes use a tempor
 file and atomic replacement. On Unix, newly created configuration, transcript,
 and recording files have permission 0600.
 
-There are four translation/synthesis profiles: `providers.gemini`,
-`providers.openai`, `providers.elevenlabs`, and `providers.local`. Each direction
-selects its translator in `microphone.provider` or `speaker.provider`. For example,
-you can use Gemini for the microphone and OpenAI for output. ElevenLabs is a
-**synthesizer**; it is not listed as a speech-to-speech translator in this application.
+There are three translation profiles: `providers.gemini`, `providers.openai`,
+and `providers.local`. Each direction selects its translator in
+`microphone.provider` or `speaker.provider`. For example, you can use Gemini
+for the microphone and OpenAI for output. Both use their model's native audio.
 
 Original recognition uses `transcription.providers.gemini`, `.openai`, `.deepgram`,
 or `.whisper`. The selections are `transcription.microphone_recognition` and
@@ -82,7 +81,7 @@ enabling translation or transcription and configuring the profile. New
 configurations submitted through the API do not accept `loopback`.
 
 Each cloud profile has an `api_key_env`. Defaults are `GEMINI_API_KEY`,
-`OPENAI_API_KEY`, `ELEVENLABS_API_KEY`, and `DEEPGRAM_API_KEY`. STT and translation
+`OPENAI_API_KEY`, and `DEEPGRAM_API_KEY`. STT and translation
 can use different names to keep accounts/keys separate. Whisper accepts an
 optional variable name for HTTP services requiring authentication.
 There are two ways to provide a key:
@@ -96,7 +95,7 @@ There are two ways to provide a key:
   `$env:GEMINI_API_KEY='your-key'`. The dashboard shows only presence/absence.
 
 Removing the temporary key makes the program fall back to the environment variable,
-if present. Do not write keys in prompts, endpoints, voice names, or configuration
+if present. Do not write keys in prompts, endpoints, or configuration
 files. Credentials already used in an active session are reapplied on the next
 connection; stop/restart the stream when changing accounts. `doctor` checks
 presence, not remote validity, credits, or model access.
@@ -147,39 +146,18 @@ The dashboard shows **Original audio** when only forwarding is active and
 without a session. Configure both ends of every route you want to use; a device
 selection does not change the system's global default output.
 
-## Translators and voices are separate choices
+## Translators and native voices
 
-A direction's `provider` chooses its translator. `voice.engine` chooses the source
-of its final voice:
+A direction's `provider` chooses its translator. The microphone and incoming
+output both use that translator's native default voice; there is no separate
+voice selector or synthesis profile. Gemini and OpenAI requests omit fixed
+voice overrides. The embedded local translator always runs Whisper → Qwen →
+Piper, choosing the Piper catalog default for the target language. An external
+Piper endpoint uses the service's own default voice.
 
-| Voice engine | Behavior |
-|---|---|
-| `native` | Uses the translator's audio. This path has the fewest stages. |
-| `gemini` | Receives translated text in memory and synthesizes it with Gemini TTS. |
-| `elevenlabs` | Receives translated text in memory and synthesizes it with ElevenLabs. |
-
-`voice.voice_id` is the voice identifier in the synthesizer's library. A Gemini
-voice is not interchangeable with an ElevenLabs ID. In native conversational mode,
-this field may contain a preset voice from that model. For dedicated translation
-models, leave it empty: those APIs do not accept native selection of a fixed voice.
-
-`voice.style` is a style prompt for Gemini TTS, not a translation prompt. It is
-rejected for the implemented ElevenLabs endpoint and native mode instead of being
-ignored. `voice.chunk_ms` limits waiting from the first pending text fragment
-before sending an incomplete segment to TTS, from 100 to 2000 ms. Punctuated
-sentences may be sent earlier; long segments are split at word boundaries.
-A small value may fragment prosody and increase request counts/costs.
-
-The Live translator continues generating audio when a TTS voice is used. The
-adapter discards that audio; its output transcription is used only in memory
-for synthesis. This mode may therefore charge for **Live translation and TTS**
-and increases latency. Only original text requested by the user is saved.
-In the local pipeline, Piper is skipped when external TTS supplies the final voice.
-
-To create a voice, open the library, choose Gemini or ElevenLabs, and use design
-or cloning. Read [the dedicated guide](voices.md) before preparing files.
-Babel accepts multiple profiles returned by the service and existing IDs. It does
-not secretly enroll participants during capture.
+Legacy voice fields are accepted only to load older configurations, then ignored
+and omitted from saved JSON/TOML. They cannot enable additional synthesis or
+change the model's voice. See [native voices and migration](voices.md).
 
 Whenever transcription is enabled for a source, its STT recognizer receives
 original audio, including when translation is active. Defaults are
@@ -215,8 +193,8 @@ of voice-command listening.
 For local translation, `whisper_endpoint`, `ollama_endpoint`, and `piper_endpoint`
 each accept `"auto"`. Managed models are Whisper (`whisper_model`: `tiny-q5_1`,
 `base-q5_1`, or `small-q5_1`; `tiny`, `base`, and `small` remain valid), Qwen
-(`translation_model`: `qwen3-0.6b`), and Piper (`piper_voice = "auto"` follows the
-target language). The legacy name `ollama_endpoint` remains compatible, but in
+(`translation_model`: `qwen3-0.6b`), and Piper (its catalog default follows the
+target language automatically). The legacy name `ollama_endpoint` remains compatible, but in
 embedded mode the engine is llama.cpp included in the installer.
 `translation_api = "ollama"` or `"openai"` defines the protocol only for an external
 endpoint. See [Embedded local models](local-inference.md) for the catalog,
@@ -262,7 +240,7 @@ Choose **explicit** devices. Default-device aliases could cause feedback when
 the calling application starts using the virtual output. Through the tray, you
 can switch the **physical microphone** and **physical output** during translation.
 This preserves provider connections and session files but may cause an audio gap.
-Other dashboard settings, such as profiles, languages, voices, virtual cables,
+Other dashboard settings, such as profiles, languages, virtual cables,
 and recording options, require stopping the session. The original path stays
 active during configuration. Native IDs include direction and persistent device
 identity: the UID on macOS and endpoint ID on Windows. Reordering the device list
@@ -543,7 +521,7 @@ empty without introducing an assumed port.
 `transcription.enabled` enables **a single TXT per session**, containing only
 original text from the selected directions. The labels `[microphone]` and
 `[received output]` identify where each segment came from, not participants.
-Translated text used internally for voice synthesis is not saved in this file.
+Translated text is not saved in this original-language file.
 
 The two adapters may deliver fragments with different delays. The TXT follows
 their arrival order at Babel; it does not reorder speech by timestamps or promise
@@ -564,7 +542,7 @@ Receipt time should not be interpreted as the exact moment of speech. Reconnecti
 are marked and may reset provider offsets. With timestamps disabled, these speech
 markers are omitted; the header still identifies the session. Actual speaker IDs,
 if received, remain in the file. Missing IDs are not filled with invented names.
-Persistent automatic identification of people/clones within a mixed call is a
+Persistent automatic identification of people within a mixed call is a
 current limitation.
 
 ### Recording originals
@@ -611,7 +589,7 @@ physical device from the tray to recover audio in the same session. The unavaila
 interval may create a gap; old audio does not accumulate in playback or translation
 queues. Optional in-memory retention is separate from those queues and enters
 recording/transcription only through explicit selection at startup. Changing
-languages, models, voices, and other options still requires stopping the
+languages, models, and other options still requires stopping the
 processing session.
 
 These selections are saved in the same TOML as the dashboard. The dashboard tracks

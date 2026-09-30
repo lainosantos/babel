@@ -213,7 +213,7 @@ async fn exercise(cfg: &AppConfig, cancel: CancellationToken) -> Result<()> {
         let config = SessionConfig {
             model: "local".into(),
             api_key_env: String::new(),
-            voice: settings.voice.voice_id.clone(),
+            voice: settings.resolved_voice.clone(),
             source_language: settings.source_language.clone(),
             target_language: settings.target_language.clone(),
             prompt: String::new(),

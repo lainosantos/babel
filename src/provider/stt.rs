@@ -52,7 +52,7 @@ pub fn create(
                 translation_api: "ollama".into(),
                 piper_endpoint: String::new(),
                 translation_model: String::new(),
-                piper_voice: String::new(),
+                piper_voice: Default::default(),
                 segment_ms: profile.segment_ms,
                 silence_ms: profile.silence_ms,
                 vad_threshold: profile.vad_threshold,

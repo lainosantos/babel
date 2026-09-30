@@ -231,10 +231,6 @@ Among other behaviors, it verifies:
 - Local management: model/component integrity, announced ports, cancellation,
   active features independent of optional preparation, and snapshots that do
   not persist temporary ports.
-- External voices with the local provider without calling Piper or generating
-  a discarded WAV.
-- Voice synthesis and management against HTTP mocks; authentication, upload
-  limits, malformed responses and errors without exposing keys or private content.
 - Original transcript persistence, legitimate metadata and file permissions.
 - A single WAV with simultaneous mixing, headroom, gaps, a monotonic clock,
   headers/checkpoints, draining and refusal to overwrite files.
@@ -495,7 +491,7 @@ a pending checklist for target hardware, not a record of completed execution.
 
 ## What still requires execution in the target environment
 
-- Real authenticated Gemini, OpenAI and ElevenLabs calls. The tests described
+- Real authenticated Gemini, OpenAI and Deepgram calls. The tests described
   did not consume credits or send voice to those services.
 - Quality per language pair, RAM/VRAM use and local inference speed on the
   chosen hardware. The real Whisper/Qwen/Piper smoke test passed on Linux;

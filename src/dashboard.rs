@@ -137,12 +137,6 @@ fn router(state: DashboardState) -> Router {
         .route("/stop", post(stop))
         .route("/virtual/install", post(install))
         .route("/virtual/uninstall", post(uninstall))
-        .route("/voices", get(list_voices))
-        .route("/voices/design", post(design_voice))
-        .route(
-            "/voices/clone",
-            post(clone_voice).layer(DefaultBodyLimit::max(8 * 1024 * 1024)),
-        )
         .route("/credentials", get(credential_status).post(set_credential))
         .route("/credentials/clear", post(clear_credential))
         .route("/autostart", get(autostart_status).post(set_autostart))
@@ -722,13 +716,6 @@ fn virtual_result(result: anyhow::Result<String>) -> Response {
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-struct VoiceQuery {
-    provider: String,
-    api_key_env: String,
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
 struct CredentialQuery {
     api_key_env: String,
 }
@@ -744,47 +731,6 @@ struct CredentialInput {
 impl Drop for CredentialInput {
     fn drop(&mut self) {
         self.key.zeroize();
-    }
-}
-
-async fn list_voices(Query(query): Query<VoiceQuery>) -> Response {
-    match crate::voices::list(&query.provider, &query.api_key_env).await {
-        Ok(voices) => Json(voices).into_response(),
-        Err(error) => api_error(StatusCode::BAD_REQUEST, format!("{error:#}")),
-    }
-}
-
-async fn design_voice(
-    State(state): State<DashboardState>,
-    Json(request): Json<crate::voices::VoiceDesignRequest>,
-) -> Response {
-    let _guard = state.mutations.lock().await;
-    if state.controller.status().await.running {
-        return api_error(
-            StatusCode::CONFLICT,
-            "End the session before creating a voice.",
-        );
-    }
-    match crate::voices::design(request).await {
-        Ok(voice) => Json(voice).into_response(),
-        Err(error) => api_error(StatusCode::BAD_REQUEST, format!("{error:#}")),
-    }
-}
-
-async fn clone_voice(
-    State(state): State<DashboardState>,
-    Json(request): Json<crate::voices::VoiceCloneRequest>,
-) -> Response {
-    let _guard = state.mutations.lock().await;
-    if state.controller.status().await.running {
-        return api_error(
-            StatusCode::CONFLICT,
-            "End the session before cloning a voice.",
-        );
-    }
-    match crate::voices::clone_voice(request).await {
-        Ok(voice) => Json(voice).into_response(),
-        Err(error) => api_error(StatusCode::BAD_REQUEST, format!("{error:#}")),
     }
 }
 
@@ -1019,9 +965,6 @@ mod tests {
             ("POST", "/api/stop"),
             ("POST", "/api/virtual/install"),
             ("POST", "/api/virtual/uninstall"),
-            ("GET", "/api/voices"),
-            ("POST", "/api/voices/design"),
-            ("POST", "/api/voices/clone"),
             ("GET", "/api/credentials"),
             ("POST", "/api/credentials"),
             ("POST", "/api/credentials/clear"),
@@ -1613,35 +1556,42 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn clone_upload_has_a_separate_bounded_limit_without_calling_a_provider() {
+    async fn removed_custom_voice_endpoints_are_not_available_even_when_authenticated() {
         let directory = tempfile::tempdir().unwrap();
+        let config_path = directory.path().join("config.toml");
+        let controller =
+            Arc::new(Controller::new(AppConfig::default(), config_path.clone()).unwrap());
         let app = router(DashboardState {
-            controller: Arc::new(
-                Controller::new(AppConfig::default(), directory.path().join("config.toml"))
-                    .unwrap(),
-            ),
+            controller: controller.clone(),
             token: Arc::from("test-capability"),
             port: 8765,
             mutations: Arc::new(tokio::sync::Mutex::new(())),
         });
-        for (size, expected) in [
-            (70_000, StatusCode::BAD_REQUEST),
-            (8 * 1024 * 1024 + 1, StatusCode::PAYLOAD_TOO_LARGE),
+        for (method, path) in [
+            ("GET", "/api/voices"),
+            (
+                "GET",
+                "/api/voices?provider=gemini&api_key_env=BABEL_UNUSED_TEST_KEY",
+            ),
+            ("POST", "/api/voices/design"),
+            ("POST", "/api/voices/clone"),
         ] {
-            let payload = json!({"provider":"unsupported", "api_key_env":"BABEL_UNUSED_TEST_KEY", "name":"test", "reference_base64":"a".repeat(size), "consent_base64":""});
             let request = Request::builder()
-                .method("POST")
-                .uri("/api/voices/clone")
+                .method(method)
+                .uri(path)
                 .header(header::HOST, "127.0.0.1:8765")
                 .header(header::AUTHORIZATION, "Bearer test-capability")
                 .header(header::CONTENT_TYPE, "application/json")
-                .body(Body::from(payload.to_string()))
+                .body(Body::from("{}"))
                 .unwrap();
             assert_eq!(
                 app.clone().oneshot(request).await.unwrap().status(),
-                expected
+                StatusCode::NOT_FOUND,
+                "removed endpoint remained available: {method} {path}"
             );
         }
+        assert!(!controller.status().await.running);
+        assert!(!config_path.exists());
     }
 
     #[tokio::test]

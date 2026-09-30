@@ -50,7 +50,7 @@ and filename pattern apply to both audio and text.
 Audio is configured on **Recording** and text on **Transcription**, each with
 its own sources/folder. Both pages link through **Base folder & filenames** to
 shared settings. Device connections live in **Routing**; languages, providers
-and the voice library live in **Translation & voices**.
+live in **Translation**; translated audio uses the model's native default voice.
 
 In **Settings → Session files → Base folder**, set the shared file folder.
 With `base_path = "/home/ana/Babel"` and `directory = "recordings"`, the WAV

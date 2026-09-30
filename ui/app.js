@@ -4,7 +4,7 @@
   const byId = (id) => document.getElementById(id);
   const routeNames = ['microphone', 'speaker'];
   const form = byId('configuration');
-  const state = { config: null, configRevision: null, configConflict: false, syncing: false, activity: 0, devices: [], status: null, statusFresh: false, autostart: null, platform: null, platformError: null, interface: null, busy: false, dirty: false, authenticated: false, polling: false, libraryBusy: false, starting: false, cancelStarting: false, startCancelled: false, libraryRoute: null, voices: { gemini: [], elevenlabs: [] } };
+  const state = { config: null, configRevision: null, configConflict: false, syncing: false, activity: 0, devices: [], status: null, statusFresh: false, autostart: null, platform: null, platformError: null, interface: null, busy: false, dirty: false, authenticated: false, polling: false, starting: false, cancelStarting: false, startCancelled: false };
   const i18n = window.BabelI18n;
   const t = (key, values) => i18n.t(key, values);
   const filePathPreview = { revision: 0, timer: null, controller: null, phase: 'idle', paths: null, error: '' };
@@ -105,7 +105,6 @@
     if (element.dataset.transcriptionProfile) return config.transcription?.providers?.[element.dataset.transcriptionProfile];
     if (element.dataset.recognitionRoute) return config.transcription?.[`${element.dataset.recognitionRoute}_recognition`];
     if (element.dataset.profile) return config.providers?.[element.dataset.profile];
-    if (element.dataset.voiceRoute) return config[element.dataset.voiceRoute]?.voice;
     return config[element.dataset.route || element.dataset.section];
   }
 
@@ -206,20 +205,11 @@
         model.dataset.externalDraft = model.value;
         model.value = 'qwen3-0.6b';
       }
-      if (endpoint.id === 'profile-local-piper_endpoint') {
-        const voice = byId('profile-local-piper_voice');
-        voice.dataset.externalDraft = voice.value;
-        voice.value = 'auto';
-      }
     } else {
       endpoint.value = endpoint.dataset.externalDraft || '';
       if (endpoint.id === 'profile-local-ollama_endpoint') {
         const model = byId('profile-local-translation_model');
         model.value = model.dataset.externalDraft || model.value;
-      }
-      if (endpoint.id === 'profile-local-piper_endpoint') {
-        const voice = byId('profile-local-piper_voice');
-        voice.value = voice.dataset.externalDraft ?? (voice.value === 'auto' ? '' : voice.value);
       }
     }
     updateLocalControls();
@@ -250,9 +240,7 @@
     for (const route of routeNames) {
       if (config[route].enabled && dedicatedRoute(route)) {
         config[route].prompt = '';
-        if (config[route].voice.engine === 'native') config[route].voice.voice_id = '';
       }
-      if (config[route].voice.engine !== 'gemini') config[route].voice.style = '';
     }
     return config;
   }
@@ -267,7 +255,6 @@
     document.querySelectorAll('[data-field]').forEach((element) => {
       const container = fieldContainer(config, element);
       delete element.dataset.savedSource;
-      delete element.dataset.savedVoice;
       delete element.dataset.externalDraft;
       if (container && Object.hasOwn(container, element.dataset.field)) writeValue(element, container[element.dataset.field]);
       if (element.dataset.deviceDirection) delete element.dataset.initialized;
@@ -473,20 +460,6 @@
     scheduleFilePathPreview(0);
   }
 
-  function renderVoiceOptions() {
-    for (const route of routeNames) {
-      const engine = byId(`${route}-voice-engine`).value;
-      const provider = engine === 'native' ? routeProvider(route) : engine;
-      const options = byId(`${route}-voice-options`);
-      options.replaceChildren();
-      if (engine !== 'native') for (const voice of state.voices[provider] || []) options.append(new Option(`${voice.name} · ${voiceKind(voice.kind)}`, voice.id));
-      if (engine === 'native') {
-        const defaults = provider === 'gemini' ? ['Kore', 'Puck', 'Charon', 'Fenrir', 'Aoede'] : provider === 'openai' ? ['marin', 'cedar', 'alloy', 'ash', 'coral', 'sage', 'verse'] : provider === 'local' && managedEndpoint('profile-local-piper_endpoint') ? ['en_US-lessac-medium', 'pt_BR-faber-medium', 'es_ES-davefx-medium', 'fr_FR-siwis-medium', 'de_DE-thorsten-medium', 'it_IT-paola-medium', 'zh_CN-huayan-medium'] : [];
-        for (const name of defaults) options.append(new Option(name, name));
-      }
-    }
-  }
-
   function updateProviderControls() {
     for (const route of routeNames) {
       const translating = byId(`${route}-enabled`).checked;
@@ -507,35 +480,17 @@
         ? t("ui.original_audio_if_transcription_is_enabled_for_this_source_this_provider_re")
         : provider === 'local' ? t("ui.transcription_translation_and_voice_through_local_services_in_segments")
         : dedicated ? t("ui.continuous_translation_with_automatic_source_language_detection") : t("ui.conversation_model_usually_waits_for_pauses_before_responding");
-      const engineControl = byId(`${route}-voice-engine`);
-      engineControl.disabled = !translating;
-      const native = engineControl.value === 'native';
-      const voice = byId(`${route}-voice-voice_id`);
-      const automaticVoice = native && dedicated;
-      voice.disabled = automaticVoice || !translating;
-      if (automaticVoice && voice.dataset.savedVoice === undefined) { voice.dataset.savedVoice = voice.value; voice.value = ''; }
-      else if (!automaticVoice && voice.dataset.savedVoice !== undefined) { voice.value = voice.dataset.savedVoice; delete voice.dataset.savedVoice; }
-      voice.placeholder = automaticVoice ? (provider === 'gemini' ? t("ui.automatic_preservation_gemini") : t("ui.model_s_native_voice")) : provider === 'local' && native ? t("ui.piper_voice_or_profile_default") : t("ui.profile_s_default_voice_or_id");
-      byId(`${route}-voice-style`).disabled = engineControl.value !== 'gemini' || !translating;
-      byId(`${route}-voice-chunk_ms`).disabled = native || !translating;
-      byId(`${route}-voice-hint`).textContent = !translating ? t("ui.this_route_transmits_the_original_voice_synthesis_options_are_only_used_wit")
-        : native ? (dedicated ? (provider === 'gemini' ? t("ui.gemini_live_translate_attempts_to_preserve_original_voice_characteristics_w_2") : t("ui.openai_translate_uses_the_model_s_native_voice_vocal_identity_preservation_")) : provider === 'local' ? t("ui.uses_the_piper_service_enter_a_voice_available_in_that_service_or_leave_emp") : t("ui.uses_the_translator_s_own_audio_output_and_the_profile_s_default_voice_when"))
-        : t("ui.re_synthesizes_translated_text_with_this_fixed_voice_adds_latency_translate");
     }
-    byId('profile-gemini-hint').textContent = t("ui.gemini_live_translate_continuous_translation_without_prompts_or_a_fixed_nat");
-    byId('profile-openai-hint').textContent = t("ui.gpt_realtime_translate_continuous_translation_gpt_realtime_2_1_conversation");
-    byId('profile-elevenlabs-hint').textContent = t("ui.additional_voice_synthesis_using_elevenlabs_library_ids_configure_the_route");
-    byId('profile-gemini-voice').disabled = profileValue('gemini', 'model').replace(/^models\//, '') === 'gemini-3.5-live-translate-preview';
-    byId('profile-openai-voice').disabled = isOpenAITranslation(profileValue('openai', 'model'));
+    byId('profile-gemini-hint').textContent = t("translation.gemini_hint");
+    byId('profile-openai-hint').textContent = t("translation.openai_hint");
     const local = routeNames.every(route => {
       const translates = byId(`${route}-enabled`).checked;
-      return (!translates || (routeProvider(route) === 'local' && byId(`${route}-voice-engine`).value === 'native'))
+      return (!translates || routeProvider(route) === 'local')
         && (!transcribesRoute(route) || sttProvider(route) === 'whisper');
     });
     byId('footer-state').textContent = local ? t("ui.session_configured_for_local_processing") : t("ui.session_configured_with_cloud_providers");
     updateLocalControls();
     updateTranscriptionControls();
-    renderVoiceOptions();
     renderSignalPaths();
   }
 
@@ -692,10 +647,6 @@
     const startupUnavailable = state.busy || !state.authenticated || !state.autostart?.supported || !supportsHostAutostart();
     byId('autostart-enabled').disabled = startupUnavailable;
     byId('autostart-apply').disabled = startupUnavailable || byId('autostart-enabled').checked === state.autostart?.enabled;
-    if (byId('voice-library').open) {
-      libraryControls();
-      document.querySelectorAll('#library-voices button').forEach(button => { button.disabled = running || state.busy || state.syncing || state.libraryBusy || button.dataset.verificationRequired === 'true'; });
-    }
     const transcriptionEnabled = byId('transcription-enabled').checked;
     for (const field of ['microphone', 'speaker', 'timestamps']) byId(`transcription-${field}`).disabled = !transcriptionEnabled;
     for (const field of ['microphone', 'speaker']) byId(`recording-${field}`).disabled = !byId('recording-enabled').checked;
@@ -932,7 +883,7 @@
 
   function profileChanged() {
     const provider = byId('profile-selector').value;
-    for (const name of ['gemini', 'openai', 'elevenlabs', 'local']) byId(`profile-${name}`).hidden = name !== provider;
+    for (const name of ['gemini', 'openai', 'local']) byId(`profile-${name}`).hidden = name !== provider;
     refreshCredentialStatus(provider);
   }
 
@@ -957,7 +908,7 @@
   }
 
   byId('profile-selector').addEventListener('change', profileChanged);
-  for (const provider of ['gemini', 'openai', 'elevenlabs']) {
+  for (const provider of ['gemini', 'openai']) {
     byId(`profile-${provider}-api_key_env`).addEventListener('change', () => refreshCredentialStatus(provider));
   }
   function sttProfileChanged() {
@@ -997,145 +948,6 @@
     announce(t("ui.temporary_key_removed_a_key_set_in_the_environment_remains_available_as_a_f"));
   })));
 
-  const dialog = byId('voice-library');
-  function voiceKind(kind) {
-    const names = { preset: t("ui.preset"), prebuilt: t("ui.preset"), designed: t("ui.designed"), generated: t("ui.designed"), cloned: t("ui.cloned"), professional: t("ui.professional_clone"), instant: t("ui.instant_clone"), verification_required: t("ui.verification_required"), created: t("ui.created") };
-    return names[String(kind).toLowerCase()] || kind;
-  }
-  function libraryMessage(kind, message) {
-    const element = byId(`library-${kind}`);
-    i18n.message(element, message);
-    element.hidden = !message;
-  }
-  function libraryControls() {
-    byId('library-refresh').disabled = state.libraryBusy || !state.authenticated;
-    byId('library-provider').disabled = state.libraryBusy;
-    byId('voice-create-fields').disabled = state.libraryBusy || Boolean(state.status?.running) || !state.authenticated;
-    const provider = byId('library-provider').value;
-    const clone = byId('voice-create-method').value === 'clone';
-    const name = provider === 'gemini' ? 'Google Gemini' : 'ElevenLabs';
-    byId('voice-design-fields').hidden = clone;
-    byId('voice-clone-fields').hidden = !clone;
-    byId('voice-consent-label').hidden = provider !== 'gemini';
-    byId('voice-create-description').required = !clone;
-    byId('voice-create-reference').required = clone;
-    byId('voice-create-consent').required = clone && provider === 'gemini';
-    byId('voice-create-submit').textContent = state.libraryBusy ? t("ui.waiting_for_the_provider") : t(clone ? 'voice.clone' : 'voice.create', { provider: name });
-    byId('library-hint').textContent = t('voice.library_hint', { provider: name });
-    byId('voice-create-disclosure').textContent = clone
-      ? t(provider === 'gemini' ? 'voice.clone_consent_disclosure' : 'voice.clone_disclosure', { provider: name })
-      : t('voice.design_disclosure', { provider: name });
-  }
-
-  function useVoice(voice, route) {
-    if (state.status?.running || state.busy || state.syncing) return;
-    const input = byId(`${route}-voice-voice_id`);
-    delete input.dataset.savedVoice;
-    byId(`${route}-voice-engine`).value = voice.provider;
-    input.value = voice.id;
-    state.dirty = true;
-    updateProviderControls();
-    updateControls();
-    dialog.close();
-    announce(t(`voice.selected_${route}`, { name: voice.name }));
-  }
-
-  function renderLibrary() {
-    const provider = byId('library-provider').value;
-    const container = byId('library-voices');
-    const voices = state.voices[provider] || [];
-    container.replaceChildren();
-    if (!voices.length) {
-      const empty = document.createElement('p');
-      empty.className = 'library-empty';
-      empty.dataset.i18n = 'ui.no_voices_loaded_use_load_voices_or_create_a_voice_in_this_account';
-      empty.textContent = t(empty.dataset.i18n);
-      container.append(empty);
-    }
-    for (const voice of voices) {
-      const row = document.createElement('div'); row.className = 'voice-item';
-      const description = document.createElement('div');
-      const title = document.createElement('strong'); title.textContent = voice.name;
-      const detail = document.createElement('span'); detail.dataset.voiceKind = voice.kind; detail.dataset.voiceId = voice.id; detail.textContent = `${voiceKind(voice.kind)} · ${voice.id}`;
-      description.append(title, detail);
-      const actions = document.createElement('div'); actions.className = 'voice-item-actions';
-      for (const route of routeNames) {
-        const button = document.createElement('button'); button.type = 'button'; button.className = 'button quiet';
-        button.dataset.i18n = route === 'microphone' ? 'ui.use_for_microphone' : 'ui.use_for_output';
-        button.textContent = t(button.dataset.i18n);
-        button.disabled = Boolean(state.status?.running) || state.libraryBusy || voice.kind === 'verification_required';
-        button.dataset.verificationRequired = String(voice.kind === 'verification_required');
-        if (voice.kind === 'verification_required') { button.dataset.i18nTitle = "ui.complete_verification_of_this_voice_in_the_provider_s_account_before_using_"; button.title = t(button.dataset.i18nTitle); }
-        button.addEventListener('click', () => useVoice(voice, route));
-        actions.append(button);
-      }
-      row.append(description, actions); container.append(row);
-    }
-    renderVoiceOptions();
-  }
-
-  document.querySelectorAll('.library-open').forEach(button => button.addEventListener('click', () => {
-    const route = button.dataset.libraryRoute;
-    state.libraryRoute = route || null;
-    const engine = route ? byId(`${route}-voice-engine`).value : byId('profile-selector').value;
-    byId('library-provider').value = engine === 'elevenlabs' ? 'elevenlabs' : 'gemini';
-    libraryMessage('error', ''); libraryMessage('notice', '');
-    libraryControls(); renderLibrary(); dialog.showModal();
-  }));
-  byId('library-close').addEventListener('click', () => dialog.close());
-  byId('library-provider').addEventListener('change', () => { libraryControls(); renderLibrary(); libraryMessage('notice', ''); libraryMessage('error', ''); });
-  byId('voice-create-method').addEventListener('change', libraryControls);
-
-  async function libraryAction(operation) {
-    if (state.libraryBusy) return;
-    state.libraryBusy = true; libraryControls(); renderLibrary();
-    libraryMessage('error', ''); libraryMessage('notice', '');
-    try { await operation(); }
-    catch (error) { libraryMessage('error', error.name === 'TimeoutError' ? t("ui.the_provider_took_too_long_to_respond_reload_the_library_to_check_whether_t") : error.message); }
-    finally { state.libraryBusy = false; libraryControls(); renderLibrary(); }
-  }
-
-  byId('library-refresh').addEventListener('click', () => libraryAction(async () => {
-    const provider = byId('library-provider').value;
-    state.voices[provider] = await api(`/voices?${new URLSearchParams({ provider, api_key_env: profileValue(provider, 'api_key_env') })}`, { timeout: 75000 });
-    const count = state.voices[provider].length;
-    libraryMessage('notice', t(`voice.loaded_${i18n.plural(count)}`, { count: i18n.number(count) }));
-  }));
-
-  function wavBase64(file, name) {
-    if (!file) return Promise.reject(new Error(t('file.choose', { name })));
-    if (!/\.wav$/i.test(file.name) || file.size === 0 || file.size > 2 * 1024 * 1024) return Promise.reject(new Error(t('file.wav', { name })));
-    return new Promise((resolve, reject) => {
-      const reader = new FileReader();
-      reader.onerror = () => reject(new Error(t('file.read_error', { name })));
-      reader.onload = () => resolve(String(reader.result).split(',')[1]);
-      reader.readAsDataURL(file);
-    });
-  }
-
-  byId('voice-create-form').addEventListener('submit', (event) => {
-    event.preventDefault();
-    if (!reportWorkspaceValidity(event.target)) return;
-    libraryAction(async () => {
-      const provider = byId('library-provider').value;
-      const clone = byId('voice-create-method').value === 'clone';
-      const body = { provider, api_key_env: profileValue(provider, 'api_key_env'), name: byId('voice-create-name').value.trim() };
-      if (clone) {
-        body.reference_base64 = await wavBase64(byId('voice-create-reference').files[0], t("ui.the_reference_recording"));
-        body.consent_base64 = provider === 'gemini' ? await wavBase64(byId('voice-create-consent').files[0], t("ui.the_consent_recording")) : '';
-      } else {
-        body.description = byId('voice-create-description').value.trim();
-        body.language = byId('voice-create-language').value.trim();
-      }
-      const voice = await api(`/voices/${clone ? 'clone' : 'design'}`, { method: 'POST', body, timeout: 125000 });
-      state.voices[provider] = [voice, ...state.voices[provider].filter(item => item.id !== voice.id)];
-      byId('voice-create-reference').value = ''; byId('voice-create-consent').value = '';
-      libraryMessage('notice', voice.kind === 'verification_required'
-        ? t('voice.created_verification', { name: voice.name })
-        : t('voice.created', { name: voice.name }));
-    });
-  });
-
   function renderInterfaceText() {
     const metadata = state.interface;
     if (!metadata) return;
@@ -1143,15 +955,14 @@
     select.value = metadata.language;
     const languageName = metadata.languages.find(item => item.code === i18n.language)?.name || i18n.language;
     byId('interface-language-status').textContent = t('interface.using', { language: languageName });
-    // Update labels in place: drafts, native select values, focus, file uploads and
-    // open dialogs stay attached to the same nodes during a language change.
+    // Update labels in place so drafts, focus and native select values remain
+    // attached to the same nodes during a language change.
     for (const option of document.querySelectorAll('[data-device-direction] option')) {
       const name = option.dataset.deviceName;
       option.textContent = !option.value ? t('ui.select_a_device')
         : option.dataset.deviceUnavailable === 'true' ? t('device.unavailable', { name })
         : option.dataset.deviceVirtual === 'true' ? t('device.virtual', { name }) : name;
     }
-    for (const detail of document.querySelectorAll('[data-voice-kind]')) detail.textContent = `${voiceKind(detail.dataset.voiceKind)} · ${detail.dataset.voiceId}`;
     for (const link of document.querySelectorAll('a[href^="/help/"]')) {
       link.hreflang = 'en';
       link.title = t('help.documentation');
@@ -1161,7 +972,6 @@
     if (state.config) {
       updateProviderControls(); updateGainLabels(); updateQualityHint();
       if (state.status) renderStatus(state.status, state.statusFresh);
-      libraryControls();
       renderAutostartDescription();
       updateControls();
     }

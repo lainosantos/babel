@@ -9,8 +9,6 @@ language = "system"
 api_key_env = "GEMINI_API_KEY"
 endpoint = "wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent"
 model = "gemini-3.5-live-translate-preview"
-voice = "Kore"
-tts_model = "gemini-3.8-flash-tts"
 transcription_model = ""
 connect_timeout_secs = 15
 max_reconnect_attempts = 5
@@ -19,18 +17,6 @@ max_reconnect_attempts = 5
 api_key_env = "OPENAI_API_KEY"
 endpoint = ""
 model = "gpt-realtime-translate"
-voice = "marin"
-tts_model = ""
-transcription_model = ""
-connect_timeout_secs = 15
-max_reconnect_attempts = 5
-
-[providers.elevenlabs]
-api_key_env = "ELEVENLABS_API_KEY"
-endpoint = "https://api.elevenlabs.io/v1"
-model = "eleven_flash_v2_5"
-voice = ""
-tts_model = "eleven_flash_v2_5"
 transcription_model = ""
 connect_timeout_secs = 15
 max_reconnect_attempts = 5
@@ -43,7 +29,6 @@ ollama_endpoint = "auto"
 translation_api = "ollama" # Only used for an explicitly configured external endpoint.
 translation_model = "qwen3-0.6b"
 piper_endpoint = "auto"
-piper_voice = "auto"
 segment_ms = 2000
 silence_ms = 300
 vad_threshold = 0.01
@@ -72,12 +57,6 @@ target_language = "en-US"
 prompt = ""
 gain = 1.0
 
-[microphone.voice]
-engine = "native"
-voice_id = ""
-style = ""
-chunk_ms = 400
-
 [speaker]
 enabled = true
 provider = "gemini"
@@ -88,12 +67,6 @@ target_language = "pt-BR"
 prompt = ""
 gain = 1.0
 
-[speaker.voice]
-engine = "native"
-voice_id = ""
-style = ""
-chunk_ms = 400
-
 [transcription]
 enabled = false
 microphone = true
@@ -101,7 +74,7 @@ speaker = true
 timestamps = true
 directory = "transcripts"
 
-# Original-speech recognition is independent of translation and voices.
+# Original-speech recognition is independent of translation.
 [transcription.microphone_recognition]
 provider = "gemini" # gemini, openai, deepgram or whisper
 language = "auto"

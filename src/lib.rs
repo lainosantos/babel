@@ -20,8 +20,6 @@ pub mod mcp_client;
 pub mod platform;
 pub mod provider;
 pub mod recording;
-pub mod revoice;
 pub mod storage;
 pub mod transcript;
 pub mod tray;
-pub mod voices;

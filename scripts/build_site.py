@@ -28,7 +28,7 @@ GROUPS = [
         ("docs/providers.md", "providers", "Gemini", "Live audio protocols, model capabilities, and limits."),
         ("docs/other-providers.md", "other-providers", "Other providers", "OpenAI, Deepgram, and external local services."),
         ("docs/local-inference.md", "local-inference", "Embedded local models", "Automatic setup, compact models, and offline use."),
-        ("docs/voices.md", "voices", "Voices", "Voice libraries, design, cloning, and provider requirements."),
+        ("docs/voices.md", "voices", "Voices", "Native translation voices and legacy configuration migration."),
     ]),
     ("Capture and automation", [
         ("docs/transcription.md", "transcription", "Transcription", "Original-language text, timestamps, and speaker metadata."),

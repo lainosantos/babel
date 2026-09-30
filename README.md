@@ -6,9 +6,9 @@
 
 Virtual microphone and audio output for bidirectional speech translation. The
 core, AI adapters, dashboard server and tray controls are written in Rust. Each
-direction can use a different translation provider and voice. Transcription
-also selects its own provider and language for the microphone and incoming
-audio, independently of translation.
+direction can use a different translation provider and target language.
+Transcription also selects its own provider and language for the microphone
+and incoming audio, independently of translation.
 Translation, transcription and recording are independent. Outside a session,
 Babel routes original audio between the configured devices. Turning off a
 direction's translation preserves that routing during a session as well.
@@ -27,10 +27,11 @@ Physical microphone → translation → Babel Microphone → calling app
 Calling app → Babel Speaker → translation → physical headphones
 ```
 
-Native voice mode streams audio over persistent connections. Gemini Live
-Translate and OpenAI Realtime Translate are the continuous translation adapters.
+Cloud translation streams native model audio over persistent connections.
+Gemini Live Translate and OpenAI Realtime Translate are the continuous
+translation adapters.
 Conversational models wait for end-of-speech detection; the local option works
-in segments. Custom voices add streaming TTS after translation.
+in segments. Both directions use the selected model's native default voice.
 **Streaming does not mean zero latency or guarantee a hard real-time deadline.**
 
 ## Getting started
@@ -71,7 +72,7 @@ On Linux/macOS, `./scripts/run.sh` starts the built binary from this directory;
 on the first run, it builds if the binary does not exist. It also accepts
 subcommands, for example `./scripts/run.sh doctor`.
 
-1. In **Translation & voices**, configure the profiles used for translation.
+1. In **Translation**, configure the profiles used for translation.
    Cloud providers receive a temporary key through the dashboard or the named
    environment variable. Recording or routing originals alone skips this step.
 2. On the same page, select each direction's translator. One provider's settings
@@ -81,9 +82,9 @@ subcommands, for example `./scripts/run.sh doctor`.
    microphone playback; for incoming audio, use `babel_speaker.monitor` as
    capture and your headphones as playback. The [platform guide](docs/platforms.md)
    lists macOS/Windows endpoints.
-4. In **Translation & voices**, choose each direction's languages and voices,
-   enabling only the translations you want. AI profiles and the voice library
-   are grouped on this page.
+4. In **Translation**, choose each direction's languages,
+   enabling only the translations you want. AI profiles and supported translation
+   prompts are grouped on this page; voices follow the model's native defaults.
 5. In **Transcription**, choose the originals to save and each source's STT
    provider and language: Gemini, OpenAI, Deepgram or Whisper. Transcription
    profiles and credentials live here, independently of translation profiles.
@@ -145,8 +146,8 @@ source guides below.
   Translate, conversational Realtime, Deepgram STT and local inference.
 - [Embedded local models](docs/local-inference.md): Whisper, Qwen and Piper,
   automatic preparation, storage, downloads and offline use.
-- [Gemini and ElevenLabs voices](docs/voices.md): library, voice design,
-  cloning, per-direction selection, formats, requirements, costs and limits.
+- [Native translation voices](docs/voices.md): model defaults, local synthesis
+  and migration of legacy voice settings.
 - [Architecture, memory safety and performance](docs/architecture.md).
 - [Diagnostics and validation](docs/testing.md).
 - [Start the tray at login](docs/autostart.md): optional per-user activation.
@@ -156,15 +157,13 @@ source guides below.
 
 ## Implemented integrations
 
-| Translation/voice integration | Audio translation | Custom voice |
+| Translation integration | Audio translation | Native output |
 |---|---|---|
-| Gemini Live Translate | Continuous audio-to-audio | Approximate automatic preservation; optional TTS for a fixed voice |
-| Gemini 3.8 Live | Speech-to-speech with turns/VAD | Native preset voice; optional TTS |
-| OpenAI Realtime Translate | Continuous audio-to-audio | Model voice; optional TTS |
-| OpenAI Realtime | Speech-to-speech with turns/VAD | Native preset voice; optional TTS |
-| Embedded Whisper + Qwen + Piper | Local segmented pipeline | Catalog Piper voices; optional cloud TTS |
-| Gemini 3.8 TTS | Synthesizes translated text; not a standalone translator | Preset voices, design and registered clones |
-| ElevenLabs | Synthesizes translated text; not a standalone translator | Library voices, design and instant voice cloning |
+| Gemini Live Translate | Continuous audio-to-audio | Model default; best-effort preservation of vocal characteristics |
+| Gemini 3.8 Live | Speech-to-speech with turns/VAD | Model default |
+| OpenAI Realtime Translate | Continuous audio-to-audio | Model default |
+| OpenAI Realtime | Speech-to-speech with turns/VAD | Model default |
+| Embedded Whisper + Qwen + Piper | Local segmented pipeline | Catalog default for the target language |
 
 The four recognizers below produce the original-audio TXT, with any translator
 or without translation. Each source selects its own provider and language.
@@ -188,10 +187,8 @@ needed. External endpoints, including Ollama, remain optional for custom
 installations. The UI tracks preparation and lets you choose the absolute model
 folder and recognition/translation thread limits.
 
-The library supports creating multiple voices, listing account profiles and
-selecting a voice per direction. Reference/consent audio is sent only when
-cloning is explicitly requested. Keys entered in the dashboard remain in memory
-until the process exits; TOML stores only the corresponding variable name.
+Keys entered in the dashboard remain in memory until the process exits; TOML
+stores only the corresponding variable name.
 
 ## Session files, participants and voices
 
@@ -231,16 +228,11 @@ start options; it applies to whichever file-producing features are enabled.
 Deepgram can assign speaker IDs to words, and Babel preserves those transcript
 metadata. IDs are connection-local labels, can be wrong and can restart after
 reconnection; they are not names or persistent identities across sources/sessions.
-**Automatically enrolling clones from the first seconds and assigning them to
-participants is not implemented.** Two audio directions are not treated as
-identification of people in a meeting. Gemini may approximate original voice
-characteristics without guaranteeing a distinct vocal identity per participant.
-Fixed/designed/cloned voices are selected explicitly.
-
-Gemini requires a 10–30-second reference sample and a consent recording from
-the same person to register a clone. This differs from Live voice preservation.
-Details and alternatives are in the voice guide; the dashboard does not offer
-controls that pretend unsupported features are available.
+Two audio directions do not identify the people in a meeting. Gemini Live
+Translate may approximate original voice characteristics without guaranteeing
+a distinct vocal identity per participant. Other models have their own native
+output behavior. Babel does not assign voices to participants or override the
+model's default voice. See [native translation voices](docs/voices.md).
 
 ## Commands
 

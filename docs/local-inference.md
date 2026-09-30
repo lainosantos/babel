@@ -13,10 +13,10 @@ both sources and keep **Built into Babel** in its profile. New configurations
 default to Whisper Base Q5_1. Saving downloads/verifies missing weights without
 keeping the recognizer loaded. Enabling transcription remains a separate choice.
 
-For translation, open **Translation & voices**, choose **Local** for the desired
+For translation, open **Translation**, choose **Local** for the desired
 route and keep recognition, translation and voice components **Built into
-Babel**. Saving prepares selected Whisper, Qwen and Piper files. Automatic voice
-selection chooses an available voice for the target language.
+Babel**. Saving prepares the selected Whisper and Qwen models plus the default
+Piper voice for each target language. Voice selection is internal and automatic.
 
 State appears on both pages and under **Settings → Local models**:
 
@@ -59,7 +59,7 @@ these components' CPU limits and idle unloading.
 |---|---|---|
 | Original recognition | Multilingual Whisper `tiny-q5_1`, `base-q5_1`, `small-q5_1`; original `tiny`, `base`, `small` variants remain available | `base-q5_1`; Tiny prioritizes cost, Small offers more capacity with higher resource use |
 | Text translation | Qwen `qwen3-0.6b` | Included llama.cpp engine; compact model without a universal quality guarantee |
-| Synthesis | Piper voices listed below | `auto` follows the target language |
+| Synthesis | Piper voices listed below | Catalog default for the target language |
 
 Approximate download sizes in decimal MB (1 MB = 1,000,000 bytes):
 
@@ -104,11 +104,11 @@ not guarantee fidelity for every language, accent or vocabulary.
 | Italian | `it_IT-paola-medium` |
 | Chinese | `zh_CN-huayan-medium` |
 
-An explicit route `voice_id` takes precedence over the profile's `piper_voice`.
-The voice must support the spoken language. If the embedded catalog does not
-cover your target, choose compatible external TTS or configure your own server.
-Cloning, voice design and original-identity preservation are not features of
-these embedded Piper voices.
+Babel chooses these catalog defaults automatically; routes and profiles have
+no voice override. If the catalog does not cover your target language, configure
+a compatible external Piper service whose default voice supports that language.
+Babel sends text without a voice override to that service. Embedded Piper does
+not preserve the original speaker's vocal identity.
 
 Translation Whisper and STT Whisper have independent model/segmentation
 settings. Two sources and simultaneous translation may share engines, but each
@@ -171,7 +171,6 @@ whisper_model = "base-q5_1"
 ollama_endpoint = "auto"
 translation_model = "qwen3-0.6b"
 piper_endpoint = "auto"
-piper_voice = "auto"
 segment_ms = 2000
 silence_ms = 300
 vad_threshold = 0.01

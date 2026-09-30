@@ -1,6 +1,6 @@
 'use strict';
 
-// Workspace views keep the same controls, drafts, uploads and live audio session.
+// Workspace views keep the same controls, drafts and live audio session.
 // They change visibility only; the backend never participates in navigation.
 (() => {
   const views = ['routing', 'translation', 'transcription', 'recording', 'commands', 'settings'];
@@ -8,7 +8,7 @@
   const viewName = view => Object.hasOwn(aliases, view) ? aliases[view] : view;
   const english = {
     routing: ['Audio routing', 'Choose the real and virtual devices for each direction.'],
-    translation: ['Translation & voices', 'Set languages, providers and voices for what you say and hear.'],
+    translation: ['Translation', 'Set languages and providers for what you say and hear.'],
     transcription: ['Transcription', 'Keep the original words from both sides of the conversation.'],
     recording: ['Recording', 'Save the original audio from both sides in one recording.'],
     commands: ['Voice commands', 'Use your microphone to control connected tools.'],

@@ -23,6 +23,7 @@ pub struct SessionConfig {
     pub model: String,
     /// Name of an environment variable, never an API key itself.
     pub api_key_env: String,
+    /// Internal embedded Piper catalog selection; ignored by cloud Live models.
     pub voice: String,
     pub source_language: String,
     pub target_language: String,
@@ -175,26 +176,12 @@ pub fn create_configured_provider(
     cloud: &crate::config::CloudProviderConfig,
     local: &crate::config::LocalProviderConfig,
 ) -> Result<Arc<dyn SpeechProvider>> {
-    create_route_provider(kind, cloud, local, true)
-}
-
-/// Local translation can bypass Piper when a separate streaming TTS supplies the voice.
-pub fn create_route_provider(
-    kind: &str,
-    cloud: &crate::config::CloudProviderConfig,
-    local: &crate::config::LocalProviderConfig,
-    native_synthesis: bool,
-) -> Result<Arc<dyn SpeechProvider>> {
     match kind {
         "openai" => Ok(Arc::new(openai::OpenAiProvider::new(
             cloud.endpoint.clone(),
             cloud.transcription_model.clone(),
         )?)),
-        "local" => Ok(Arc::new(if native_synthesis {
-            local::LocalProvider::new(local.clone())?
-        } else {
-            local::LocalProvider::translation(local.clone(), false)?
-        })),
+        "local" => Ok(Arc::new(local::LocalProvider::new(local.clone())?)),
         _ => create_provider(kind),
     }
 }
@@ -208,9 +195,6 @@ mod tests {
         let profiles = crate::config::ProviderProfiles::default();
         assert!(create_provider("loopback").is_err());
         assert!(create_configured_provider("loopback", &profiles.gemini, &profiles.local).is_err());
-        assert!(
-            create_route_provider("loopback", &profiles.gemini, &profiles.local, false).is_err()
-        );
     }
 
     #[test]

@@ -7,11 +7,11 @@ const path = require('node:path');
 const { JSDOM } = require('jsdom');
 
 function defaults() {
-  const cloud = (values = {}) => ({ api_key_env: 'GEMINI_API_KEY', endpoint: 'wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent', model: 'gemini-3.5-live-translate-preview', voice: 'Kore', tts_model: 'gemini-3.8-flash-tts', transcription_model: '', connect_timeout_secs: 15, max_reconnect_attempts: 5, ...values });
-  const route = (values = {}) => ({ enabled: true, provider: 'gemini', capture_device: 'physical-mic', playback_device: 'babel_mic_bus', source_language: 'pt-BR', target_language: 'en-US', prompt: '', gain: 1, voice: { engine: 'native', voice_id: '', style: '', chunk_ms: 400 }, ...values });
+  const cloud = (values = {}) => ({ api_key_env: 'GEMINI_API_KEY', endpoint: 'wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent', model: 'gemini-3.5-live-translate-preview', transcription_model: '', connect_timeout_secs: 15, max_reconnect_attempts: 5, ...values });
+  const route = (values = {}) => ({ enabled: true, provider: 'gemini', capture_device: 'physical-mic', playback_device: 'babel_mic_bus', source_language: 'pt-BR', target_language: 'en-US', prompt: '', gain: 1, ...values });
   return {
     version: 1, interface: { language: 'system' }, local_runtime: { directory: '', threads: 2, idle_unload_secs: 60 },
-    providers: { gemini: cloud(), openai: cloud({ api_key_env: 'OPENAI_API_KEY', endpoint: '', model: 'gpt-realtime-translate', voice: 'marin', tts_model: '' }), elevenlabs: cloud({ api_key_env: 'ELEVENLABS_API_KEY', endpoint: 'https://api.elevenlabs.io/v1', model: 'eleven_flash_v2_5', voice: '', tts_model: 'eleven_flash_v2_5' }), local: { whisper_endpoint: 'auto', whisper_model: 'base', ollama_endpoint: 'auto', translation_api: 'ollama', translation_model: 'qwen3-0.6b', piper_endpoint: 'auto', piper_voice: 'auto', segment_ms: 2000, silence_ms: 300, vad_threshold: 0.01, request_timeout_secs: 30 } },
+    providers: { gemini: cloud(), openai: cloud({ api_key_env: 'OPENAI_API_KEY', endpoint: '', model: 'gpt-realtime-translate' }), local: { whisper_endpoint: 'auto', whisper_model: 'base', ollama_endpoint: 'auto', translation_api: 'ollama', translation_model: 'qwen3-0.6b', piper_endpoint: 'auto', segment_ms: 2000, silence_ms: 300, vad_threshold: 0.01, request_timeout_secs: 30 } },
     audio: { quality: 'balanced', capture_queue_ms: 200, playback_queue_ms: 2000, max_capture_age_ms: 200, device_latency_ms: 30 },
     microphone: route(), speaker: route({ capture_device: 'babel_speaker.monitor', playback_device: 'physical-speaker', source_language: 'en-US', target_language: 'pt-BR' }),
     transcription: { enabled: false, microphone: true, speaker: true, timestamps: true, directory: 'transcripts',
@@ -83,6 +83,7 @@ async function page(t, options = {}) {
   const statusRequest = options.statusRequest;
   window.fetch = async (url, options) => {
     const parsed = new URL(url, window.location.origin);
+    assert.equal(parsed.pathname.startsWith('/api/voices'), false, 'the dashboard never calls removed voice APIs');
     if (parsed.pathname.startsWith('/locales/')) {
       if (localeFailure === parsed.pathname) return new Response('unavailable', { status: 500 });
       const catalog = JSON.parse(fs.readFileSync(path.join(__dirname, parsed.pathname), 'utf8'));
@@ -117,8 +118,6 @@ async function page(t, options = {}) {
     else if (parsed.pathname === '/api/credentials' && options.method === 'GET') value = { configured: credentials.has(parsed.searchParams.get('api_key_env')) };
     else if (parsed.pathname === '/api/credentials') credentials.add(body.api_key_env);
     else if (parsed.pathname === '/api/credentials/clear') credentials.delete(body.api_key_env);
-    else if (parsed.pathname === '/api/voices') value = [{ id: 'fixture_voice', name: '<img src=x onerror=alert(1)>', provider: parsed.searchParams.get('provider'), kind: 'designed' }];
-    else if (parsed.pathname === '/api/voices/design') value = { id: 'new_fixture_voice', name: body.name, provider: body.provider, kind: 'designed' };
     return new Response(JSON.stringify(value), { headers: { 'Content-Type': 'application/json', ...(parsed.pathname === '/api/config' ? { ETag: `"${revision}"` } : {}) } });
   };
   window.eval(fs.readFileSync(path.join(__dirname, 'i18n.js'), 'utf8'));
@@ -136,7 +135,7 @@ test('the real dashboard separates routing, translation, transcription and recor
   assert.deepEqual([...new Set([...p.doc.querySelectorAll('[data-workspace-panel]')].map(node => node.dataset.workspacePanel))].sort(), [...views].sort());
   const groups = {
     routing: ['microphone-capture_device', 'microphone-playback_device', 'speaker-capture_device', 'speaker-playback_device', 'microphone-input', 'speaker-output', 'microphone-state', 'speaker-state', 'microphone-signal', 'speaker-signal', 'audio-quality'],
-    translation: ['microphone-enabled', 'speaker-enabled', 'microphone-source_language', 'speaker-target_language', 'microphone-provider', 'speaker-provider', 'microphone-prompt', 'speaker-prompt', 'microphone-voice-engine', 'speaker-voice-voice_id', 'microphone-gain', 'speaker-gain', 'profile-selector', 'credential-gemini'],
+    translation: ['microphone-enabled', 'speaker-enabled', 'microphone-source_language', 'speaker-target_language', 'microphone-provider', 'speaker-provider', 'microphone-prompt', 'speaker-prompt', 'microphone-gain', 'speaker-gain', 'profile-selector', 'credential-gemini'],
     transcription: ['transcription-enabled', 'transcription-microphone', 'transcription-speaker', 'transcription-timestamps', 'transcription-directory', 'microphone-transcripts', 'speaker-transcripts', 'stt-microphone-provider', 'stt-speaker-language', 'stt-profile-selector', 'stt-profile-deepgram-model', 'stt-profile-whisper-endpoint', 'stt-credential-gemini'],
     recording: ['recording-enabled', 'recording-microphone', 'recording-speaker', 'recording-directory', 'recording-microphone-gain', 'recording-speaker-gain', 'recording-microphone-priority', 'recording-ducking', 'recording-microphone-threshold'],
     settings: ['files-base_path', 'files-name_pattern', 'files-path-preview'],
@@ -150,17 +149,14 @@ test('the real dashboard separates routing, translation, transcription and recor
     }
   }
   const routingFields = [...p.byId('workspace-routing').querySelectorAll('[data-field]')];
-  assert.equal(routingFields.some(node => node.dataset.voiceRoute || node.dataset.profile || ['enabled', 'provider', 'source_language', 'target_language', 'prompt', 'gain'].includes(node.dataset.field)), false, 'audio routing must not contain translation controls');
+  assert.equal(routingFields.some(node => node.dataset.profile || ['enabled', 'provider', 'source_language', 'target_language', 'prompt', 'gain'].includes(node.dataset.field)), false, 'audio routing must not contain translation controls');
   assert.equal(new Set([...p.doc.querySelectorAll('[id]')].map(node => node.id)).size, p.doc.querySelectorAll('[id]').length, 'moving controls must not duplicate their IDs');
 });
 
-test('moving between feature pages preserves independent drafts, voice choices and live transcript nodes without saving or changing the session', async t => {
+test('moving between feature pages preserves independent drafts and live transcript nodes without saving or changing the session', async t => {
   const p = await page(t);
   const before = structuredClone(p.config());
   p.byId('nav-translation').click();
-  p.set('microphone-voice-engine', 'gemini');
-  p.set('microphone-voice-voice_id', 'my-draft-voice');
-  p.set('microphone-voice-style', 'Calma e natural');
   p.set('speaker-provider', 'openai');
   p.set('profile-openai-model', 'gpt-realtime-2.1');
   p.set('speaker-prompt', 'Preserve os termos técnicos.');
@@ -176,7 +172,7 @@ test('moving between feature pages preserves independent drafts, voice choices a
   p.set('recording-enabled', true);
   p.set('recording-microphone', false);
   assert.equal(p.byId('transcription-enabled').checked, true);
-  const preservedIds = ['microphone-voice-voice_id', 'speaker-prompt', 'transcription-enabled', 'recording-enabled', 'microphone-input-transcript'];
+  const preservedIds = ['speaker-target_language', 'speaker-prompt', 'transcription-enabled', 'recording-enabled', 'microphone-input-transcript'];
   const originalNodes = preservedIds.map(id => p.byId(id));
   p.routeStatus('microphone', { last_input_transcript: 'Texto original do microfone.' });
   await p.poll();
@@ -186,8 +182,6 @@ test('moving between feature pages preserves independent drafts, voice choices a
     assert.equal([...p.doc.querySelectorAll('[data-workspace-panel]')].every(panel => panel.hidden === (panel.dataset.workspacePanel !== view)), true);
   }
   for (const [index, id] of preservedIds.entries()) assert.equal(p.byId(id), originalNodes[index]);
-  assert.equal(p.byId('microphone-voice-voice_id').value, 'my-draft-voice');
-  assert.equal(p.byId('microphone-voice-style').value, 'Calma e natural');
   assert.equal(p.byId('speaker-prompt').value, 'Preserve os termos técnicos.');
   assert.equal(p.byId('speaker-target_language').value, 'ja-JP');
   assert.equal(p.byId('microphone-enabled').checked, false);
@@ -385,13 +379,12 @@ test('each route has its own provider; dedicated modes remove unsupported settin
   assert.equal(p.config().microphone.provider, 'gemini');
   assert.equal(p.config().speaker.provider, 'openai');
   assert.equal(p.config().speaker.prompt, 'Use termos técnicos.');
-  assert.deepEqual(Object.keys(p.config().providers).sort(), ['elevenlabs', 'gemini', 'local', 'openai']);
+  assert.deepEqual(Object.keys(p.config().providers).sort(), ['gemini', 'local', 'openai']);
   p.set('profile-openai-model', 'gpt-realtime-translate-2026-09-29');
-  assert.equal(p.byId('profile-openai-voice').disabled, true);
   p.byId('save').click();
   await settle(() => p.config().speaker.prompt === '');
   assert.equal(p.config().speaker.source_language, 'en-US');
-  assert.equal(p.config().speaker.voice.voice_id, '');
+  assert.equal(Object.hasOwn(p.config().speaker, 'voice'), false);
 });
 
 test('temporary keys use a separate authenticated endpoint, clear the input, and never enter configuration', async t => {
@@ -407,52 +400,37 @@ test('temporary keys use a separate authenticated endpoint, clear the input, and
   assert.match(p.byId('credential-gemini-status').textContent, /Nenhuma chave/);
 });
 
-test('a local route can select a Piper voice while keeping other provider profiles intact', async t => {
+test('translation uses only native default voices without library, uploads or synthesis profiles', async t => {
+  const p = await page(t, { language: 'en' });
+  assert.equal(p.byId('nav-translation').textContent, 'Translation');
+  assert.equal(p.doc.querySelectorAll('.native-voice-hint').length, 2);
+  assert.equal(p.doc.querySelector('[data-voice-route], .library-open, input[type="file"]'), null);
+  for (const id of ['voice-library', 'profile-elevenlabs', 'profile-gemini-voice', 'profile-openai-voice', 'profile-gemini-tts_model', 'profile-local-piper_voice']) assert.equal(p.byId(id), null);
+  assert.deepEqual([...p.byId('profile-selector').options].map(option => option.value), ['gemini', 'openai', 'local']);
+  for (const provider of ['local', 'openai', 'gemini']) {
+    for (const route of ['microphone', 'speaker']) p.set(`${route}-provider`, provider);
+    p.byId('save').click();
+    await settle(() => p.config().microphone.provider === provider && !p.byId('settings').disabled);
+    for (const route of ['microphone', 'speaker']) assert.equal(Object.hasOwn(p.config()[route], 'voice'), false);
+    for (const cloud of ['gemini', 'openai']) for (const field of ['voice', 'tts_model']) assert.equal(Object.hasOwn(p.config().providers[cloud], field), false);
+    assert.equal(Object.hasOwn(p.config().providers, 'elevenlabs'), false);
+    assert.equal(Object.hasOwn(p.config().providers.local, 'piper_voice'), false);
+  }
+  assert.equal(p.calls.some(call => call.path.startsWith('/api/voices')), false);
+  assert.equal(p.calls.some(call => call.path === '/api/start'), false);
+});
+
+test('a local route keeps its native Piper endpoint while preserving other translation profiles', async t => {
   const p = await page(t);
   p.set('microphone-provider', 'local');
-  assert.equal(p.byId('microphone-voice-voice_id').disabled, false);
-  p.set('microphone-voice-voice_id', 'pt_BR-test-medium');
+  p.set('profile-local-piper_endpoint-mode', 'external');
   p.set('profile-local-piper_endpoint', 'http://127.0.0.1:5001/synthesize');
   p.byId('save').click();
   await settle(() => p.byId('notice').textContent === 'Ajustes salvos.');
-  assert.equal(p.config().microphone.voice.voice_id, 'pt_BR-test-medium');
   assert.equal(p.config().providers.local.piper_endpoint, 'http://127.0.0.1:5001/synthesize');
   assert.equal(p.config().speaker.provider, 'gemini');
   assert.equal(p.config().providers.openai.model, 'gpt-realtime-translate');
-});
-
-test('voice library text is escaped and applying a voice configures re-synthesis only on the chosen route', async t => {
-  const p = await page(t);
-  p.doc.querySelector('.library-open').click();
-  p.byId('library-refresh').click();
-  await settle(() => p.byId('library-voices').querySelectorAll('button').length === 2);
-  assert.equal(p.byId('library-voices').querySelectorAll('img').length, 0);
-  assert.match(p.byId('library-voices').textContent, /<img/);
-  p.byId('library-voices').querySelectorAll('button')[1].click();
-  assert.equal(p.byId('voice-library').open, false);
-  assert.equal(p.byId('speaker-voice-engine').value, 'gemini');
-  assert.equal(p.byId('speaker-voice-voice_id').value, 'fixture_voice');
-  assert.equal(p.byId('microphone-voice-engine').value, 'native');
-  p.set('speaker-voice-style', 'Calma e natural');
-  p.set('speaker-voice-engine', 'elevenlabs');
-  assert.equal(p.byId('speaker-voice-style').disabled, true);
-  p.byId('save').click();
-  await settle(() => p.config().speaker.voice.engine === 'elevenlabs');
-  assert.equal(p.config().speaker.voice.style, '');
-});
-
-test('creating a designed voice requires an explicit submit and does not start audio', async t => {
-  const p = await page(t);
-  p.doc.querySelector('.library-open').click();
-  p.set('voice-create-name', 'Voz de teste');
-  p.set('voice-create-description', 'Uma voz calma e natural.');
-  assert.equal(p.calls.some(call => call.path === '/api/voices/design'), false);
-  p.byId('voice-create-form').dispatchEvent(new p.window.Event('submit', { bubbles: true, cancelable: true }));
-  await settle(() => p.byId('library-notice').textContent.includes('Voz de teste'));
-  const create = p.calls.find(call => call.path === '/api/voices/design');
-  assert.equal(create.body.provider, 'gemini');
-  assert.equal(create.body.description, 'Uma voz calma e natural.');
-  assert.equal(p.calls.some(call => call.path === '/api/start'), false);
+  assert.equal(Object.hasOwn(p.config().microphone, 'voice'), false);
 });
 
 test('starting locks configuration and stopping unlocks it; device refresh retains an empty selection', async t => {
@@ -935,7 +913,6 @@ test('idle routes pass original audio; recording-only sessions do not require tr
   assert.equal(p.byId('recording-speaker').disabled, false);
   assert.equal(p.byId('microphone-capture_device').disabled, false);
   assert.equal(p.byId('microphone-target_language').disabled, true);
-  assert.equal(p.byId('microphone-voice-engine').disabled, true);
   p.byId('start').click();
   await settle(() => !p.byId('stop').hidden && !p.byId('stop').disabled);
   assert.equal(p.config().microphone.enabled, false);
@@ -1137,27 +1114,19 @@ test('explicit Portuguese overrides an English OS and missing translation keys f
   assert.match(p.window.BabelI18n.date(new Date('2026-09-29T12:00:00Z'), { month: 'long', timeZone: 'UTC' }), /September/);
 });
 
-test('interface switching preserves drafts, native nodes, uploads, dialogs and config revisions', async t => {
+test('interface switching preserves drafts, native nodes, focus and config revisions', async t => {
   const p = await page(t);
   p.set('speaker-target_language', 'ja-JP');
   p.set('microphone-capture_device', '');
   p.set('session-name', 'Sessão que fica');
   p.byId('credential-gemini').value = 'secret-draft-not-saved';
   p.byId('autostart-enabled').click();
-  p.doc.querySelector('.library-open').click();
-  p.set('voice-create-description', 'Voz personalizada sem alteração');
-  const input = p.byId('voice-create-reference');
-  const file = new p.window.File(['audio'], 'reference.wav', { type: 'audio/wav' });
-  Object.defineProperty(input, 'files', { configurable: true, value: [file] });
-  const draft = p.byId('voice-create-description'); draft.focus();
+  const draft = p.byId('session-name'); draft.focus();
   const originalFocused = p.doc.activeElement;
   await chooseInterface(p, 'en');
   assert.equal(p.doc.documentElement.lang, 'en');
-  assert.equal(p.byId('voice-library').open, true);
   assert.equal(p.doc.activeElement, originalFocused);
-  assert.equal(p.byId('voice-create-reference'), input);
-  assert.equal(input.files[0], file);
-  assert.equal(draft.value, 'Voz personalizada sem alteração');
+  assert.equal(draft.value, 'Sessão que fica');
   assert.equal(p.byId('speaker-target_language').value, 'ja-JP');
   assert.equal(p.byId('microphone-capture_device').value, '');
   assert.equal(p.byId('session-name').value, 'Sessão que fica');
@@ -1169,7 +1138,6 @@ test('interface switching preserves drafts, native nodes, uploads, dialogs and c
   const languageWrite = p.calls.find(call => call.path === '/api/interface' && call.options.method === 'PUT');
   assert.deepEqual(languageWrite.body, { language: 'en' });
   assert.equal(languageWrite.options.headers['If-Match'], '"0"');
-  p.byId('library-close').click();
   p.byId('save').click();
   await settle(() => p.byId('notice').textContent === 'Settings saved.');
   assert.equal(p.config().interface.language, 'en');
@@ -1377,7 +1345,7 @@ test('native guide hides when host metadata fails and recovers without reinstall
   assert.equal(p.calls.some(call => call.path.startsWith('/api/virtual/')), false);
 });
 
-test('recognizers, languages and STT profiles save independently from translation and voices', async t => {
+test('recognizers, languages and STT profiles save independently from translation', async t => {
   const p = await page(t, { initialChange: cfg => { cfg.providers.openai.transcription_model = 'legacy-sts-recognition'; } });
   p.set('transcription-enabled', true);
   p.set('stt-microphone-provider', 'deepgram');
@@ -1391,8 +1359,6 @@ test('recognizers, languages and STT profiles save independently from translatio
   p.set('microphone-provider', 'openai');
   p.set('microphone-source_language', 'fr');
   p.set('speaker-provider', 'local');
-  p.set('speaker-voice-engine', 'elevenlabs');
-  p.set('speaker-voice-voice_id', 'independent-voice');
   assert.equal(p.byId('stt-microphone-provider').value, 'deepgram');
   assert.equal(p.byId('stt-microphone-language').value, 'pt-BR');
   assert.deepEqual([...p.byId('stt-microphone-provider').options].map(o => o.value), ['gemini','openai','deepgram','whisper']);
@@ -1406,7 +1372,7 @@ test('recognizers, languages and STT profiles save independently from translatio
   assert.equal(cfg.transcription.providers.deepgram.punctuate, false);
   assert.equal(cfg.microphone.provider, 'openai');
   assert.equal(cfg.speaker.provider, 'local');
-  assert.equal(cfg.speaker.voice.voice_id, 'independent-voice');
+  assert.equal(Object.hasOwn(cfg.speaker, 'voice'), false);
   assert.equal(cfg.providers.openai.transcription_model, 'legacy-sts-recognition');
   assert.equal(cfg.providers.gemini.model, 'gemini-3.5-live-translate-preview');
   assert.equal(cfg.transcription.providers.gemini.model, 'gemini-3.5-transcribe-live');
@@ -1644,13 +1610,9 @@ test('local translation independently switches managed components and retains ex
   assert.equal(p.byId('profile-local-whisper_endpoint').value, 'auto');
   assert.equal(p.byId('profile-local-piper_endpoint').value, 'auto');
   p.set('profile-local-piper_endpoint-mode', 'external');
-  assert.equal(p.byId('profile-local-piper_voice').value, '', 'external Piper uses its default voice instead of a managed auto ID');
   p.set('profile-local-piper_endpoint', 'http://127.0.0.1:49111/synthesize');
-  p.set('profile-local-piper_voice', 'custom-piper');
   p.set('profile-local-piper_endpoint-mode', 'auto');
-  assert.equal(p.byId('profile-local-piper_voice').value, 'auto');
   p.set('profile-local-piper_endpoint-mode', 'external');
-  assert.equal(p.byId('profile-local-piper_voice').value, 'custom-piper');
   p.byId('save').click();
   await settle(() => p.calls.some(c => c.path === '/api/config' && c.options.method === 'PUT'));
   assert.equal(p.config().providers.local.translation_api, 'ollama');

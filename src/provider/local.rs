@@ -94,9 +94,8 @@ impl LocalProvider {
         ensure!(
             transcription_only
                 || (!config.translation_model.trim().is_empty()
-                    && config.translation_model.len() <= 200
-                    && config.piper_voice.len() <= 200),
-            "invalid local model or voice selection"
+                    && config.translation_model.len() <= 200),
+            "invalid local model selection"
         );
         let client = Client::builder()
             .redirect(reqwest::redirect::Policy::none())
@@ -244,14 +243,11 @@ impl LocalProvider {
                 emit(events, ProviderEvent::TurnComplete).await?;
                 continue;
             }
-            let voice = if config.voice.trim().is_empty() {
-                &self.config.piper_voice
-            } else {
-                &config.voice
-            };
             let mut request = json!({"text":translated});
-            if !voice.is_empty() {
-                request["voice"] = json!(voice);
+            // Embedded Piper resolves its catalog voice internally. External
+            // services receive no override and use their own configured default.
+            if !config.voice.is_empty() {
+                request["voice"] = json!(config.voice);
             }
             let wav = bounded_body(
                 self.client.post(&self.config.piper_endpoint).json(&request),
@@ -1281,7 +1277,8 @@ mod tests {
 
     #[tokio::test]
     async fn mock_http_pipeline_sends_real_wav_and_emits_original_translation_and_pcm() {
-        let app=Router::new()
+        for resolved_voice in [true, false] {
+            let app=Router::new()
             .route("/inference",post(|body:Bytes|async move {
                 assert!(body.windows(4).any(|w|w==b"RIFF"));
                 let text=String::from_utf8_lossy(&body);
@@ -1296,74 +1293,82 @@ mod tests {
                 assert!(body["messages"][0]["content"].as_str().unwrap().contains("into en"));
                 Json(json!({"done":true,"message":{"role":"assistant","content":"Good morning."}}))
             }))
-            .route("/synthesize",post(|Json(body):Json<Value>|async move {
-                assert_eq!(body["voice"],"en_US-lessac-medium");
+            .route("/synthesize",post(move |Json(body):Json<Value>|async move {
+                if resolved_voice {
+                    assert_eq!(body["voice"],"en_US-lessac-medium");
+                } else {
+                    assert!(body.get("voice").is_none(), "External Piper uses its service default");
+                }
                 assert_eq!(body["text"],"Good morning.");
                 ([(header::CONTENT_TYPE,"audio/wav")],encode_wav(&vec![4000;1600]).unwrap())
             }));
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let base = format!("http://{}", listener.local_addr().unwrap());
-        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
-        let provider = LocalProvider::new(LocalProviderConfig {
-            whisper_endpoint: format!("{base}/inference"),
-            ollama_endpoint: format!("{base}/api/chat"),
-            piper_endpoint: format!("{base}/synthesize"),
-            ..options()
-        })
-        .unwrap();
-        let (audio_tx, audio_rx) = mpsc::channel(8);
-        let (events_tx, mut events_rx) = mpsc::channel(16);
-        let cancel = CancellationToken::new();
-        let worker_cancel = cancel.clone();
-        let worker = tokio::spawn(async move {
-            provider
-                .run(session(), audio_rx, events_tx, worker_cancel)
-                .await
-        });
-        assert_eq!(events_rx.recv().await, Some(ProviderEvent::Connected));
-        audio_tx.send(vec![5000; 3200]).await.unwrap();
-        audio_tx.send(vec![0; 1600]).await.unwrap();
-        let mut frames = Vec::new();
-        loop {
-            let event = timeout(Duration::from_secs(3), events_rx.recv())
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let base = format!("http://{}", listener.local_addr().unwrap());
+            let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+            let provider = LocalProvider::new(LocalProviderConfig {
+                whisper_endpoint: format!("{base}/inference"),
+                ollama_endpoint: format!("{base}/api/chat"),
+                piper_endpoint: format!("{base}/synthesize"),
+                ..options()
+            })
+            .unwrap();
+            let (audio_tx, audio_rx) = mpsc::channel(8);
+            let (events_tx, mut events_rx) = mpsc::channel(16);
+            let cancel = CancellationToken::new();
+            let worker_cancel = cancel.clone();
+            let mut cfg = session();
+            if !resolved_voice {
+                cfg.voice.clear();
+            }
+            let worker =
+                tokio::spawn(
+                    async move { provider.run(cfg, audio_rx, events_tx, worker_cancel).await },
+                );
+            assert_eq!(events_rx.recv().await, Some(ProviderEvent::Connected));
+            audio_tx.send(vec![5000; 3200]).await.unwrap();
+            audio_tx.send(vec![0; 1600]).await.unwrap();
+            let mut frames = Vec::new();
+            loop {
+                let event = timeout(Duration::from_secs(3), events_rx.recv())
+                    .await
+                    .unwrap()
+                    .unwrap();
+                let complete = event == ProviderEvent::TurnComplete;
+                frames.push(event);
+                if complete {
+                    break;
+                }
+            }
+            assert!(
+                matches!(&frames[0],ProviderEvent::Transcript {input:true,text,metadata:TranscriptMetadata {start_ms:Some(0),end_ms:Some(300),speaker:None,..}} if text=="Bom dia.")
+            );
+            assert!(
+                matches!(&frames[1],ProviderEvent::Transcript {input:false,text,..} if text=="Good morning.")
+            );
+            let samples: usize = frames
+                .iter()
+                .filter_map(|event| {
+                    if let ProviderEvent::Audio {
+                        samples,
+                        sample_rate,
+                    } = event
+                    {
+                        assert_eq!(*sample_rate, 24000);
+                        Some(samples.len())
+                    } else {
+                        None
+                    }
+                })
+                .sum();
+            assert_eq!(samples, 2400);
+            cancel.cancel();
+            timeout(Duration::from_secs(1), worker)
                 .await
                 .unwrap()
+                .unwrap()
                 .unwrap();
-            let complete = event == ProviderEvent::TurnComplete;
-            frames.push(event);
-            if complete {
-                break;
-            }
+            server.abort();
         }
-        assert!(
-            matches!(&frames[0],ProviderEvent::Transcript {input:true,text,metadata:TranscriptMetadata {start_ms:Some(0),end_ms:Some(300),speaker:None,..}} if text=="Bom dia.")
-        );
-        assert!(
-            matches!(&frames[1],ProviderEvent::Transcript {input:false,text,..} if text=="Good morning.")
-        );
-        let samples: usize = frames
-            .iter()
-            .filter_map(|event| {
-                if let ProviderEvent::Audio {
-                    samples,
-                    sample_rate,
-                } = event
-                {
-                    assert_eq!(*sample_rate, 24000);
-                    Some(samples.len())
-                } else {
-                    None
-                }
-            })
-            .sum();
-        assert_eq!(samples, 2400);
-        cancel.cancel();
-        timeout(Duration::from_secs(1), worker)
-            .await
-            .unwrap()
-            .unwrap()
-            .unwrap();
-        server.abort();
     }
 
     #[tokio::test]

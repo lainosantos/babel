@@ -90,13 +90,8 @@ impl Plan {
             if automatic(&local.ollama_endpoint) {
                 plan.translation = Some(local.translation_model.clone());
             }
-            if route.voice.engine == "native" && automatic(&local.piper_endpoint) {
-                let requested = if route.voice.voice_id.is_empty() {
-                    &local.piper_voice
-                } else {
-                    &route.voice.voice_id
-                };
-                match catalog.voice(requested, &route.target_language) {
+            if automatic(&local.piper_endpoint) {
+                match catalog.voice("auto", &route.target_language) {
                     Ok(voice) => {
                         plan.voices.insert(voice);
                     }
@@ -511,13 +506,8 @@ fn apply_endpoints(cfg: &AppConfig, endpoints: &Endpoints) -> Result<AppConfig> 
         local.piper_endpoint = url.clone();
         let catalog = Catalog::read();
         for route in [&mut resolved.microphone, &mut resolved.speaker] {
-            if route.enabled && route.provider == "local" && route.voice.engine == "native" {
-                let requested = if route.voice.voice_id.is_empty() {
-                    &local.piper_voice
-                } else {
-                    &route.voice.voice_id
-                };
-                route.voice.voice_id = catalog.voice(requested, &route.target_language)?;
+            if route.enabled && route.provider == "local" {
+                route.resolved_voice = catalog.voice("auto", &route.target_language)?;
             }
         }
     }
@@ -935,11 +925,10 @@ mod tests {
         assert!(plan.translation.is_none());
         assert!(plan.voices.is_empty());
         cfg.microphone.provider = "local".into();
-        cfg.microphone.voice.engine = "gemini".into();
         let plan = Plan::from_config(&cfg).unwrap();
         assert_eq!(plan.whisper.len(), 1);
         assert!(plan.translation.is_some());
-        assert!(plan.voices.is_empty());
+        assert_eq!(plan.voices.len(), 1);
     }
     #[test]
     fn resolves_per_route_voices_without_persisting_ports() {
@@ -954,11 +943,11 @@ mod tests {
             ..Default::default()
         };
         let resolved = apply_endpoints(&cfg, &endpoints).unwrap();
-        assert_eq!(resolved.microphone.voice.voice_id, "en_US-lessac-medium");
-        assert_eq!(resolved.speaker.voice.voice_id, "pt_BR-faber-medium");
+        assert_eq!(resolved.microphone.resolved_voice, "en_US-lessac-medium");
+        assert_eq!(resolved.speaker.resolved_voice, "pt_BR-faber-medium");
         assert_eq!(resolved.providers.local.translation_api, "openai");
         assert_eq!(cfg.providers.local.piper_endpoint, "auto");
-        assert!(cfg.microphone.voice.voice_id.is_empty());
+        assert!(cfg.microphone.resolved_voice.is_empty());
     }
     #[test]
     fn synchronous_controller_construction_needs_no_async_runtime() {

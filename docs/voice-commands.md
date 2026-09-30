@@ -185,7 +185,7 @@ under Commands and does not interrupt normal audio forwarding.
 An explicit local HTTP(S) endpoint instead of `auto` selects a **service outside
 Babel's management**. In that case, you manage its startup, port, and shutdown.
 The two fields are independent: one helper can be managed while the other is external.
-The Local provider's recognition endpoint under **Translation and voices** is
+The Local provider's recognition endpoint under **Translation** is
 also a separate setting and does not automatically follow the agent endpoint.
 
 ## Installing local Whisper

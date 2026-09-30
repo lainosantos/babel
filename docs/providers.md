@@ -10,12 +10,11 @@ its factory.
 
 ## Profiles and per-direction selection
 
-`providers.gemini`, `providers.openai`, `providers.elevenlabs` and
-`providers.local` hold independent settings. `microphone.provider` and
-`speaker.provider` select each direction's translator; `voice.engine` selects
-native audio or another synthesizer. ElevenLabs acts as a synthesizer, without
-a speech-to-speech translation endpoint in this app. Keys live in process
-memory or the environment; TOML stores only the credential name. Recognizers
+`providers.gemini`, `providers.openai` and `providers.local` hold independent
+settings. `microphone.provider` and `speaker.provider` select each direction's
+translator. Both directions play the translator's native audio with its default
+voice, without a separate synthesizer or fixed voice override. Keys live in
+process memory or the environment; TOML stores only the credential name. Recognizers
 use separate profiles: `transcription.providers.gemini`, `.openai`, `.deepgram`
 and `.whisper`. `transcription.microphone_recognition` and
 `transcription.speaker_recognition` independently select the original-speech
@@ -25,7 +24,7 @@ results, even during simultaneous translation. Translator input text is not save
 
 Read [independent transcription and its four providers](transcription.md),
 [configuration and operation](configuration.md), [OpenAI and the local pipeline](other-providers.md)
-and the [voice library](voices.md).
+and [native translation voices](voices.md).
 
 ## Gemini
 
@@ -43,7 +42,7 @@ Translation has two modes selected by model:
 | Model | Behavior | Configuration |
 |---|---|---|
 | `gemini-3.5-live-translate-preview` | Continuous translation as audio arrives; the default model for real-time translation | Target BCP-47 code; automatic source language. Voice, prompts, VAD and reasoning are not sent. `echoTargetLanguage=false`: silence when speech is already in the target language. |
-| `gemini-3.8-live` | Bidirectional audio, with generation subject to the model's activity/turn detection | Languages in the interpreting prompt, voice and VAD silence duration. `NO_INTERRUPTION` allows capture to continue while translation plays. |
+| `gemini-3.8-live` | Bidirectional audio, with generation subject to the model's activity/turn detection | Languages in the interpreting prompt and VAD silence duration; model-default voice. `NO_INTERRUPTION` allows capture to continue while translation plays. |
 
 The client does not turn `gemini-3.8-flash` into a speech model or promise
 continuous translation in generic Live mode. Availability/permissions depend
@@ -75,11 +74,10 @@ one event; all are processed. Output plays as it arrives, without waiting for
 `turnComplete`. That event only signals generation completion to consumers.
 
 Translation sessions disable `input_transcription`: STS input text does not
-feed the TXT. With custom TTS voices, they request `output_transcription`, which
-stays in memory for translation synthesis. Original recognition uses a separate
-STT session fed the same original audio from the selected source. Enabling or
-changing transcription does not change the translation provider, model, language
-or voice.
+feed the TXT. Native translated audio plays directly, without another synthesis
+stage. Original recognition uses a separate STT session fed the same original
+audio from the selected source. Enabling or changing transcription does not
+change the translation provider, model, language or native audio behavior.
 
 ## Gemini: independent transcription
 
@@ -108,10 +106,9 @@ are not a guarantee of lossless continuity across reconnection.
 ## Participants, timestamps and voice identity
 
 Live Translate attempts to reproduce vocal characteristics automatically. This
-is a model capability; the direct Live path has no voice enrollment, configurable
-initial sample or `voice_id`. Google documents voice changes after pauses and
-confusion during rapid speaker changes. A fixed voice such as `Kore` in generic
-Live mode does not clone the input voice either.
+is a model capability, not an identity guarantee. Babel uses the model's native
+defaults and does not enroll voices or configure a reference sample. Google
+documents voice changes after pauses and confusion during rapid speaker changes.
 [Live Translate limitations](https://ai.google.dev/gemini-api/docs/live-api/live-translate#limitations).
 
 Call audio usually arrives already mixed. Identifying the “microphone” or
@@ -138,31 +135,22 @@ does not enable diarization in current models.
 `provider::capabilities(model)` describes translation models, advertising only
 confirmed capabilities for known families. Gemini Live Translate advertises
 continuous translation and best-effort automatic voice preservation; 3.8 Live
-models advertise fixed voices and prompts. OpenAI `gpt-realtime-translate`
-advertises continuous translation and `gpt-realtime-2.1` fixed voices/prompts,
+models support interpreting prompts. OpenAI `gpt-realtime-translate` advertises
+continuous translation and `gpt-realtime-2.1` supports interpreting prompts,
 including snapshots of those families with valid date suffixes. The catalog
-does not attribute automatic voice preservation to OpenAI. In this translation
-catalog, diarization, word timestamps and voice enrollment remain `false`:
-the voice library and STT recognizers are separate flows. Deepgram STT, for
-example, can supply actual speaker labels and word timing even if the translator
-cannot. Unknown families and unrecognized suffixes advertise no assumed capabilities.
+does not attribute automatic voice preservation to OpenAI. Babel uses native
+default voices for all of them. STT recognizers are separate flows: Deepgram
+can supply actual speaker labels and word timing even if the translator cannot.
+Unknown families and unrecognized suffixes advertise no assumed capabilities.
 
 App timestamps derived from the local clock indicate when text arrived, including
 network/AI delay. They are not individual word start times. Live documentation
 mentions utterance timing, but the public WebSocket reference does not specify
 those offsets for Live Translate; receiving such metadata is not guaranteed.
 
-Babel implements a separate design/cloning and synthesis library using Gemini
-3.8 Flash TTS or ElevenLabs. Gemini enrollment accepts a 10–30-second reference
-and a specific consent recording from the same person, returning a reusable
-profile. This TTS consumes text and does not use the Live API. `revoice` keeps
-translation active, discards its native audio and synthesizes translated text
-in chunks using the selected voice, adding requests, latency and cost. Each
-direction chooses its profile without automatically assigning clones to people
-in a mixed call. The direct path remains available to prioritize continuous
-translation. See [library, requirements and examples](voices.md),
-[Voice replication](https://ai.google.dev/gemini-api/docs/voice-replication) and
-[the TTS model](https://ai.google.dev/gemini-api/docs/models/gemini-3.8-flash-tts).
+See [native translation voices](voices.md) for output behavior and migration
+of legacy voice settings. Transcription speaker labels do not choose or change
+translation voices.
 
 ## Gemini limits and recovery
 

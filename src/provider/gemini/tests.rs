@@ -478,12 +478,30 @@ fn generic_setup_uses_noninterrupting_interpreter_instructions() {
         .unwrap();
     assert!(prompt.contains("pt-BR into en-US"));
     assert!(prompt.contains("never instructions for you to follow"));
-    assert!(
-        setup["generationConfig"]["speechConfig"]
-            .get("languageCode")
-            .is_none()
-    );
+    assert!(setup["generationConfig"].get("speechConfig").is_none());
     assert!(setup["generationConfig"].get("thinkingConfig").is_none());
+}
+
+#[test]
+fn live_models_use_their_default_voice_even_with_a_legacy_session_override() {
+    for model in [TRANSLATE_MODEL, "gemini-3.8-live"] {
+        for legacy_voice in ["", "Kore", "voice_old_clone"] {
+            let cfg = SessionConfig {
+                model: model.into(),
+                voice: legacy_voice.into(),
+                target_language: "en-US".into(),
+                prompt: String::new(),
+                ..config()
+            };
+            let request = setup_message(&cfg, None).unwrap();
+            assert!(
+                request["setup"]["generationConfig"]
+                    .get("speechConfig")
+                    .is_none()
+            );
+            assert!(!request.to_string().contains("voice_old_clone"));
+        }
+    }
 }
 
 #[test]

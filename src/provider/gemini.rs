@@ -176,7 +176,6 @@ fn validate_config(config: &SessionConfig) -> Result<()> {
         config.prompt.len() <= 16_384,
         "provider prompt exceeds 16 KiB"
     );
-    ensure!(config.voice.len() <= 100, "voice name is too long");
     if is_transcription_model(config) {
         ensure!(
             config.source_language.is_empty()
@@ -252,9 +251,7 @@ fn setup_message(config: &SessionConfig, resume_handle: Option<&str>) -> Result<
             config.source_language, config.target_language, config.prompt,
         );
         setup["systemInstruction"] = json!({"parts": [{"text": system_instruction}]});
-        setup["generationConfig"]["speechConfig"] = json!({
-            "voiceConfig": {"prebuiltVoiceConfig": {"voiceName": config.voice}},
-        });
+        // Omit speechConfig so the Live model supplies its default voice.
         setup["realtimeInputConfig"] = json!({
             "automaticActivityDetection": {
                 "disabled": false,

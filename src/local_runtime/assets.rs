@@ -47,7 +47,7 @@ impl Catalog {
             .unwrap_or(language)
             .to_ascii_lowercase();
         self.voices.iter().find(|(_,voice)| voice.language == language).map(|(id,_)|id.clone())
-            .with_context(|| format!("No bundled Piper voice for language {language}; select a supported voice or an external voice engine"))
+            .with_context(|| format!("No bundled Piper voice for language {language}; choose a supported target language or an external Piper service"))
     }
 }
 

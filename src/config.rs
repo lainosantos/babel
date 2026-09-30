@@ -203,7 +203,8 @@ impl HistoryConfig {
 pub struct ProviderProfiles {
     pub gemini: CloudProviderConfig,
     pub openai: CloudProviderConfig,
-    pub elevenlabs: CloudProviderConfig,
+    #[serde(skip_serializing)]
+    pub elevenlabs: RemovedSetting,
     pub local: LocalProviderConfig,
 }
 
@@ -213,8 +214,10 @@ pub struct CloudProviderConfig {
     pub api_key_env: String,
     pub endpoint: String,
     pub model: String,
-    pub voice: String,
-    pub tts_model: String,
+    #[serde(skip_serializing)]
+    pub voice: RemovedSetting,
+    #[serde(skip_serializing)]
+    pub tts_model: RemovedSetting,
     pub transcription_model: String,
     pub connect_timeout_secs: u64,
     pub max_reconnect_attempts: u32,
@@ -225,8 +228,8 @@ impl Default for CloudProviderConfig {
             api_key_env: "GEMINI_API_KEY".into(),
             endpoint: GEMINI_ENDPOINT.into(),
             model: TRANSLATE_MODEL.into(),
-            voice: "Kore".into(),
-            tts_model: "gemini-3.8-flash-tts".into(),
+            voice: RemovedSetting,
+            tts_model: RemovedSetting,
             transcription_model: String::new(),
             connect_timeout_secs: 15,
             max_reconnect_attempts: 5,
@@ -241,18 +244,9 @@ impl Default for ProviderProfiles {
                 api_key_env: "OPENAI_API_KEY".into(),
                 endpoint: String::new(),
                 model: "gpt-realtime-translate".into(),
-                voice: "marin".into(),
-                tts_model: String::new(),
                 ..CloudProviderConfig::default()
             },
-            elevenlabs: CloudProviderConfig {
-                api_key_env: "ELEVENLABS_API_KEY".into(),
-                endpoint: "https://api.elevenlabs.io/v1".into(),
-                model: "eleven_flash_v2_5".into(),
-                tts_model: "eleven_flash_v2_5".into(),
-                voice: String::new(),
-                ..CloudProviderConfig::default()
-            },
+            elevenlabs: RemovedSetting,
             local: LocalProviderConfig::default(),
         }
     }
@@ -276,7 +270,8 @@ pub struct LocalProviderConfig {
     pub translation_api: String,
     pub translation_model: String,
     pub piper_endpoint: String,
-    pub piper_voice: String,
+    #[serde(skip_serializing)]
+    pub piper_voice: RemovedSetting,
     pub segment_ms: u32,
     pub silence_ms: u32,
     pub vad_threshold: f32,
@@ -291,7 +286,7 @@ impl Default for LocalProviderConfig {
             translation_api: "ollama".into(),
             translation_model: "qwen3-0.6b".into(),
             piper_endpoint: "auto".into(),
-            piper_voice: "auto".into(),
+            piper_voice: RemovedSetting,
             segment_ms: 2000,
             silence_ms: 300,
             vad_threshold: 0.01,
@@ -372,23 +367,17 @@ impl Default for AudioConfig {
     }
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
-#[serde(default, deny_unknown_fields)]
-pub struct RouteVoiceConfig {
-    /// native uses audio from the translation model; other engines re-synthesize translated text.
-    pub engine: String,
-    pub voice_id: String,
-    pub style: String,
-    pub chunk_ms: u32,
-}
-impl Default for RouteVoiceConfig {
-    fn default() -> Self {
-        Self {
-            engine: "native".into(),
-            voice_id: String::new(),
-            style: String::new(),
-            chunk_ms: 400,
-        }
+/// Accept legacy custom-voice settings without retaining or reserializing any
+/// identifiers, prompts, credentials or reference data. New sessions use only
+/// the selected Live provider's native default synthesis.
+#[derive(Clone, Debug, Default)]
+pub struct RemovedSetting;
+impl<'de> Deserialize<'de> for RemovedSetting {
+    fn deserialize<D: serde::Deserializer<'de>>(
+        deserializer: D,
+    ) -> std::result::Result<Self, D::Error> {
+        serde::de::IgnoredAny::deserialize(deserializer)?;
+        Ok(Self)
     }
 }
 
@@ -404,7 +393,12 @@ pub struct RouteConfig {
     pub target_language: String,
     pub prompt: String,
     pub gain: f32,
-    pub voice: RouteVoiceConfig,
+    #[serde(skip_serializing)]
+    pub voice: RemovedSetting,
+    /// Internal, language-selected embedded Piper voice. Never saved or accepted
+    /// from settings; cloud providers use their own native default voice.
+    #[serde(skip)]
+    pub resolved_voice: String,
 }
 impl Default for RouteConfig {
     fn default() -> Self {
@@ -417,7 +411,8 @@ impl Default for RouteConfig {
             target_language: "en-US".into(),
             prompt: String::new(),
             gain: 1.0,
-            voice: RouteVoiceConfig::default(),
+            voice: RemovedSetting,
+            resolved_voice: String::new(),
         }
     }
 }
@@ -465,17 +460,18 @@ fn migrate_managed_runtime(config: &mut AppConfig, document: &toml::Value) -> bo
         .and_then(|value| value.get("local"));
     let local = &mut config.providers.local;
     if stored_local.is_some_and(|value| value.get("whisper_model").is_none())
+        && stored_local
+            .and_then(|value| value.get("piper_voice"))
+            .is_some_and(|value| value.as_str() == Some(""))
         && local.whisper_endpoint == "http://127.0.0.1:8080/inference"
         && local.ollama_endpoint == "http://127.0.0.1:11434/api/chat"
         && local.piper_endpoint == "http://127.0.0.1:5000/synthesize"
         && local.translation_model == "qwen3:4b"
-        && local.piper_voice.is_empty()
     {
         local.whisper_endpoint = "auto".into();
         local.ollama_endpoint = "auto".into();
         local.piper_endpoint = "auto".into();
         local.translation_model = "qwen3-0.6b".into();
-        local.piper_voice = "auto".into();
         changed = true;
     }
     let whisper = &mut config.transcription.providers.whisper;
@@ -494,11 +490,33 @@ fn migrate_managed_runtime(config: &mut AppConfig, document: &toml::Value) -> bo
     changed
 }
 
+/// Compatibility markers deliberately retain no legacy data. Detect their
+/// original presence separately so loading an existing file removes obsolete
+/// settings from disk without modifying unrelated configuration.
+fn has_removed_voice_settings(document: &toml::Value) -> bool {
+    let route_settings = ["microphone", "speaker"].into_iter().any(|route| {
+        document
+            .get(route)
+            .is_some_and(|route| route.get("voice").is_some())
+    });
+    let provider_settings = document.get("providers").is_some_and(|providers| {
+        providers.get("elevenlabs").is_some()
+            || ["gemini", "openai"].into_iter().any(|provider| {
+                providers.get(provider).is_some_and(|profile| {
+                    profile.get("voice").is_some() || profile.get("tts_model").is_some()
+                })
+            })
+            || providers
+                .get("local")
+                .is_some_and(|local| local.get("piper_voice").is_some())
+    });
+    route_settings || provider_settings
+}
+
 impl AppConfig {
     pub fn profile(&self, kind: &str) -> &CloudProviderConfig {
         match kind {
             "openai" => &self.providers.openai,
-            "elevenlabs" => &self.providers.elevenlabs,
             _ => &self.providers.gemini,
         }
     }
@@ -573,8 +591,24 @@ impl AppConfig {
         }
         let migrate_stt = stt::migrate(&mut cfg, &document)?;
         let migrate_runtime = migrate_managed_runtime(&mut cfg, &document);
+        let migrate_voices = has_removed_voice_settings(&document);
+        // Legacy local translation could bypass Piper through custom TTS.
+        // Restore the managed native synthesizer when that removed path left
+        // its endpoint empty, preserving every explicit external endpoint.
+        if cfg.providers.local.piper_endpoint.is_empty()
+            && [("microphone", &cfg.microphone), ("speaker", &cfg.speaker)]
+                .into_iter()
+                .any(|(name, route)| {
+                    route.provider == "local"
+                        && document
+                            .get(name)
+                            .is_some_and(|route| route.get("voice").is_some())
+                })
+        {
+            cfg.providers.local.piper_endpoint = "auto".into();
+        }
         cfg.validate()?;
-        if migrate_base || migrate_provider || migrate_stt || migrate_runtime {
+        if migrate_base || migrate_provider || migrate_stt || migrate_runtime || migrate_voices {
             cfg.save(path)
                 .context("Could not persist the configuration migration")?;
         }
@@ -621,7 +655,6 @@ impl AppConfig {
         for (name, p) in [
             ("gemini", &self.providers.gemini),
             ("openai", &self.providers.openai),
-            ("elevenlabs", &self.providers.elevenlabs),
         ] {
             let model = p.model.trim_start_matches("models/");
             ensure!(
@@ -653,10 +686,8 @@ impl AppConfig {
                 "At most 20 reconnections for {name}"
             );
             ensure!(
-                p.voice.len() <= 128
-                    && p.tts_model.len() <= 128
-                    && p.transcription_model.len() <= 128,
-                "Voice/model settings exceed the limit for {name}"
+                p.transcription_model.len() <= 128,
+                "Transcription model settings exceed the limit for {name}"
             );
             ensure!(
                 p.endpoint.len() <= 2048,
@@ -667,19 +698,14 @@ impl AppConfig {
             self.providers.gemini.endpoint == GEMINI_ENDPOINT,
             "The Gemini adapter uses the fixed official endpoint"
         );
-        ensure!(
-            self.providers.elevenlabs.endpoint == "https://api.elevenlabs.io/v1",
-            "The ElevenLabs adapter uses the fixed official endpoint"
-        );
         // Validate only transports needed by selected features. An original-only
         // session must not require an unused translator, synthesizer or ASR setup.
         for route in [&self.microphone, &self.speaker] {
             if route.enabled {
-                crate::provider::create_route_provider(
+                crate::provider::create_configured_provider(
                     &route.provider,
                     self.profile(&route.provider),
                     &self.providers.local,
-                    route.voice.engine == "native",
                 )?;
             }
         }
@@ -754,42 +780,6 @@ impl AppConfig {
                     || route.prompt.trim().is_empty(),
                 "The dedicated continuous model does not accept prompts for {name}; choose a conversational model"
             );
-            ensure!(
-                matches!(
-                    route.voice.engine.as_str(),
-                    "native" | "gemini" | "elevenlabs"
-                ),
-                "Invalid voice synthesis for {name}"
-            );
-            ensure!(
-                (100..=2000).contains(&route.voice.chunk_ms),
-                "Text interval for synthesis: 100 to 2000 ms"
-            );
-            ensure!(
-                route.voice.voice_id.len() <= 256 && route.voice.style.len() <= 2000,
-                "Voice/style exceeds the limit for {name}"
-            );
-            if !route.enabled {
-                // Unused voice settings cannot prevent original recording/ASR.
-            } else if route.voice.engine == "native" {
-                ensure!(
-                    route.voice.style.is_empty(),
-                    "TTS style is only supported by Gemini synthesis"
-                );
-                ensure!(
-                    !self.continuous_translation(route) || route.voice.voice_id.is_empty(),
-                    "A fixed/cloned voice for {name} requires Gemini or ElevenLabs synthesis; the dedicated model does not accept native voice selection"
-                );
-            } else {
-                ensure!(
-                    !route.voice.voice_id.trim().is_empty(),
-                    "Select a synthesis voice for {name}"
-                );
-                ensure!(
-                    route.voice.engine != "elevenlabs" || route.voice.style.is_empty(),
-                    "ElevenLabs does not support this free-form style prompt; use a designed voice"
-                );
-            }
             for device in [&route.capture_device, &route.playback_device] {
                 ensure!(
                     device.len() <= 1024 && !device.contains(['\0', '\n', '\r']),
@@ -864,9 +854,6 @@ impl AppConfig {
             if route.enabled && matches!(route.provider.as_str(), "gemini" | "openai") {
                 crate::credentials::get(&self.profile(&route.provider).api_key_env)?;
             }
-            if route.enabled && route.voice.engine != "native" {
-                crate::credentials::get(&self.profile(&route.voice.engine).api_key_env)?;
-            }
         }
         for (recognition, selected) in [
             (
@@ -914,6 +901,201 @@ fn canonical_device(id: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn removed_voice_settings_are_discarded_and_migrated_without_changing_session_preferences() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("config.toml");
+        let mut expected = configured_routes();
+        expected.files.base_path = directory.path().to_str().unwrap().into();
+        expected.interface.language = "pt".into();
+        expected.microphone.provider = "local".into();
+        expected.speaker.provider = "local".into();
+        expected.microphone.prompt = "Preserve names and numbers.".into();
+        expected.speaker.prompt = "Use conversational phrasing.".into();
+        expected.recording.enabled = true;
+        expected.recording.directory = "original-session-audio".into();
+        expected.recording.mix.microphone_gain_db = 12.0;
+        expected.transcription.enabled = true;
+        expected.transcription.microphone_recognition.provider = "whisper".into();
+        expected.transcription.speaker_recognition.provider = "whisper".into();
+        expected.validate_for_start().unwrap();
+        let canonical = serde_json::to_value(&expected).unwrap();
+        let mut legacy = toml::Value::try_from(&expected).unwrap();
+        legacy["microphone"].as_table_mut().unwrap().insert(
+            "voice".into(),
+            toml::toml! {
+                engine = "gemini"
+                voice_id = "synthetic-clone-id"
+                style = "Old custom voice design"
+                chunk_ms = 400
+                reference_base64 = "synthetic-private-reference"
+            }
+            .into(),
+        );
+        legacy["speaker"].as_table_mut().unwrap().insert(
+            "voice".into(),
+            toml::toml! {
+                engine = "elevenlabs"
+                voice_id = "synthetic-participant-clone"
+                style = "Old participant voice"
+                chunk_ms = 200
+            }
+            .into(),
+        );
+        for provider in ["gemini", "openai"] {
+            let profile = legacy["providers"][provider].as_table_mut().unwrap();
+            profile.insert("voice".into(), "synthetic-custom-voice".into());
+            profile.insert("tts_model".into(), "synthetic-tts-model".into());
+        }
+        legacy["providers"]["local"]
+            .as_table_mut()
+            .unwrap()
+            .insert("piper_voice".into(), "synthetic-old-piper-voice".into());
+        legacy["providers"].as_table_mut().unwrap().insert(
+            "elevenlabs".into(),
+            toml::toml! {
+                api_key_env = "invalid removed key reference"
+                endpoint = "unsupported old synthesis endpoint"
+                model = "obsolete model"
+                voice = "obsolete voice"
+            }
+            .into(),
+        );
+
+        // The API also accepts old clients' fields without retaining their data.
+        let api: AppConfig =
+            serde_json::from_value(serde_json::to_value(&legacy).unwrap()).unwrap();
+        api.validate_for_start().unwrap();
+        assert_eq!(serde_json::to_value(&api).unwrap(), canonical);
+        fs::write(&path, toml::to_string_pretty(&legacy).unwrap()).unwrap();
+        let loaded = AppConfig::load(&path).unwrap();
+        loaded.validate_for_start().unwrap();
+        assert_eq!(serde_json::to_value(&loaded).unwrap(), canonical);
+        assert!(loaded.microphone.resolved_voice.is_empty());
+        assert!(loaded.speaker.resolved_voice.is_empty());
+        let migrated = fs::read_to_string(&path).unwrap();
+        let document: toml::Value = toml::from_str(&migrated).unwrap();
+        assert!(!has_removed_voice_settings(&document));
+        assert!(!migrated.contains("synthetic-private-reference"));
+        assert!(!migrated.contains("synthetic-custom-voice"));
+        let with_comment = format!("# Preserve after one completed migration.\n{migrated}");
+        fs::write(&path, &with_comment).unwrap();
+        AppConfig::load(&path).unwrap();
+        assert_eq!(fs::read_to_string(&path).unwrap(), with_comment);
+    }
+
+    #[test]
+    fn native_voice_defaults_have_no_persisted_override_and_markers_retain_no_data() {
+        assert_eq!(std::mem::size_of::<RemovedSetting>(), 0);
+        let mut config: AppConfig = toml::from_str("").unwrap();
+        config.validate().unwrap();
+        assert!(config.microphone.resolved_voice.is_empty());
+        config.microphone.resolved_voice = "synthetic-embedded-language-voice".into();
+        let json = serde_json::to_value(&config).unwrap();
+        for route in ["microphone", "speaker"] {
+            assert!(json[route].get("voice").is_none());
+            assert!(json[route].get("resolved_voice").is_none());
+        }
+        assert!(json["providers"].get("elevenlabs").is_none());
+        for provider in ["gemini", "openai"] {
+            assert!(json["providers"][provider].get("voice").is_none());
+            assert!(json["providers"][provider].get("tts_model").is_none());
+        }
+        assert!(json["providers"]["local"].get("piper_voice").is_none());
+        let encoded = toml::to_string(&config).unwrap();
+        assert!(!encoded.contains("synthetic-embedded-language-voice"));
+        let loaded: AppConfig = toml::from_str(&encoded).unwrap();
+        assert!(loaded.microphone.resolved_voice.is_empty());
+        assert_eq!(serde_json::to_value(loaded).unwrap(), json);
+    }
+
+    #[test]
+    fn compatibility_does_not_accept_unrelated_unknown_fields_or_internal_voice_selection() {
+        for document in [
+            serde_json::json!({"microphone":{"voices":{"engine":"gemini"}}}),
+            serde_json::json!({"microphone":{"resolved_voice":"not-user-configurable"}}),
+            serde_json::json!({"providers":{"gemini":{"voices":"unknown"}}}),
+            serde_json::json!({"providers":{"local":{"piper_voices":"unknown"}}}),
+            serde_json::json!({"providers":{"unrelated":{"voice":"unknown"}}}),
+        ] {
+            assert!(serde_json::from_value::<AppConfig>(document).is_err());
+        }
+        // Only explicitly removed settings accept arbitrary legacy shapes.
+        let mut legacy = serde_json::to_value(AppConfig::default()).unwrap();
+        legacy["microphone"]["voice"] = serde_json::json!(["discarded", {"nested":true}]);
+        legacy["speaker"]["voice"] = serde_json::Value::Null;
+        legacy["providers"]["gemini"]["voice"] = 42.into();
+        legacy["providers"]["gemini"]["tts_model"] = false.into();
+        legacy["providers"]["elevenlabs"] = serde_json::json!([]);
+        let config: AppConfig = serde_json::from_value(legacy).unwrap();
+        config.validate().unwrap();
+        assert_eq!(
+            serde_json::to_value(config).unwrap(),
+            serde_json::to_value(AppConfig::default()).unwrap()
+        );
+    }
+
+    #[test]
+    fn invalid_config_is_not_rewritten_when_removed_voice_settings_are_present() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("config.toml");
+        let mut document = toml::Value::try_from(AppConfig::default()).unwrap();
+        document["microphone"].as_table_mut().unwrap().insert(
+            "voice".into(),
+            toml::toml! { voice_id = "synthetic-old-clone" }.into(),
+        );
+        document["audio"]["playback_queue_ms"] = 0.into();
+        let original = toml::to_string(&document).unwrap();
+        fs::write(&path, &original).unwrap();
+        assert!(AppConfig::load(&path).is_err());
+        assert_eq!(fs::read_to_string(&path).unwrap(), original);
+    }
+
+    #[test]
+    fn removed_external_voice_restores_missing_native_piper_but_preserves_explicit_endpoints() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("config.toml");
+        for endpoint in ["", "http://127.0.0.1:54321/synthesize"] {
+            let mut config = configured_routes();
+            config.microphone.provider = "local".into();
+            config.speaker.enabled = false;
+            config.providers.local.piper_endpoint = endpoint.into();
+            let mut legacy = toml::Value::try_from(&config).unwrap();
+            legacy["microphone"].as_table_mut().unwrap().insert(
+                "voice".into(),
+                toml::toml! {
+                    engine = "elevenlabs"
+                    voice_id = "synthetic-external-voice"
+                }
+                .into(),
+            );
+            fs::write(&path, toml::to_string(&legacy).unwrap()).unwrap();
+            let restored = AppConfig::load(&path).unwrap();
+            restored.validate_for_start().unwrap();
+            assert_eq!(
+                restored.providers.local.piper_endpoint,
+                if endpoint.is_empty() {
+                    "auto"
+                } else {
+                    endpoint
+                }
+            );
+            assert_eq!(restored.microphone.provider, "local");
+            assert!(!has_removed_voice_settings(
+                &toml::from_str(&fs::read_to_string(&path).unwrap()).unwrap()
+            ));
+        }
+        // An unrelated invalid new configuration is not silently repaired.
+        let mut config = configured_routes();
+        config.microphone.provider = "local".into();
+        config.speaker.enabled = false;
+        config.providers.local.piper_endpoint.clear();
+        let invalid = toml::to_string(&config).unwrap();
+        fs::write(&path, &invalid).unwrap();
+        assert!(AppConfig::load(&path).is_err());
+        assert_eq!(fs::read_to_string(&path).unwrap(), invalid);
+    }
 
     #[test]
     fn original_history_defaults_and_bounds_are_backward_compatible() {
@@ -1029,7 +1211,6 @@ mod tests {
         config.providers.local.ollama_endpoint = "http://127.0.0.1:11434/api/chat".into();
         config.providers.local.piper_endpoint = "http://127.0.0.1:5000/synthesize".into();
         config.providers.local.translation_model = "qwen3:4b".into();
-        config.providers.local.piper_voice.clear();
         config.transcription.providers.whisper.endpoint =
             config.providers.local.whisper_endpoint.clone();
         let mut legacy = toml::Value::try_from(&config).unwrap();
@@ -1037,6 +1218,10 @@ mod tests {
             .as_table_mut()
             .unwrap()
             .remove("whisper_model");
+        legacy["providers"]["local"]
+            .as_table_mut()
+            .unwrap()
+            .insert("piper_voice".into(), "".into());
         legacy["transcription"]["providers"]["whisper"]
             .as_table_mut()
             .unwrap()
@@ -1081,16 +1266,52 @@ mod tests {
     }
 
     #[test]
-    fn local_translation_with_external_voice_needs_no_piper_configuration() {
+    fn legacy_piper_voice_is_discarded_without_replacing_explicit_external_services() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("config.toml");
+        let mut config = AppConfig::default();
+        config.providers.local.whisper_endpoint = "http://127.0.0.1:8080/inference".into();
+        config.providers.local.ollama_endpoint = "http://127.0.0.1:11434/api/chat".into();
+        config.providers.local.piper_endpoint = "http://127.0.0.1:5000/synthesize".into();
+        config.providers.local.translation_model = "qwen3:4b".into();
+        for old_voice in [Some("synthetic-explicit-local-voice"), Some(""), None] {
+            let mut legacy = toml::Value::try_from(&config).unwrap();
+            let local = legacy["providers"]["local"].as_table_mut().unwrap();
+            local.remove("whisper_model");
+            if let Some(voice) = old_voice {
+                local.insert("piper_voice".into(), voice.into());
+            }
+            fs::write(&path, toml::to_string(&legacy).unwrap()).unwrap();
+            let migrated = AppConfig::load(&path).unwrap();
+            if old_voice == Some("") {
+                assert_eq!(migrated.providers.local.whisper_endpoint, "auto");
+                assert_eq!(migrated.providers.local.ollama_endpoint, "auto");
+                assert_eq!(migrated.providers.local.piper_endpoint, "auto");
+                assert_eq!(migrated.providers.local.translation_model, "qwen3-0.6b");
+            } else {
+                assert_eq!(
+                    serde_json::to_value(&migrated.providers.local).unwrap(),
+                    serde_json::to_value(&config.providers.local).unwrap()
+                );
+            }
+            let persisted = fs::read_to_string(&path).unwrap();
+            assert!(!has_removed_voice_settings(
+                &toml::from_str(&persisted).unwrap()
+            ));
+            AppConfig::load(&path).unwrap();
+            assert_eq!(fs::read_to_string(&path).unwrap(), persisted);
+        }
+    }
+
+    #[test]
+    fn local_translation_always_requires_native_synthesis_configuration() {
         let mut config = configured_routes();
         config.microphone.provider = "local".into();
-        config.microphone.voice.engine = "gemini".into();
-        config.microphone.voice.voice_id = "Kore".into();
         config.speaker.enabled = false;
         config.providers.local.piper_endpoint.clear();
-        config.validate().unwrap();
-        config.microphone.voice.engine = "native".into();
         assert!(config.validate().is_err());
+        config.providers.local.piper_endpoint = "auto".into();
+        config.validate().unwrap();
     }
 
     pub(super) fn configured_routes() -> AppConfig {
@@ -1429,28 +1650,10 @@ mod tests {
         cfg.microphone.provider = "openai".into();
         cfg.providers.openai.model = "gpt-realtime-translate-2026-09-01".into();
         assert_eq!(cfg.capture_frame_ms(&cfg.microphone), 100);
-        cfg.microphone.prompt = "Glossário".into();
+        cfg.microphone.prompt = "Glossary".into();
         assert!(cfg.validate().is_err());
         cfg.microphone.prompt.clear();
-        cfg.microphone.voice.voice_id = "marin".into();
-        assert!(cfg.validate().is_err());
-    }
-    #[test]
-    fn synthesis_style_limit_matches_transport_in_bytes() {
-        let mut cfg = AppConfig::default();
-        cfg.microphone.voice.engine = "gemini".into();
-        cfg.microphone.voice.voice_id = "voice_test".into();
-        cfg.microphone.voice.style = "a".repeat(2000);
         cfg.validate().unwrap();
-        cfg.microphone.voice.style.push('a');
-        assert!(cfg.validate().is_err());
-        cfg.microphone.voice.style = "é".repeat(1000);
-        cfg.validate().unwrap();
-        cfg.microphone.voice.style.push('a');
-        assert!(
-            cfg.validate().is_err(),
-            "UTF-8 style limits must count bytes"
-        );
     }
     #[test]
     fn invalid_gain_queue_and_typo_are_rejected() {
@@ -1546,9 +1749,7 @@ mod tests {
         cfg.microphone.enabled = false;
         cfg.speaker.enabled = false;
         cfg.recording.enabled = true;
-        cfg.microphone.voice.engine = "elevenlabs".into();
         cfg.providers.gemini.api_key_env = "BABEL_TEST_UNUSED_ASR_KEY".into();
-        cfg.providers.elevenlabs.api_key_env = "BABEL_TEST_UNUSED_TTS_KEY".into();
         cfg.validate_for_start().unwrap();
         assert_eq!(cfg.capture_frame_ms(&cfg.microphone), 20);
         cfg.recording.enabled = false;

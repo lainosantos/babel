@@ -2,7 +2,7 @@
 
 The **Transcription** menu has its own providers, models, credentials, and languages.
 The STT recognizer does not depend on the speech-to-speech (STS) translator or
-the voice synthesizer (TTS). For example, you can translate with Gemini and
+its native audio generation. For example, you can translate with Gemini and
 transcribe with Deepgram, or use only whisper.cpp to transcribe without
 translation. The microphone and incoming output can use different recognizers.
 
@@ -33,7 +33,7 @@ exit. The TOML file stores the **reference** (`api_key_env`), never the key.
 By default, STT and translation may reference the same account variable. To
 separate credentials, use different names, such as `GEMINI_STT_API_KEY` and
 `GEMINI_TRANSLATION_API_KEY`. Changing the STT profile's reference does not change
-the translation or voice profile.
+the translation profile.
 
 ## Transcribing recent history
 
@@ -92,7 +92,7 @@ Select **Gemini** for the source and configure its profile in Transcription.
 The official endpoint is fixed; the STT model is `gemini-3.5-transcribe-live`,
 separate from the translation model. Input is mono PCM16 at 16 kHz. The session
 requests text output and preserves the original speech, without a target language,
-translation prompt, or TTS voice.
+translation prompt, or voice override.
 
 Babel saves final `inputTranscription` segments; speculative
 `interimInputTranscription` hypotheses are not saved as final text.
@@ -148,7 +148,7 @@ consecutive words by the returned speaker ID, and records the actual start/end
 times of those groups. With the option off, it does not request diarization.
 Numeric IDs such as `0` identify API groupings, not verified people; they may
 change after reconnection or between the two sources. This option does not
-clone voices or change the translation voice.
+assign or change translation voices.
 
 Only `is_final` results are persisted. `speech_final` ends the turn without
 duplicating text. During silence, the client sends a keepalive every three
@@ -202,7 +202,7 @@ idle_unload_secs = 60
 ```
 
 This profile recognizes only original audio. It does not call the translator
-model, Piper, or a voice service. `auto` in the **language** field requests Whisper
+model or Piper. `auto` in the **language** field requests Whisper
 language detection, and codes such as `pt-BR` are reduced to `pt`; `translate`
 is always false. `endpoint = "auto"` selects the managed process, not the language.
 

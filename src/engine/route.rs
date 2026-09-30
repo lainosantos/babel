@@ -160,16 +160,12 @@ pub(super) async fn run_route(
     if translating {
         let provider_cancel = cancel.clone();
         let cloud = cfg.profile(&route.provider).clone();
+        // Only embedded Piper resolves a per-language catalog voice. Cloud
+        // sessions leave voice selection entirely to their Live model.
         let native_voice = if route.provider == "local" {
-            if route.voice.engine == "native" && !route.voice.voice_id.is_empty() {
-                route.voice.voice_id.clone()
-            } else {
-                cfg.providers.local.piper_voice.clone()
-            }
-        } else if route.voice.engine == "native" && !route.voice.voice_id.is_empty() {
-            route.voice.voice_id.clone()
+            route.resolved_voice.clone()
         } else {
-            cloud.voice.clone()
+            String::new()
         };
         let session_config = SessionConfig {
             model: cloud.model.clone(),
@@ -182,55 +178,21 @@ pub(super) async fn run_route(
             connect_timeout_secs: cloud.connect_timeout_secs,
             max_reconnect_attempts: cloud.max_reconnect_attempts,
             input_transcription: false,
-            output_transcription: translating && route.voice.engine != "native",
+            output_transcription: false,
         };
         let provider_kind = route.provider.clone();
         let local_config = cfg.providers.local.clone();
-        let synthesis = if translating && route.voice.engine != "native" {
-            let voice_provider = cfg.profile(&route.voice.engine);
-            Some(crate::voices::SynthesisConfig {
-                provider: route.voice.engine.clone(),
-                model: voice_provider.tts_model.clone(),
-                api_key_env: voice_provider.api_key_env.clone(),
-                voice_id: route.voice.voice_id.clone(),
-                style: route.voice.style.clone(),
-                language: route.target_language.clone(),
-            })
-        } else {
-            None
-        };
-        let chunk_ms = route.voice.chunk_ms;
-        let queue_ms = cfg.audio.playback_queue_ms;
         spawn_processor(
             &mut processing_jobs,
             &processing_handle,
             Processor::Translation,
             async move {
-                let provider = provider::create_route_provider(
-                    &provider_kind,
-                    &cloud,
-                    &local_config,
-                    synthesis.is_none(),
-                )?;
-                if let Some(synthesis) = synthesis {
-                    crate::revoice::run(
-                        provider,
-                        session_config,
-                        synthesis,
-                        chunk_ms,
-                        queue_ms,
-                        input_rx,
-                        events_tx,
-                        provider_cancel,
-                    )
+                let provider =
+                    provider::create_configured_provider(&provider_kind, &cloud, &local_config)?;
+                provider
+                    .run(session_config, input_rx, events_tx, provider_cancel)
                     .await
-                    .context("Translation + synthesis")
-                } else {
-                    provider
-                        .run(session_config, input_rx, events_tx, provider_cancel)
-                        .await
-                        .context("Provider")
-                }
+                    .context("Provider")
             },
         );
     }

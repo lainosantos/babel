@@ -61,7 +61,7 @@ async fn main() -> Result<()> {
         );
         let speech = client
             .post(&local.piper_endpoint)
-            .json(&json!({"text":"Good morning.","voice":ready.microphone.voice.voice_id}))
+            .json(&json!({"text":"Good morning.","voice":ready.microphone.resolved_voice}))
             .send()
             .await?
             .error_for_status()?

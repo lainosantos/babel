@@ -145,6 +145,29 @@ async fn separate_stt_and_translation_receive_original_audio_concurrently() {
             }),
         )
         .route(
+            "/native-speech",
+            post(|Json(request): Json<serde_json::Value>| async move {
+                assert_eq!(request["text"], "generated translation");
+                assert!(request.get("voice").is_none());
+                let mut bytes = std::io::Cursor::new(Vec::new());
+                let mut writer = hound::WavWriter::new(
+                    &mut bytes,
+                    hound::WavSpec {
+                        channels: 1,
+                        sample_rate: 16_000,
+                        bits_per_sample: 16,
+                        sample_format: hound::SampleFormat::Int,
+                    },
+                )
+                .unwrap();
+                for _ in 0..320 {
+                    writer.write_sample(1000i16).unwrap();
+                }
+                writer.finalize().unwrap();
+                bytes.into_inner()
+            }),
+        )
+        .route(
             "/dedicated-stt",
             post(
                 |headers: axum::http::HeaderMap, body: axum::body::Bytes| async move {
@@ -165,7 +188,7 @@ async fn separate_stt_and_translation_receive_original_audio_concurrently() {
     let mut cfg = AppConfig::default();
     cfg.providers.local.whisper_endpoint = format!("{base}/translation-asr");
     cfg.providers.local.ollama_endpoint = format!("{base}/translate");
-    cfg.providers.local.piper_endpoint = format!("{base}/unused-piper");
+    cfg.providers.local.piper_endpoint = format!("{base}/native-speech");
     cfg.providers.local.segment_ms = 500;
     cfg.providers.local.silence_ms = 100;
     cfg.transcription.microphone_recognition.provider = "whisper".into();
@@ -179,13 +202,9 @@ async fn separate_stt_and_translation_receive_original_audio_concurrently() {
         "independent-test-key".into(),
     )
     .unwrap();
-    let translator = provider::create_route_provider(
-        "local",
-        &cfg.providers.gemini,
-        &cfg.providers.local,
-        false,
-    )
-    .unwrap();
+    let translator =
+        provider::create_configured_provider("local", &cfg.providers.gemini, &cfg.providers.local)
+            .unwrap();
     let stt = provider::stt::create(
         &cfg.transcription.microphone_recognition,
         &cfg.transcription.providers,
@@ -238,6 +257,7 @@ async fn separate_stt_and_translation_receive_original_audio_concurrently() {
         fanout_original_audio(vec![0; 1600], Some(&translation_audio), Some(&recognition_audio), &metrics);
         assert!(matches!(translation_output.recv().await, Some(ProviderEvent::Transcript { input: false, ref text, .. }) if text == "generated translation"));
         assert!(matches!(recognition_output.recv().await, Some(ProviderEvent::Transcript { input: true, ref text, .. }) if text == "original reconhecido pelo STT"));
+        assert!(matches!(translation_output.recv().await, Some(ProviderEvent::Audio { ref samples, .. }) if !samples.is_empty()));
         assert_eq!(translation_output.recv().await, Some(ProviderEvent::TurnComplete));
         assert_eq!(recognition_output.recv().await, Some(ProviderEvent::TurnComplete));
     }).await.unwrap();

@@ -2,8 +2,8 @@
 
 Each route selects its translation provider independently. For example, the
 microphone can use OpenAI while incoming audio uses the local pipeline.
-Additional voices and translated-text resynthesis are described in
-[voices.md](voices.md); selectable devices by OS are in [platforms.md](platforms.md).
+Native voice defaults are described in [voices.md](voices.md); selectable
+devices by OS are in [platforms.md](platforms.md).
 Transcription has independent per-source provider/language selections and its
 own `transcription.providers.*` profiles. It receives original audio even during
 simultaneous translation and does not save STS input text. See
@@ -14,7 +14,7 @@ simultaneous translation and does not save STS input text. See
 The OpenAI profile defaults to `gpt-realtime-translate`. This dedicated
 continuous-translation model receives audio while producing translated speech
 and text. Its `/v1/realtime/translations` API differs from the conversational
-API. For free-form instructions and a fixed voice, choose `gpt-realtime-2.1`,
+API. For free-form instructions, choose `gpt-realtime-2.1`,
 which operates through end-of-speech detection and responses. This distinction
 comes from the [official translation documentation](https://developers.openai.com/api/docs/guides/realtime-translation).
 
@@ -29,7 +29,6 @@ Merge this excerpt into your existing TOML:
 api_key_env = "OPENAI_API_KEY"
 model = "gpt-realtime-translate"
 endpoint = ""
-voice = "marin"
 connect_timeout_secs = 15
 max_reconnect_attempts = 5
 
@@ -55,21 +54,19 @@ endpoint in a Bearer header. An alternative server must implement the same GA
 protocol; this field does not make arbitrary APIs compatible providers.
 
 The dedicated model's session contract does not support custom prompts or native
-voice selection. The profile voice field serves the conversational model. The
-adapter does not promise cloning, vocal-identity preservation or participant
-separation for the dedicated model. Use resynthesis to choose a fixed voice
-when needed. The dedicated session supports output language and input
+voice selection. Babel also leaves the conversational model's voice at its
+native default. Neither adapter promises vocal-identity preservation or
+participant separation. The dedicated session supports output language and input
 transcription under the [translation event contract](https://developers.openai.com/api/reference/resources/realtime/translation-client-events).
 The source-language field does not force a language in that session; translation
 uses received audio. In the conversational model, it becomes part of the instructions.
 
-For translation with instructions and a native voice:
+For translation with custom instructions:
 
 ```toml
 [providers.openai]
 model = "gpt-realtime-2.1"
 endpoint = ""
-voice = "marin"
 
 [microphone]
 provider = "openai"
@@ -87,7 +84,7 @@ is detected. See [Realtime conversations](https://developers.openai.com/api/docs
 and [WebSockets](https://developers.openai.com/api/docs/guides/voice-websockets?voice-api=realtime).
 
 The translation session does not request original recognition to generate the
-TXT. Its translated text is used in memory when an external TTS voice needs it.
+TXT. Its native audio is played directly.
 To save original speech, choose/configure STT on **Transcription**, independently
 of the OpenAI translation model. Legacy `providers.*.transcription_model` fields
 do not replace `transcription.providers.*.model` after migration. See the
@@ -191,7 +188,6 @@ whisper_model = "base-q5_1"
 ollama_endpoint = "auto"
 translation_model = "qwen3-0.6b"
 piper_endpoint = "auto"
-piper_voice = "auto"
 segment_ms = 2000
 silence_ms = 300
 vad_threshold = 0.01
@@ -207,18 +203,12 @@ provider = "local"
 source_language = "pt-BR"
 target_language = "en-US"
 prompt = "Preserve proper names and technical terms."
-
-[microphone.voice]
-engine = "native"
-voice_id = ""
-style = ""
-chunk_ms = 400
 ```
 
-Preserve existing devices and other fields when merging. `piper_voice = "auto"`
-selects the catalog voice for the target language; an explicit route `voice_id`
-takes precedence. The chain does not preserve vocal identity, clone voices or
-perform diarization. Intermediate recognition text does not feed the TXT:
+Preserve existing devices and other fields when merging. Embedded Piper always
+uses the catalog default for the target language; an external Piper service
+uses its own default. Babel sends no voice override. The chain does not preserve
+vocal identity or perform diarization. Intermediate recognition text does not feed the TXT:
 choose independent STT on **Transcription**. STT Whisper and translation Whisper
 have their own configurations.
 
@@ -253,8 +243,8 @@ Components can individually use **External server (advanced)**. Supply each
 service's actual endpoint; Babel does not discover services by default ports.
 Whisper accepts multipart WAV at `/inference`. Translation uses Ollama's chat
 API for `translation_api = "ollama"` and compatible chat completions for
-`"openai"`. External Piper must accept text/voice and return WAV. Remote HTTPS
-endpoints receive the audio or text for their stage. Babel's idle policy does
+`"openai"`. External Piper must accept text and return WAV using its default
+voice. Remote HTTPS endpoints receive the audio or text for their stage. Babel's idle policy does
 not terminate external servers.
 
 The Ollama API receives translation messages, `stream=false`, `think=false`,
@@ -264,10 +254,6 @@ truncated output is not sent to synthesis. Consult the
 [Whisper server](https://github.com/ggml-org/whisper.cpp/tree/master/examples/server)
 and [Piper HTTP](https://github.com/OHF-Voice/piper1-gpl/blob/main/docs/API_HTTP.md)
 for self-managed services.
-
-With external TTS selected on a route, the local translator sends translated
-text directly to that synthesizer and does not need to produce Piper audio.
-This sends text to the chosen voice provider and requires its key.
 
 ### Performance and limits
 

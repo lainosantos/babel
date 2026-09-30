@@ -20,8 +20,8 @@ if (consolePreview) {
       const translate = enabled('translate');
       consolePreview.classList.toggle('passthrough', !translate);
       for (const label of document.querySelectorAll('.process-label')) label.textContent = translate ? 'Translate' : 'Original';
-      document.querySelector('.outgoing .destination-label').textContent = translate ? 'Your voice in their language' : 'Your original voice';
-      document.querySelector('.incoming .destination-label').textContent = translate ? 'Their voice in your language' : 'Their original audio';
+      document.querySelector('.outgoing .destination-label').textContent = translate ? 'Your words in their language' : 'Your original voice';
+      document.querySelector('.incoming .destination-label').textContent = translate ? 'Their words in your language' : 'Their original audio';
       const descriptions = [translate ? 'Both directions translate.' : 'Original audio routes directly.'];
       if (enabled('transcribe')) descriptions.push('One original-language transcript.');
       if (enabled('record')) descriptions.push('One mixed recording.');
