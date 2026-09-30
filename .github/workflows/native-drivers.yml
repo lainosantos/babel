@@ -2,18 +2,31 @@ name: Build installers and native drivers
 on:
   workflow_call:
   workflow_dispatch:
+    inputs:
+      platform:
+        description: Platform to build for manual validation
+        required: true
+        default: all
+        type: choice
+        options:
+          - all
+          - linux
+          - macos
+          - windows
 permissions:
   contents: read
 jobs:
   portable:
     uses: ./.github/workflows/native-checks.yml
   runtime-linux:
+    if: ${{ !inputs.platform || inputs.platform == 'all' || inputs.platform == 'linux' }}
     needs: portable
     uses: ./.github/workflows/native-runtime.yml
     with:
       os: ubuntu-22.04
       name: linux-x86_64
   runtime-macos:
+    if: ${{ !inputs.platform || inputs.platform == 'all' || inputs.platform == 'macos' }}
     needs: portable
     strategy:
       fail-fast: false
@@ -28,6 +41,7 @@ jobs:
       os: ${{ matrix.os }}
       name: ${{ matrix.name }}
   runtime-windows:
+    if: ${{ !inputs.platform || inputs.platform == 'all' || inputs.platform == 'windows' }}
     needs: portable
     strategy:
       fail-fast: false

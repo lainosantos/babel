@@ -15,6 +15,10 @@ integrity files. The reusable native-driver/installer workflow also supports
 manual package builds. Manual builds are useful for inspection and do not
 replace the tagged-release path. See [contribution and release policy](../CONTRIBUTING.md).
 
+For manual validation, select `all`, `linux`, `macos` or `windows` in the workflow's
+`platform` input; tagged releases always build all platforms and require every
+artifact before publication.
+
 Publication waits for every required platform artifact and records all files
 in `release-manifest.json` and `SHA256SUMS.txt`. A partial draft can be resumed
 only when its existing assets belong to the prepared set; unexpected files
