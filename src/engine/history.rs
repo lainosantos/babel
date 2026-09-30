@@ -29,8 +29,9 @@ pub(super) fn validate_request(config: &AppConfig, seconds: u32) -> Result<()> {
 fn selected(config: &AppConfig, lane: RecordingLane) -> bool {
     match lane {
         RecordingLane::Microphone => {
-            (config.recording.enabled && config.recording.microphone)
-                || (config.transcription.enabled && config.transcription.microphone)
+            !config.microphone_uses_speaker()
+                && ((config.recording.enabled && config.recording.microphone)
+                    || (config.transcription.enabled && config.transcription.microphone))
         }
         RecordingLane::Speaker => {
             (config.recording.enabled && config.recording.speaker)
@@ -318,6 +319,28 @@ async fn send_audio(
 mod tests {
     use super::*;
     use crate::{history::HistoryBuffer, provider::TranscriptMetadata};
+
+    #[test]
+    fn speaker_mirror_history_retains_one_original_lane_and_excludes_the_prior_physical_mic() {
+        let mut config = AppConfig::default();
+        config.audio.microphone_source = crate::config::MicrophoneSource::SpeakerOriginal;
+        config.recording.enabled = true;
+        config.transcription.enabled = true;
+        let history = HistoryBuffer::new(&config.history);
+        let now = Instant::now();
+        history.push(RecordingLane::Microphone, &[123; 1600], now);
+        history.push(RecordingLane::Speaker, &[456; 1600], now);
+        let mut snapshot = history.snapshot(10, now);
+        select_sources(&mut snapshot, &config, now);
+        assert_eq!(snapshot.frames.len(), 1);
+        assert_eq!(snapshot.frames[0].lane, RecordingLane::Speaker);
+        assert_eq!(snapshot.frames[0].samples(), &[456; 1600]);
+        config.recording.speaker = false;
+        config.transcription.speaker = false;
+        let mut snapshot = history.snapshot(10, now);
+        select_sources(&mut snapshot, &config, now);
+        assert!(snapshot.frames.is_empty());
+    }
 
     #[test]
     fn history_requires_explicit_request_and_selected_file_features() {

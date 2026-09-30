@@ -14,6 +14,14 @@ for voice commands** pauses only the agent; audio may still be forwarded. Output
 continues to depend on audio sent to Babel by an application and never activates
 commands. This applies to all three systems.
 
+Voice commands require a physical microphone device selected under **Routing →
+Virtual microphone source**. The same device list also includes **Babel Speaker —
+original audio** and **Babel Speaker — after translation**. Choosing either
+speaker entry pauses command listening and does not capture the physical
+microphone, even when Babel Microphone is selected. Neither original nor
+translated mirrored audio activates the agent. Selecting a physical device in
+that list restores physical capture and the saved command-listening preference.
+
 Say **“Babel, turn on the kitchen light”**, or say **“Babel”**, wait for the activation indicator, and then give the command. The name is configurable. Matching is case-insensitive, requires whole words, and accepts an initial greeting such as “Hey, Babel” or the Portuguese “Oi, Babel”. Mentioning the name in the middle of a conversation (“I use Babel”) does not activate tools. After activation without a command, the default deadline for the next utterance is eight seconds. “Babel, cancel” cancels that activation; during a call in progress, use the dashboard's cancel button.
 
 ## Visual command feedback

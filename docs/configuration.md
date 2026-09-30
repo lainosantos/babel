@@ -4,8 +4,8 @@
 
 The dashboard separates controls into six pages:
 
-- **Routing:** choose the physical microphone and output and the virtual devices
-  for each direction. Original audio forwarding works without starting a session.
+- **Routing:** choose the virtual microphone's source, the physical devices, and
+  the virtual endpoints for each direction. Original audio forwarding works without starting a session.
   The microphone activates when Babel is the system default or an application
   uses it; output activates when an application sends audio to Babel.
 - **Translation:** enable translation for each direction, choose languages and
@@ -107,14 +107,15 @@ layer. The dashboard checks Host/Origin and loads no third-party scripts/fonts.
 
 ## Forwarding and sessions
 
-Babel has a local audio path and an optional processing session. While the program
-is open, configured routes forward the physical microphone to the virtual microphone
+Babel has a local audio path and an optional processing session. By default,
+configured routes forward the physical microphone to the virtual microphone
 and the virtual output to the physical output. Without an active session, forwarded
 content is original audio, without activating translators or creating session files.
 
 The microphone is active when **Babel is the system's default microphone**, even
 without an application capturing audio, or when an application explicitly uses
-Babel's virtual microphone. This also enables voice-command listening, if enabled.
+Babel's virtual microphone. With the physical microphone selected as its source,
+this also enables voice-command listening, if enabled.
 To pause this route, choose the physical microphone as the system default and stop
 using Babel in applications that selected it explicitly. Choosing a new default
 does not disconnect those applications.
@@ -145,6 +146,55 @@ The dashboard shows **Original audio** when only forwarding is active and
 **Session active** during processing or writing. Routing errors appear even
 without a session. Configure both ends of every route you want to use; a device
 selection does not change the system's global default output.
+
+## Virtual microphone source
+
+Under **Routing → Virtual microphone source**, one device list contains your
+physical microphones and the two Babel Speaker sources below. Choose an entry
+and save while no session is running. Existing configurations keep their saved
+physical microphone.
+
+| Source | Setting | Audio sent to Babel Microphone |
+|---|---|---|
+| A physical microphone's device name | `physical_microphone` (default) | The selected physical microphone; microphone translation applies when enabled. |
+| Babel Speaker — original audio | `speaker_original` | Incoming audio before output translation, even if your headphones play a translation. |
+| Babel Speaker — after translation | `speaker_output` | The stream sent toward the physical output: translated while output translation is active, otherwise original. |
+
+```toml
+[audio]
+microphone_source = "speaker_output"
+```
+
+Both speaker-source options bypass microphone translation. The output direction
+still controls its own translation. With `speaker_output`, no session or output
+translation off means the virtual microphone receives the original; with
+`speaker_original`, it always receives the incoming original. The saved physical
+microphone, languages, provider and translation switch remain available when you
+choose a physical microphone from the same list again.
+
+Forwarding requires both an eligible Babel Microphone (system default or used by
+an app) and an app actively sending audio to Babel Speaker. Choosing only Babel
+Speaker as the system default is insufficient. When incoming playback stops,
+the forwarded stream is cleared instead of replaying queued audio later.
+Translation interruptions also clear pending mirrored translated audio. These
+rules apply on Linux, macOS and Windows and also work without a session.
+
+Neither speaker-source mode captures the physical microphone or listens for
+voice commands.
+They do not create a second microphone copy for recording, transcription or
+recent-audio history. To save or transcribe the incoming original, select
+**Original output** on the relevant page; it is processed once with that source
+label. The **Original microphone** selections are inactive and retained for
+later. A recording or transcription feature with only that unavailable source
+selected cannot start until you select **Original output** or turn the feature
+off. Recent history follows the same original-output provenance.
+
+Changing this source selection requires stopping the session. Physical output
+switching through the tray remains available during a session. If either
+speaker-source mode is active, the tray's **Physical microphone** submenu only
+updates the saved hardware choice for later; it does not change the source mode
+or open that microphone. To return to physical capture, select a physical device
+in the Routing source list.
 
 ## Translators and native voices
 
@@ -240,8 +290,8 @@ Choose **explicit** devices. Default-device aliases could cause feedback when
 the calling application starts using the virtual output. Through the tray, you
 can switch the **physical microphone** and **physical output** during translation.
 This preserves provider connections and session files but may cause an audio gap.
-Other dashboard settings, such as profiles, languages, virtual cables,
-and recording options, require stopping the session. The original path stays
+Other dashboard settings, including the virtual microphone source, profiles,
+languages, virtual cables, and recording options, require stopping the session. The original path stays
 active during configuration. Native IDs include direction and persistent device
 identity: the UID on macOS and endpoint ID on Windows. Reordering the device list
 does not change selection. Legacy index/name configurations are accepted only

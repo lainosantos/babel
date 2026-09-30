@@ -252,6 +252,10 @@ async fn capture_with(
         let mut finished = false;
         let mut frame_channel_open = true;
         let command_tap = CommandCaptureTap::new(&stats);
+        let mirror = stats
+            .original_mirror
+            .as_ref()
+            .map(|source| source.begin(options));
         let end = loop {
             tokio::select! {
                 biased;
@@ -275,11 +279,15 @@ async fn capture_with(
                         Err(mpsc::error::TrySendError::Full(_)) => { stats.dropped_frames.fetch_add(1, Ordering::Relaxed); }
                         Err(mpsc::error::TrySendError::Closed(_)) => break End::Disconnected,
                     }
+                    if let Some(mirror) = &mirror {
+                        mirror.publish(&command_frame);
+                    }
                     command_tap.frame(command_frame);
                 }
             }
         };
         drop(command_tap);
+        drop(mirror);
         stop_backend(&mut request, &worker_cancel, finished).await?;
         drop(request);
         while incoming.try_recv().is_ok() {
@@ -343,12 +351,19 @@ fn invalidate_playback(
     }
 }
 fn is_current(command: &PlaybackCommand, stats: &AudioStats) -> bool {
+    current_generation(command, stats).is_some()
+}
+
+/// Retain the command's generation from the same acceptance check. Reading a
+/// newer stats generation later must never relabel old PCM as a current mirror.
+fn current_generation(command: &PlaybackCommand, stats: &AudioStats) -> Option<u64> {
+    let current = stats.playback_generation.load(Ordering::Acquire);
     match command {
         PlaybackCommand::Audio { generation, .. }
         | PlaybackCommand::Original { generation, .. } => {
-            *generation == stats.playback_generation.load(Ordering::Acquire)
+            (*generation == current).then_some(*generation)
         }
-        PlaybackCommand::Flush => true,
+        PlaybackCommand::Flush => Some(current),
     }
 }
 
@@ -381,6 +396,13 @@ async fn playback_with(
         );
         let mut finished = false;
         let mut pending = None;
+        let mut mirror = stats
+            .playback_mirror
+            .as_ref()
+            .map(|source| source.begin(options));
+        let mut mirror_generation = stats.playback_generation.load(Ordering::Acquire);
+        let mut mirror_fence = tokio::time::interval(Duration::from_millis(5));
+        mirror_fence.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         let end = loop {
             tokio::select! {
                 biased;
@@ -393,10 +415,25 @@ async fn playback_with(
                     finished = true;
                     break End::Failed(result.err().unwrap_or_else(|| anyhow!("Device playback ended unexpectedly")));
                 }
+                _ = mirror_fence.tick(), if mirror.as_ref().is_some_and(super::mirror::Publisher::has_subscribers) => {
+                    let generation = stats.playback_generation.load(Ordering::Acquire);
+                    if generation != mirror_generation {
+                        mirror = stats.playback_mirror.as_ref().map(|source| source.begin(options));
+                        mirror_generation = generation;
+                    }
+                }
                 permit = commands.reserve(), if pending.is_some() => {
                     let Ok(permit) = permit else { break End::Failed(anyhow!("The device closed the playback queue")); };
                     let command = pending.take().expect("guarded pending command");
-                    if is_current(&command, &stats) { permit.send(command); } else { discard_audio(command, &stats); }
+                    if let Some(generation) = current_generation(&command, &stats) {
+                        if mirror.is_some() && (generation != mirror_generation || matches!(command, PlaybackCommand::Flush)) {
+                            mirror = stats.playback_mirror.as_ref().map(|source| source.begin(options));
+                            mirror_generation = generation;
+                        }
+                        let mirrored = mirror.as_ref().and_then(|mirror| mirror.prepare_playback(&command, options));
+                        permit.send(command);
+                        if let (Some(mirror), Some(frame)) = (&mirror, mirrored) { mirror.publish(&frame); }
+                    } else { discard_audio(command, &stats); }
                 }
                 command = input.recv(), if pending.is_none() => {
                     let Some(command) = command else { break End::Disconnected; };
@@ -404,6 +441,7 @@ async fn playback_with(
                 }
             }
         };
+        drop(mirror);
         stop_backend(&mut request, &worker_cancel, finished).await?;
         drop(request);
         drop(commands);

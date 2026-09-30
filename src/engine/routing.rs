@@ -100,7 +100,7 @@ pub(super) async fn maintain_routing(state: &mut State) {
         state.routing_error = Some(error.to_string());
         return;
     }
-    if !crate::config::route_configured(&state.config.microphone)
+    if !crate::config::route_configured(&state.config.effective_microphone())
         && !crate::config::route_configured(&state.config.speaker)
     {
         state.routing_error = None;
@@ -111,8 +111,8 @@ pub(super) async fn maintain_routing(state: &mut State) {
     let (mic_virtual, mic_virtual_rx) = watch::channel(cfg.microphone.playback_device.clone());
     let (speaker_virtual, speaker_virtual_rx) = watch::channel(cfg.speaker.capture_device.clone());
     let (output, output_rx) = watch::channel(cfg.speaker.playback_device.clone());
-    let microphone = Arc::new(RouteMetrics::with_commands(&state.commands));
-    let speaker = Arc::new(RouteMetrics::default());
+    let (microphone, speaker) = RouteMetrics::for_configuration(cfg, &state.commands);
+    let mirror_source = speaker.mirror_source();
     let cancel = CancellationToken::new();
     let usage = audio::activity::monitor(
         mic_virtual_rx.clone(),
@@ -143,6 +143,19 @@ pub(super) async fn maintain_routing(state: &mut State) {
             TranscriptOrigin::Speaker,
         ),
     ] {
+        if origin == TranscriptOrigin::Microphone
+            && let Some(source) = &mirror_source
+        {
+            jobs.spawn(run_microphone_mirror(
+                source.clone(),
+                playback,
+                cfg.audio.device_latency_ms,
+                metrics.clone(),
+                cancel.child_token(),
+                usage.clone(),
+            ));
+            continue;
+        }
         if !crate::config::route_configured(route) {
             metrics.state("unconfigured");
             continue;

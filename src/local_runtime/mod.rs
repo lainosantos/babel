@@ -80,8 +80,11 @@ impl Plan {
         };
         let catalog = Catalog::read();
         let local = &cfg.providers.local;
-        for route in [&cfg.microphone, &cfg.speaker] {
-            if route.provider != "local" {
+        for (route, available) in [
+            (&cfg.microphone, !cfg.microphone_uses_speaker()),
+            (&cfg.speaker, true),
+        ] {
+            if !available || route.provider != "local" {
                 continue;
             }
             if automatic(&local.whisper_endpoint) {
@@ -100,9 +103,8 @@ impl Plan {
             }
         }
         let stt = &cfg.transcription;
-        if [&stt.microphone_recognition, &stt.speaker_recognition]
-            .iter()
-            .any(|r| r.provider == "whisper")
+        if ((!cfg.microphone_uses_speaker() && stt.microphone_recognition.provider == "whisper")
+            || stt.speaker_recognition.provider == "whisper")
             && automatic(&stt.providers.whisper.endpoint)
         {
             plan.whisper.insert(stt.providers.whisper.model.clone());
@@ -505,8 +507,11 @@ fn apply_endpoints(cfg: &AppConfig, endpoints: &Endpoints) -> Result<AppConfig> 
     {
         local.piper_endpoint = url.clone();
         let catalog = Catalog::read();
-        for route in [&mut resolved.microphone, &mut resolved.speaker] {
-            if route.enabled && route.provider == "local" {
+        for (route, available) in [
+            (&mut resolved.microphone, !cfg.microphone_uses_speaker()),
+            (&mut resolved.speaker, true),
+        ] {
+            if available && route.enabled && route.provider == "local" {
                 route.resolved_voice = catalog.voice("auto", &route.target_language)?;
             }
         }
@@ -767,6 +772,29 @@ async fn obtain(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn speaker_mirroring_never_prepares_or_loads_remembered_microphone_models() {
+        let mut cfg = AppConfig::default();
+        cfg.audio.microphone_source = crate::config::MicrophoneSource::SpeakerOriginal;
+        cfg.microphone.provider = "local".into();
+        cfg.microphone.target_language = "xx".into();
+        cfg.transcription.enabled = true;
+        cfg.transcription.microphone_recognition.provider = "whisper".into();
+        let selected = Plan::from_config(&cfg).unwrap();
+        assert!(selected.empty());
+        assert!(selected.issues.is_empty());
+        assert!(Plan::active(&cfg).unwrap().empty());
+        let endpoints = Endpoints {
+            piper: Some("http://127.0.0.1:32145/synthesize".into()),
+            ..Default::default()
+        };
+        let resolved = apply_endpoints(&cfg, &endpoints).unwrap();
+        assert!(resolved.microphone.resolved_voice.is_empty());
+        assert_eq!(resolved.microphone.target_language, "xx");
+        cfg.speaker.provider = "local".into();
+        assert!(!Plan::active(&cfg).unwrap().empty());
+    }
 
     #[tokio::test]
     async fn active_stt_ignores_inactive_models_and_reuses_loaded_recognizer() {

@@ -197,12 +197,15 @@ input[type="file"]::file-selector-button { margin-right: 12px; padding: 7px 10px
 .ai-node { display: grid; place-items: center; flex-shrink: 0; min-width: 32px; min-height: 26px; padding: 4px 7px; border: 1px solid #d4deec; border-radius: 5px; background: #f7f9fc; color: #60728c; font-size: 10px; font-weight: 750; }
 .ai-node.original { font-weight: 600; }
 .language-row { display: grid; grid-template-columns: minmax(0, 1fr) 24px minmax(0, 1fr); align-items: end; gap: 8px; margin-bottom: 23px; }
-.channel-header + .language-row { margin-top: 25px; }
+.channel-header + .language-row, .channel-header + .source-mode-notice[hidden] + .language-row { margin-top: 25px; }
 .language-row input { min-height: 47px !important; background: #f7f9ff !important; border-color: #dce3f4 !important; color: var(--channel-accent) !important; font-size: 16px !important; font-weight: 700; }
 .speaker .language-row input { background: #f3faf8 !important; border-color: #d7e9e5 !important; }
 .language-arrow { align-self: end; color: var(--channel-accent); font-size: 19px; text-align: center; line-height: 47px; }
 .device-fields { display: grid; gap: 16px; margin: 0 0 23px; }
 .device-fields select { font-size: 12px; }
+.microphone-source-control small { margin-top: 9px; line-height: 1.75; }
+.source-mode-notice { margin: 18px 0; padding: 12px 14px; border-left: 2px solid var(--output); border-radius: 0 5px 5px 0; color: #365d68; background: #f0f7f7; font-size: 11px; line-height: 1.8; }
+
 .route-model { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: end; gap: 13px; }
 .inline-action { padding: 10px 0; border: 0; background: transparent; color: var(--accent); font-size: 10px; font-weight: 650; text-align: right; text-decoration: underline; text-underline-offset: 3px; }
 .inline-action:hover:not(:disabled) { color: #2348d4; }

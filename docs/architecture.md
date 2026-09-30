@@ -48,6 +48,40 @@ The local translator always includes Piper after Whisper and Qwen. Managed
 Piper selects the target language's catalog default internally; an external
 Piper service uses its own default voice.
 
+## Mirroring speaker audio to the microphone
+
+Routing exposes one microphone-source list containing physical input devices and
+the two Babel Speaker sources. Selecting a physical device stores its native
+capture ID and `physical_microphone` mode. Selecting a speaker source changes
+only `audio.microphone_source`; it preserves the physical capture ID for later.
+The UI's speaker-source entries are never stored as native device IDs.
+
+`audio.microphone_source = "speaker_original"` replaces the physical microphone
+path with a mirror of Babel Speaker's original capture, before output translation.
+A single capture lease supplies full-resolution interleaved float32 frames shared
+through `Arc`; forwarding uses a bounded queue on the audio executor. It neither
+opens a second capture stream nor waits for inference, history or file I/O.
+
+The alternative `speaker_output` taps the speaker playback stream. It follows
+translated output while speaker translation is active, and original passthrough
+otherwise, including outside a session. It does not run a second translator.
+The mirror follows source-format changes and playback interruption/flush events,
+so canceled translation audio cannot remain queued in the virtual microphone.
+
+Both mirrors open only when Babel Microphone is selected/in use and an external
+app is sending audio to Babel Speaker. Output inactivity closes the mirror and
+discards pending frames. The physical microphone is not captured, microphone
+translation is bypassed, and speaker audio never reaches the command listener.
+Stored physical-device and provider preferences are unchanged.
+
+The original-output processing branch remains the sole owner of recording, STT
+and history for this audio. It retains the output source label and original
+content even when the mirror carries a translation. Mirroring does not duplicate
+that source under the microphone label. Effective session settings exclude
+microphone recording, STT, history and model loading in both modes. The saved
+selections remain available when physical microphone routing is restored. This
+transport and provenance policy is shared across Linux, macOS and Windows.
+
 ## Managed local inference
 
 `local_runtime` prepares the local providers selected in saved configuration,

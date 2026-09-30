@@ -12,7 +12,7 @@ function defaults() {
   return {
     version: 1, interface: { language: 'system' }, local_runtime: { directory: '', threads: 2, idle_unload_secs: 60 },
     providers: { gemini: cloud(), openai: cloud({ api_key_env: 'OPENAI_API_KEY', endpoint: '', model: 'gpt-realtime-translate' }), local: { whisper_endpoint: 'auto', whisper_model: 'base', ollama_endpoint: 'auto', translation_api: 'ollama', translation_model: 'qwen3-0.6b', piper_endpoint: 'auto', segment_ms: 2000, silence_ms: 300, vad_threshold: 0.01, request_timeout_secs: 30 } },
-    audio: { quality: 'balanced', capture_queue_ms: 200, playback_queue_ms: 2000, max_capture_age_ms: 200, device_latency_ms: 30 },
+    audio: { microphone_source: 'physical_microphone', quality: 'balanced', capture_queue_ms: 200, playback_queue_ms: 2000, max_capture_age_ms: 200, device_latency_ms: 30 },
     microphone: route(), speaker: route({ capture_device: 'babel_speaker.monitor', playback_device: 'physical-speaker', source_language: 'en-US', target_language: 'pt-BR' }),
     transcription: { enabled: false, microphone: true, speaker: true, timestamps: true, directory: 'transcripts',
       microphone_recognition: { provider: 'gemini', language: 'auto' }, speaker_recognition: { provider: 'gemini', language: 'auto' },
@@ -47,6 +47,7 @@ async function page(t, options = {}) {
   const platformOs = options.platform || 'linux';
   config.files.base_path = options.basePath ?? (platformOs === 'windows' ? 'C:\\Users\\Test\\Babel' : '/home/test/Babel');
   if (options.missingBase) delete config.files.base_path;
+  options.configure?.(config);
   let filePathsHandler = options.filePaths;
   const resolvePaths = body => {
     const hostPath = platformOs === 'windows' ? path.win32 : path.posix;
@@ -81,6 +82,7 @@ async function page(t, options = {}) {
   const initialChange = options.initialChange;
   const startRequest = options.startRequest;
   const statusRequest = options.statusRequest;
+  const extraInputDevices = options.extraInputDevices || [];
   window.fetch = async (url, options) => {
     const parsed = new URL(url, window.location.origin);
     assert.equal(parsed.pathname.startsWith('/api/voices'), false, 'the dashboard never calls removed voice APIs');
@@ -104,7 +106,7 @@ async function page(t, options = {}) {
       value = filePathsHandler ? await filePathsHandler(body, options, resolvePaths) : resolvePaths(body);
       if (value instanceof Response) return value;
     }
-    else if (parsed.pathname === '/api/devices') value = [{ id: 'physical-mic', name: 'Physical mic', direction: 'input', is_virtual: false }, { id: 'physical-speaker', name: 'Headphones', direction: 'output', is_virtual: false }, { id: 'babel_mic_bus', name: platformOs === 'macos' ? 'Babel Microphone' : platformOs === 'windows' ? 'Babel Microphone Feed' : 'Virtual microphone', direction: 'output', is_virtual: true }, { id: 'babel_speaker.monitor', name: platformOs === 'macos' ? 'Babel Speaker' : platformOs === 'windows' ? 'Babel Speaker Monitor' : 'Virtual output', direction: 'input', is_virtual: true }];
+    else if (parsed.pathname === '/api/devices') value = [{ id: 'physical-mic', name: 'Physical mic', direction: 'input', is_virtual: false }, { id: 'physical-speaker', name: 'Headphones', direction: 'output', is_virtual: false }, { id: 'babel_mic_bus', name: platformOs === 'macos' ? 'Babel Microphone' : platformOs === 'windows' ? 'Babel Microphone Feed' : 'Virtual microphone', direction: 'output', is_virtual: true }, { id: 'babel_speaker.monitor', name: platformOs === 'macos' ? 'Babel Speaker' : platformOs === 'windows' ? 'Babel Speaker Monitor' : 'Virtual output', direction: 'input', is_virtual: true }, ...extraInputDevices];
     else if (parsed.pathname === '/api/status') {
       if (statusRequest) await statusRequest();
       if (firstStatus && initialChange) { initialChange(config); revision++; }
@@ -1835,4 +1837,238 @@ test('compact multilingual choices save independently for local translation and 
   assert.equal(p.config().providers.local.whisper_model, 'base-q5_1');
   assert.equal(p.config().transcription.providers.whisper.model, 'tiny-q5_1');
   assert.equal(p.calls.some(c => ['/api/start', '/api/stop'].includes(c.path)), false);
+});
+
+
+function selectedMicrophoneSource(p) { return p.byId('microphone-capture_device').selectedOptions[0]?.dataset.microphoneSource || 'physical_microphone'; }
+function selectSpeakerSource(p, source) {
+  const option = p.byId('microphone-capture_device').querySelector(`[data-microphone-source="${source}"]`);
+  assert.ok(option, source); p.set('microphone-capture_device', option.value);
+  return option.value;
+}
+
+test('virtual microphone source preserves the physical device and saved microphone processing across all hosts', async t => {
+  for (const os of ['linux', 'macos', 'windows']) {
+    const p = await page(t, { platform: os, language: 'en' });
+    assert.equal(selectedMicrophoneSource(p), 'physical_microphone');
+    assert.equal(p.byId('audio-microphone-source'), null, 'one source selector replaces separate type/device fields');
+    p.set('microphone-provider', 'openai');
+    p.set('profile-openai-model', 'gpt-realtime');
+    p.set('microphone-prompt', 'Keep technical terms');
+    p.set('microphone-source_language', 'pt-BR');
+    p.set('recording-enabled', true); p.set('transcription-enabled', true);
+    const physical = p.byId('microphone-capture_device').value;
+    const originalMix = structuredClone(p.config().recording.mix);
+    selectSpeakerSource(p, 'speaker_original');
+    assert.equal(selectedMicrophoneSource(p), 'speaker_original');
+    assert.equal(p.byId('microphone-capture_device').disabled, false, 'the single selector remains available to change sources');
+    assert.equal(p.config().microphone.capture_device, physical);
+    assert.match(p.byId('microphone-source-label').textContent, /Babel Speaker.*original/);
+    assert.match(p.byId('microphone-source-hint').textContent, /voice commands are paused/);
+    assert.equal(p.byId('microphone-translation-bypass').hidden, false);
+    assert.equal(p.byId('microphone-translation-label').textContent, 'Paused');
+    for (const id of ['microphone-enabled', 'microphone-provider', 'microphone-source_language', 'microphone-target_language', 'microphone-prompt', 'microphone-gain', 'transcription-microphone', 'stt-microphone-provider', 'stt-microphone-language', 'recording-microphone', 'recording-microphone-gain', 'recording-microphone-priority', 'recording-ducking']) assert.equal(p.byId(id).disabled, true, id);
+    for (const id of ['microphone-enabled', 'recording-microphone', 'transcription-microphone']) assert.equal(p.byId(id).checked, true, 'saved microphone choices are retained');
+    assert.equal(p.byId('speaker-enabled').disabled, false);
+    assert.equal(p.byId('recording-speaker-gain').disabled, false);
+    assert.equal(p.byId('session-translation-scope').textContent, 'Incoming audio only');
+    p.byId('save').click(); await settle(() => p.byId('save').disabled && !p.byId('settings').disabled);
+    assert.equal(p.config().audio.microphone_source, 'speaker_original');
+    assert.equal(p.config().microphone.capture_device, physical);
+    assert.equal(p.config().microphone.enabled, true);
+    assert.equal(p.config().microphone.prompt, 'Keep technical terms');
+    assert.equal(p.config().microphone.provider, 'openai');
+    assert.equal(p.config().microphone.source_language, 'pt-BR');
+    assert.equal(p.config().recording.microphone, true);
+    assert.equal(p.config().transcription.microphone, true);
+    assert.deepEqual(p.config().recording.mix, originalMix);
+    p.byId('refresh-devices').click(); await settle(() => !p.byId('refresh-devices').disabled);
+    assert.equal(p.config().microphone.capture_device, physical);
+    p.set('microphone-capture_device', physical);
+    assert.equal(p.byId('audio-microphone-source'), null, 'one source selector replaces separate type/device fields');
+    assert.equal(p.byId('microphone-capture_device').disabled, false);
+    assert.equal(p.byId('microphone-enabled').disabled, false);
+    assert.equal(p.byId('microphone-enabled').checked, true);
+    assert.equal(p.byId('microphone-prompt').value, 'Keep technical terms');
+    assert.equal(p.byId('recording-microphone').disabled, false);
+    assert.equal(p.byId('recording-microphone-gain').disabled, false);
+    assert.equal(p.byId('transcription-microphone').disabled, false);
+    assert.equal(p.byId('microphone-translation-bypass').hidden, true);
+    assert.equal(p.byId('session-translation-scope').textContent, 'Both directions');
+    p.byId('save').click(); await settle(() => p.byId('save').disabled && !p.byId('settings').disabled);
+    assert.equal(p.config().audio.microphone_source, 'physical_microphone');
+    assert.equal(p.config().microphone.capture_device, physical);
+  }
+});
+
+test('speaker-original source skips microphone-only session features while quick controls choose eligible audio', async t => {
+  const p = await page(t, { language: 'en' });
+  p.set('speaker-enabled', false);
+  p.set('recording-enabled', true); p.set('recording-speaker', false);
+  p.set('transcription-enabled', true); p.set('transcription-speaker', false);
+  selectSpeakerSource(p, 'speaker_original');
+  assert.equal(p.byId('start').disabled, true);
+  for (const feature of ['translation', 'recording', 'transcription']) assert.equal(p.byId(`session-${feature}-enabled`).checked, false);
+  assert.equal(p.byId('session-translation-scope').textContent, 'Incoming audio only');
+  p.set('session-translation-enabled', true);
+  assert.equal(p.byId('speaker-enabled').checked, true);
+  assert.equal(p.byId('microphone-enabled').checked, true);
+  assert.equal(p.byId('start').disabled, false);
+  p.set('session-translation-enabled', false);
+  assert.equal(p.byId('speaker-enabled').checked, false);
+  assert.equal(p.byId('microphone-enabled').checked, true);
+  assert.equal(p.byId('start').disabled, true);
+  for (const feature of ['recording', 'transcription']) {
+    p.set(`session-${feature}-enabled`, true);
+    assert.equal(p.byId(`${feature}-speaker`).checked, true);
+    assert.equal(p.byId(`${feature}-microphone`).checked, true);
+    assert.equal(p.byId('start').disabled, false);
+    p.set(`session-${feature}-enabled`, false);
+    assert.equal(p.byId(`${feature}-microphone`).checked, true);
+    assert.equal(p.byId('start').disabled, true);
+  }
+  p.set('session-recording-enabled', true);
+  p.byId('start').click(); await settle(() => !p.byId('stop').hidden && !p.byId('stop').disabled);
+  assert.equal(p.byId('settings').disabled, true);
+  assert.equal(p.byId('microphone-capture_device').matches(':disabled'), true);
+  assert.equal(p.config().microphone.enabled, true);
+  assert.equal(p.config().speaker.enabled, false);
+  assert.equal(p.config().recording.microphone, true);
+  assert.equal(p.config().recording.speaker, true);
+  assert.equal(p.byId('microphone-signal').textContent, 'Original', 'bypassed microphone settings never label the original mirror as AI');
+  assert.match(p.byId('microphone-signal').parentElement.getAttribute('aria-label'), /Original incoming audio from Babel Speaker/);
+  assert.equal(p.calls.some(call => call.path.startsWith('/api/agent')), false);
+});
+
+test('speaker-original source ignores microphone-only history and preserves bypassed dedicated-model instructions', async t => {
+  const p = await page(t, { language: 'en' });
+  p.set('microphone-prompt', 'Saved instructions');
+  p.set('recording-enabled', true);
+  selectSpeakerSource(p, 'speaker_original');
+  p.history({ enabled: true, capacity_secs: 600, combined_audio_secs: 90, microphone_secs: 90, speaker_secs: 0 });
+  await p.poll();
+  assert.equal(p.byId('history-include').disabled, true, 'previous physical microphone audio is not eligible in this routing mode');
+  p.history({ enabled: true, capacity_secs: 600, combined_audio_secs: 110, microphone_secs: 90, speaker_secs: 20 });
+  await p.poll();
+  assert.equal(p.byId('history-include').disabled, false);
+  p.byId('save').click(); await settle(() => p.byId('save').disabled && !p.byId('settings').disabled);
+  assert.equal(p.config().microphone.prompt, 'Saved instructions', 'a bypassed dedicated provider does not clear stored instructions');
+  assert.equal(p.config().microphone.source_language, 'pt-BR');
+  p.set('interface-language', 'pt'); p.byId('interface-language').dispatchEvent(new p.window.Event('change', { bubbles: true }));
+  await settle(() => p.doc.documentElement.lang === 'pt' && !p.byId('interface-language').disabled);
+  assert.equal(selectedMicrophoneSource(p), 'speaker_original');
+  assert.equal(p.byId('microphone-translation-label').textContent, 'Pausada');
+  assert.match(p.byId('microphone-source-hint').textContent, /comandos de voz ficam pausados/);
+  assert.equal(p.byId('microphone-prompt').value, 'Saved instructions');
+});
+
+test('legacy configurations default to the physical microphone and external source updates refresh the dashboard', async t => {
+  const p = await page(t, { language: 'en', configure: config => { delete config.audio.microphone_source; } });
+  assert.equal(selectedMicrophoneSource(p), 'physical_microphone');
+  p.externalChange(config => { config.audio.microphone_source = 'speaker_original'; });
+  await p.poll();
+  assert.equal(selectedMicrophoneSource(p), 'speaker_original');
+  assert.equal(p.byId('microphone-capture_device').disabled, false);
+  assert.equal(p.byId('session-translation-scope').textContent, 'Incoming audio only');
+  p.externalChange(config => { config.audio.microphone_source = 'physical_microphone'; });
+  await p.poll();
+  assert.equal(p.byId('microphone-capture_device').disabled, false);
+  assert.equal(p.byId('microphone-capture_device').value, 'physical-mic');
+  assert.equal(p.byId('microphone-enabled').disabled, false);
+});
+
+
+test('incoming audio after translation mirrors speaker processing without enabling microphone processing', async t => {
+  const p = await page(t, { language: 'en' });
+  p.set('microphone-enabled', false);
+  p.set('recording-enabled', true); p.set('transcription-enabled', true);
+  selectSpeakerSource(p, 'speaker_output');
+  assert.equal(p.byId('microphone-capture_device').disabled, false);
+  assert.equal(p.config().microphone.capture_device, 'physical-mic');
+  assert.equal(p.byId('microphone-enabled').checked, false);
+  assert.equal(p.byId('microphone-enabled').disabled, true);
+  assert.equal(p.byId('transcription-microphone').disabled, true);
+  assert.equal(p.byId('recording-microphone').disabled, true);
+  assert.match(p.byId('microphone-source-hint').textContent, /translated when.*active, original otherwise/);
+  assert.match(p.byId('microphone-translation-bypass').textContent, /after any incoming-audio translation/);
+  assert.equal(p.byId('session-translation-scope').textContent, 'Incoming audio only');
+  p.byId('save').click(); await settle(() => p.byId('save').disabled && !p.byId('settings').disabled);
+  assert.equal(p.config().audio.microphone_source, 'speaker_output');
+  await p.poll();
+  assert.equal(p.byId('microphone-signal').textContent, 'Speaker audio');
+  p.byId('start').click(); await settle(() => !p.byId('stop').hidden && !p.byId('stop').disabled);
+  assert.equal(p.byId('speaker-signal').textContent, 'AI');
+  assert.equal(p.byId('microphone-signal').textContent, 'Translated');
+  assert.equal(p.byId('microphone-output-label').textContent, 'Played audio');
+  assert.equal(p.byId('microphone-state').textContent, 'After output translation');
+  p.routeStatus('speaker', { state: 'passthrough' }); await p.poll();
+  assert.equal(p.byId('microphone-signal').textContent, 'Speaker audio');
+  assert.equal(p.byId('microphone-state').textContent, 'Audio from Babel Speaker');
+  p.routeStatus('speaker', { state: 'running' }); await p.poll();
+  assert.equal(p.byId('microphone-signal').textContent, 'Translated');
+
+  assert.equal(p.config().microphone.enabled, false);
+  assert.equal(p.config().recording.microphone, true);
+  assert.equal(p.config().recording.speaker, true);
+  assert.match(p.byId('microphone-signal').parentElement.getAttribute('aria-label'), /Audio played by Babel Speaker/);
+  p.byId('stop').click(); await settle(() => p.byId('stop').hidden && !p.byId('settings').disabled);
+  assert.equal(p.byId('microphone-signal').textContent, 'Speaker audio');
+  p.set('speaker-enabled', false);
+  p.byId('start').click(); await settle(() => !p.byId('stop').hidden && !p.byId('stop').disabled);
+  assert.equal(p.byId('microphone-signal').textContent, 'Speaker audio');
+  assert.equal(p.byId('speaker-signal').textContent, 'Original');
+  assert.equal(p.byId('session-translation-enabled').checked, false);
+  assert.equal(p.byId('microphone-state').textContent, 'Audio from Babel Speaker');
+});
+
+
+test('the unified source list preserves dirty physical drafts across speaker choices, refreshes and language changes', async t => {
+  const p = await page(t, { language: 'en', extraInputDevices: [{ id: 'physical-mic-two', name: 'USB microphone', direction: 'input', is_virtual: false }, { id: 'other-monitor', name: 'Other virtual monitor', direction: 'input', is_virtual: true }] });
+  const source = p.byId('microphone-capture_device');
+  assert.equal(source.hasAttribute('data-field'), false, 'source tokens are never copied to raw config by generic field collection');
+  assert.equal(p.byId('audio-microphone-source'), null);
+  assert.deepEqual([...source.options].filter(option => option.dataset.microphoneSource).map(option => option.textContent), ['Babel Speaker — original audio', 'Babel Speaker — after translation']);
+  assert.equal([...source.options].some(option => ['babel_speaker.monitor', 'other-monitor'].includes(option.value)), false);
+  assert.equal([...p.byId('speaker-capture_device').options].some(option => option.value === 'babel_speaker.monitor'), true, 'the output capture selector is unchanged');
+  p.set('microphone-capture_device', 'physical-mic-two');
+  const originalToken = selectSpeakerSource(p, 'speaker_original');
+  assert.equal(p.config().microphone.capture_device, 'physical-mic', 'unsaved physical drafts do not change persisted settings');
+  p.byId('refresh-devices').click(); await settle(() => !p.byId('refresh-devices').disabled);
+  assert.equal(selectedMicrophoneSource(p), 'speaker_original');
+  p.set('interface-language', 'pt'); p.byId('interface-language').dispatchEvent(new p.window.Event('change', { bubbles: true }));
+  await settle(() => p.doc.documentElement.lang === 'pt' && !p.byId('interface-language').disabled);
+  assert.equal(source.value, originalToken);
+  assert.equal(source.selectedOptions[0].textContent, 'Babel Speaker — áudio original');
+  assert.equal([...source.options].find(option => option.value === 'physical-mic-two').textContent, 'USB microphone');
+  const postToken = selectSpeakerSource(p, 'speaker_output');
+  assert.equal(source.selectedOptions[0].textContent, 'Babel Speaker — após tradução');
+  p.byId('save').click(); await settle(() => p.byId('save').disabled && !p.byId('settings').disabled);
+  assert.equal(p.config().audio.microphone_source, 'speaker_output');
+  assert.equal(p.config().microphone.capture_device, 'physical-mic-two', 'speaker source preserves the last physical draft');
+  assert.equal(JSON.stringify(p.config()).includes(originalToken), false);
+  assert.equal(JSON.stringify(p.config()).includes(postToken), false);
+  p.set('microphone-capture_device', 'physical-mic-two');
+  assert.equal(selectedMicrophoneSource(p), 'physical_microphone');
+  assert.equal(p.byId('microphone-enabled').disabled, false);
+  p.byId('refresh-devices').click(); await settle(() => !p.byId('refresh-devices').disabled);
+  assert.equal(source.value, 'physical-mic-two');
+  p.byId('save').click(); await settle(() => p.byId('save').disabled && !p.byId('settings').disabled);
+  assert.equal(p.config().audio.microphone_source, 'physical_microphone');
+  assert.equal(p.config().microphone.capture_device, 'physical-mic-two');
+});
+
+test('a legacy virtual capture stays unavailable rather than becoming a selectable physical microphone', async t => {
+  const p = await page(t, { language: 'en', configure: config => { config.microphone.capture_device = 'babel_speaker.monitor'; } });
+  const source = p.byId('microphone-capture_device');
+  assert.equal(source.value, 'babel_speaker.monitor');
+  assert.equal(source.selectedOptions[0].disabled, true);
+  assert.match(source.selectedOptions[0].textContent, /unavailable/i);
+  const token = selectSpeakerSource(p, 'speaker_original');
+  p.byId('save').click(); await settle(() => p.byId('save').disabled && !p.byId('settings').disabled);
+  assert.equal(p.config().audio.microphone_source, 'speaker_original');
+  assert.equal(p.config().microphone.capture_device, 'babel_speaker.monitor', 'legacy raw values are preserved, not replaced by UI tokens');
+  assert.equal(JSON.stringify(p.config()).includes(token), false);
+  p.externalChange(config => { config.audio.microphone_source = 'speaker_output'; }); await p.poll();
+  assert.equal(selectedMicrophoneSource(p), 'speaker_output');
+  assert.equal(p.byId('microphone-enabled').disabled, true);
 });

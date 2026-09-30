@@ -11,6 +11,7 @@ use serde::{Deserialize, Serialize};
 pub(crate) mod activity;
 #[cfg(target_os = "linux")]
 mod linux;
+pub(crate) mod mirror;
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 mod native;
 #[cfg(any(target_os = "macos", target_os = "windows", test))]
@@ -124,6 +125,12 @@ pub enum PlaybackCommand {
 pub struct AudioStats {
     /// Used only by the capture control worker, never by native audio callbacks.
     pub command_tap: Option<std::sync::Weak<crate::commands::CommandService>>,
+    /// Shares speaker originals with a playback-only microphone route. Never
+    /// populated for physical microphone capture or used by device callbacks.
+    pub(crate) original_mirror: Option<std::sync::Arc<mirror::Source>>,
+    /// Optional post-processing speaker playback source. Kept separate from
+    /// originals so translated audio cannot enter history or recognition.
+    pub(crate) playback_mirror: Option<std::sync::Arc<mirror::Source>>,
     pub captured_frames: AtomicU64,
     pub dropped_frames: AtomicU64,
     pub processing_dropped_frames: AtomicU64,

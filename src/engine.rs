@@ -94,6 +94,34 @@ struct RouteMetrics {
     original_mode: AtomicBool,
 }
 impl RouteMetrics {
+    fn for_configuration(
+        config: &AppConfig,
+        commands: &Arc<crate::commands::CommandService>,
+    ) -> (Arc<Self>, Arc<Self>) {
+        if config.microphone_uses_speaker() {
+            // No physical microphone is captured in this mode. A speaker
+            // original can never acquire the command listener's capture tap.
+            let scope = commands.begin_capture_scope();
+            commands.set_microphone_active_scoped(false, scope);
+            let source = audio::mirror::Source::new();
+            let after_translation =
+                config.audio.microphone_source == crate::config::MicrophoneSource::SpeakerOutput;
+            (
+                Arc::new(Self::default()),
+                Arc::new(Self {
+                    audio: Arc::new(AudioStats {
+                        original_mirror: (!after_translation).then(|| source.clone()),
+                        playback_mirror: after_translation.then_some(source),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                }),
+            )
+        } else {
+            (Arc::new(Self::with_commands(commands)), Arc::default())
+        }
+    }
+
     fn with_commands(commands: &Arc<crate::commands::CommandService>) -> Self {
         Self {
             audio: Arc::new(AudioStats {
@@ -102,6 +130,13 @@ impl RouteMetrics {
             }),
             ..Default::default()
         }
+    }
+    fn mirror_source(&self) -> Option<Arc<audio::mirror::Source>> {
+        self.audio
+            .original_mirror
+            .as_ref()
+            .or(self.audio.playback_mirror.as_ref())
+            .cloned()
     }
     fn state(&self, state: &str) {
         self.view.lock().unwrap_or_else(|e| e.into_inner()).state = state.into();
@@ -514,6 +549,11 @@ impl Controller {
         cancel_pending_start(&mut state);
         state.config_revision = state.config_revision.wrapping_add(1);
         state.last.last_error = None;
+        if direction == DeviceDirection::Input && state.config.microphone_uses_speaker() {
+            // Remember the physical selection for a later source change. The
+            // active mirror is independent and must not restart speaker capture.
+            return Ok(());
+        }
         if let Some(running) = &state.running {
             let sender = match direction {
                 DeviceDirection::Input => &running.physical_input,
@@ -624,6 +664,9 @@ impl Controller {
                 cfg.recording.speaker,
             ),
         ] {
+            if name == "microphone" && cfg.microphone_uses_speaker() {
+                continue;
+            }
             if !(route.enabled
                 || (cfg.transcription.enabled && transcribe)
                 || (cfg.recording.enabled && record))
@@ -673,8 +716,7 @@ impl Controller {
         let (physical_output, output_changes) = watch::channel(cfg.speaker.playback_device.clone());
         let cancel = CancellationToken::new();
         let routes_closed = Arc::new(RoutesClosed::default());
-        let microphone = Arc::new(RouteMetrics::with_commands(&self.commands));
-        let speaker = Arc::new(RouteMetrics::default());
+        let (microphone, speaker) = RouteMetrics::for_configuration(&cfg, &self.commands);
         microphone.state("waiting_for_app");
         speaker.state("waiting_for_app");
         let task = tokio::spawn(run_session(
@@ -835,6 +877,9 @@ async fn create_session_files(
     // Resolve only enabled destinations, and resolve both before writing either
     // file. Legacy configurations can have empty folders for disabled features.
     let mut transcription = config.transcription.clone();
+    if config.microphone_uses_speaker() {
+        transcription.microphone = false;
+    }
     if transcription.enabled {
         transcription.directory =
             crate::storage::resolve_directory(&base, &transcription.directory)?
@@ -862,7 +907,9 @@ async fn create_session_files(
                 &directory,
                 &stem,
                 origin,
-                config.recording.microphone && crate::config::route_configured(&config.microphone),
+                config.recording.microphone
+                    && !config.microphone_uses_speaker()
+                    && crate::config::route_configured(&config.microphone),
                 config.recording.speaker && crate::config::route_configured(&config.speaker),
                 &config.recording.mix,
             )
@@ -979,6 +1026,7 @@ async fn run_session(
         speaker_virtual_rx.clone(),
         cancel.child_token(),
     );
+    let mirror_source = speaker.mirror_source();
     for (
         name,
         route,
@@ -1010,6 +1058,22 @@ async fn run_session(
             cfg.recording.speaker,
         ),
     ] {
+        if origin == TranscriptOrigin::Microphone
+            && let Some(source) = &mirror_source
+        {
+            routes.spawn_on(
+                run_microphone_mirror(
+                    source.clone(),
+                    playback_changes,
+                    cfg.audio.device_latency_ms,
+                    metrics,
+                    cancel.child_token(),
+                    usage.clone(),
+                ),
+                &control_handle,
+            );
+            continue;
+        }
         {
             let transcript = if transcribe {
                 transcript_tx
@@ -1229,6 +1293,36 @@ async fn run_selected_route(
     .await
 }
 
+/// The mirrored microphone is a destination, not a second source. It owns only
+/// playback and never creates recognition, recording, history or AI workers.
+async fn run_microphone_mirror(
+    source: Arc<audio::mirror::Source>,
+    playback: watch::Receiver<String>,
+    latency_ms: u32,
+    metrics: Arc<RouteMetrics>,
+    cancel: CancellationToken,
+    usage: watch::Receiver<audio::activity::EndpointUse>,
+) -> Result<()> {
+    metrics.original_mode.store(true, Ordering::Relaxed);
+    activity::while_mirrored(usage, metrics.clone(), cancel, |active_cancel| {
+        let source = source.clone();
+        let playback = playback.clone();
+        let metrics = metrics.clone();
+        async move {
+            metrics.state("passthrough");
+            audio::mirror::run(
+                source,
+                playback,
+                latency_ms,
+                active_cancel,
+                metrics.audio.clone(),
+            )
+            .await
+        }
+    })
+    .await
+}
+
 async fn processing_route<F>(handle: &tokio::runtime::Handle, route: F) -> Result<()>
 where
     F: std::future::Future<Output = Result<()>> + Send + 'static,
@@ -1381,6 +1475,94 @@ mod isolation_tests;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn speaker_mirror_modes_revoke_physical_commands_and_have_only_the_chosen_speaker_tap() {
+        let directory = tempfile::tempdir().unwrap();
+        let controller =
+            Controller::new(AppConfig::default(), directory.path().join("babel.toml")).unwrap();
+        for source in [
+            crate::config::MicrophoneSource::SpeakerOriginal,
+            crate::config::MicrophoneSource::SpeakerOutput,
+        ] {
+            let old_scope = controller.commands.begin_capture_scope();
+            controller
+                .commands
+                .set_microphone_active_scoped(true, old_scope);
+            let mut config = AppConfig::default();
+            config.audio.microphone_source = source;
+            let (microphone, speaker) =
+                RouteMetrics::for_configuration(&config, &controller.commands);
+            assert!(microphone.audio.command_tap.is_none());
+            assert!(speaker.audio.command_tap.is_none());
+            assert!(microphone.mirror_source().is_none());
+            assert!(speaker.mirror_source().is_some());
+            assert_eq!(
+                speaker.audio.original_mirror.is_some(),
+                source == crate::config::MicrophoneSource::SpeakerOriginal
+            );
+            assert_eq!(
+                speaker.audio.playback_mirror.is_some(),
+                source == crate::config::MicrophoneSource::SpeakerOutput
+            );
+            controller
+                .commands
+                .set_microphone_active_scoped(true, old_scope);
+            assert!(!controller.commands.status().microphone_active);
+        }
+    }
+
+    #[tokio::test]
+    async fn speaker_mirror_recording_keeps_one_unattenuated_original_source() {
+        let directory = tempfile::tempdir().unwrap();
+        for source in [
+            crate::config::MicrophoneSource::SpeakerOriginal,
+            crate::config::MicrophoneSource::SpeakerOutput,
+        ] {
+            let mut config = AppConfig::default();
+            config.files.base_path = directory.path().to_str().unwrap().into();
+            config.audio.microphone_source = source;
+            config.microphone.capture_device = "remembered-physical-microphone".into();
+            config.microphone.playback_device = "virtual-microphone".into();
+            config.speaker.capture_device = "virtual-speaker".into();
+            config.speaker.playback_device = "physical-speaker".into();
+            config.recording.enabled = true;
+            let session =
+                crate::session::SessionIdentity::new(Some("Mirror recording source")).unwrap();
+            let origin = Instant::now() - Duration::from_secs(1);
+            let recorder = create_session_files(&config, &session, origin)
+                .await
+                .unwrap()
+                .audio
+                .unwrap();
+            let path = recorder.path().to_path_buf();
+            let (send, receive) = mpsc::channel(2);
+            for (lane, sample) in [
+                (RecordingLane::Microphone, 9000),
+                (RecordingLane::Speaker, 1000),
+            ] {
+                send.send(AudioRecord {
+                    lane,
+                    samples: vec![sample; 320],
+                    captured_at: origin + Duration::from_millis(20),
+                })
+                .await
+                .unwrap();
+            }
+            drop(send);
+            recorder.run(receive).await.unwrap();
+            let mut wav = hound::WavReader::open(path).unwrap();
+            let samples = wav
+                .samples::<i16>()
+                .collect::<std::result::Result<Vec<_>, _>>()
+                .unwrap();
+            assert_eq!(
+                samples,
+                vec![1000; 320],
+                "mirror output is not an additional original lane"
+            );
+        }
+    }
 
     type TestRoute = (mpsc::Sender<Vec<i16>>, mpsc::Receiver<Vec<i16>>);
 

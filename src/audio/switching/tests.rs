@@ -96,6 +96,28 @@ fn command(sample: i16, generation: u64) -> PlaybackCommand {
     }
 }
 
+#[test]
+fn mirror_acceptance_never_relabels_old_audio_after_a_concurrent_interruption() {
+    let stats = AudioStats::default();
+    let audio = command(100, 0);
+    let accepted_generation = current_generation(&audio, &stats).unwrap();
+    // This is the boundary between accepting the command and creating the
+    // publisher/frame. The mirror must keep zero, not reload the newer one.
+    stats.playback_generation.store(1, Ordering::Release);
+    assert_eq!(accepted_generation, 0);
+    assert_ne!(
+        accepted_generation,
+        stats.playback_generation.load(Ordering::Acquire)
+    );
+    assert_eq!(current_generation(&audio, &stats), None);
+    assert_eq!(current_generation(&PlaybackCommand::Flush, &stats), Some(1));
+    let original = PlaybackCommand::Original {
+        samples: vec![0.125; 480].into(),
+        generation: 0,
+    };
+    assert_eq!(current_generation(&original, &stats), None);
+}
+
 // The driver disappears once, then the SAME endpoint identity becomes available.
 struct ReconnectingBackend {
     inner: MockBackend,
@@ -617,7 +639,12 @@ async fn speaker_stats_have_no_command_tap_and_do_not_activate_the_agent() {
         Arc::new(NoCommandTools),
     )
     .unwrap();
-    let stats = Arc::new(AudioStats::default());
+    let source = super::super::mirror::Source::new();
+    let mut mirrored = source.frames.subscribe();
+    let stats = Arc::new(AudioStats {
+        original_mirror: Some(source),
+        ..Default::default()
+    });
     assert!(stats.command_tap.is_none());
     let (events, mut received) = mpsc::channel(8);
     let backend = MockBackend { events };
@@ -641,11 +668,134 @@ async fn speaker_stats_have_no_command_tap_and_do_not_activate_the_agent() {
         event(&mut received).await,
         Event::Started("speaker-monitor".into())
     );
-    assert_eq!(audio.recv().await.unwrap().samples.as_ref(), &[2.0]);
+    let original = audio.recv().await.unwrap();
+    let mirror = tokio::time::timeout(Duration::from_secs(1), mirrored.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(Arc::ptr_eq(&original.samples, &mirror.original.samples));
+    assert_eq!(original.samples.as_ref(), &[2.0]);
+    assert!(
+        received.try_recv().is_err(),
+        "fanout must not create a second capture"
+    );
     assert!(!service.status().microphone_active);
     cancel.cancel();
     task.await.unwrap().unwrap();
     assert!(!service.status().microphone_active);
+}
+
+#[tokio::test(start_paused = true)]
+async fn playback_mirror_preserves_translated_pcm_and_fences_flush_interruptions_and_device_changes()
+ {
+    let source = super::super::mirror::Source::new();
+    let mut mirrored = source.frames.subscribe();
+    let mut formats = source.format.subscribe();
+    let stats = Arc::new(AudioStats {
+        playback_mirror: Some(source.clone()),
+        ..Default::default()
+    });
+    let (events, mut received) = mpsc::channel(16);
+    let backend = MockBackend { events };
+    let (devices, selected) = watch::channel("old".to_owned());
+    let (input, commands) = mpsc::channel(8);
+    let cancel = CancellationToken::new();
+    let worker_cancel = cancel.clone();
+    let observed = stats.clone();
+    let task = tokio::spawn(async move {
+        playback_with(
+            &backend,
+            "old",
+            options(),
+            commands,
+            selected,
+            worker_cancel,
+            observed,
+        )
+        .await
+    });
+    assert_eq!(event(&mut received).await, Event::Started("old".into()));
+    let first_epoch = formats.borrow_and_update().unwrap().epoch;
+    let samples = vec![i16::MIN, -1, 0, 1, i16::MAX];
+    input
+        .send(PlaybackCommand::Audio {
+            samples: samples.clone(),
+            generation: 0,
+        })
+        .await
+        .unwrap();
+    let first = tokio::time::timeout(Duration::from_secs(1), mirrored.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(first.epoch, first_epoch);
+    assert_eq!(first.original.sample_rate, 24_000);
+    assert_eq!(first.original.channels, 1);
+    assert_eq!(
+        first.original.samples.as_ref(),
+        samples
+            .iter()
+            .map(|value| f32::from(*value) / 32768.0)
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(
+        event(&mut received).await,
+        Event::Played("old".into(), i16::MIN, 0)
+    );
+
+    // Interruption must fence the microphone even if no replacement audio arrives.
+    stats.playback_generation.fetch_add(1, Ordering::AcqRel);
+    tokio::time::timeout(Duration::from_secs(1), async {
+        loop {
+            formats.changed().await.unwrap();
+            if formats
+                .borrow_and_update()
+                .is_some_and(|format| format.epoch != first_epoch)
+            {
+                break;
+            }
+        }
+    })
+    .await
+    .unwrap();
+    let interrupted_epoch = formats.borrow().unwrap().epoch;
+    input.send(command(100, 0)).await.unwrap();
+    input.send(PlaybackCommand::Flush).await.unwrap();
+    input.send(command(200, 1)).await.unwrap();
+    let resumed = tokio::time::timeout(Duration::from_secs(1), mirrored.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        resumed.epoch > interrupted_epoch,
+        "Flush must reset the mirror generation"
+    );
+    assert_eq!(resumed.original.samples[0], 200.0 / 32768.0);
+    assert_eq!(
+        event(&mut received).await,
+        Event::Played("old".into(), 200, 1)
+    );
+    assert_eq!(stats.dropped_frames.load(Ordering::Relaxed), 1);
+
+    devices.send_replace("new".into());
+    assert_eq!(event(&mut received).await, Event::Stopped("old".into()));
+    assert_eq!(event(&mut received).await, Event::Started("new".into()));
+    let generation = stats.playback_generation.load(Ordering::Acquire);
+    input.send(command(300, generation)).await.unwrap();
+    let replaced = tokio::time::timeout(Duration::from_secs(1), mirrored.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(replaced.epoch > resumed.epoch);
+    assert_eq!(replaced.original.samples[0], 300.0 / 32768.0);
+    assert_eq!(
+        event(&mut received).await,
+        Event::Played("new".into(), 300, generation)
+    );
+    cancel.cancel();
+    task.await.unwrap().unwrap();
+    assert!(source.format.borrow().is_none());
+    assert!(stats.command_tap.is_none());
 }
 
 struct InjectedCapture {

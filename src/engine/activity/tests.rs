@@ -18,6 +18,10 @@ struct Harness {
 
 impl Harness {
     fn new(origin: TranscriptOrigin) -> Self {
+        Self::for_selection(Selection::Original(origin))
+    }
+
+    fn for_selection(selection: Selection) -> Self {
         let (usage, rx) = watch::channel(EndpointUse::default());
         let (device, device_rx) = watch::channel(String::from("physical-one"));
         let cancel = CancellationToken::new();
@@ -30,7 +34,7 @@ impl Harness {
         let task = tokio::spawn(async move {
             // This sender represents the session's long-lived transcript/file
             // writer. Each activation has a separate simulated provider queue.
-            while_selected(rx, origin, worker_metrics, worker_cancel, |cancel| {
+            while_selected_source(rx, selection, worker_metrics, worker_cancel, |cancel| {
                 let (events, mut incoming) = mpsc::channel(2);
                 let writer = saved_tx.clone();
                 let stopped = stopped_tx.clone();
@@ -88,6 +92,45 @@ impl Harness {
             .unwrap()
             .unwrap();
     }
+}
+
+#[tokio::test]
+async fn mirrored_microphone_requires_both_endpoints_and_fences_either_selection_epoch() {
+    let mut h = Harness::for_selection(Selection::MirroredMicrophone);
+    h.usage.send_modify(|usage| {
+        usage.microphone = true;
+        usage.microphone_epoch += 1;
+    });
+    tokio::task::yield_now().await;
+    assert!(h.opened.try_recv().is_err());
+    h.usage.send_modify(|usage| {
+        usage.speaker = true;
+        usage.speaker_epoch += 1;
+    });
+    let first = h.open().await;
+    h.usage.send_modify(|usage| {
+        usage.speaker = false;
+        usage.speaker_epoch += 1;
+    });
+    h.stop_event().await;
+    assert!(first.events.is_closed());
+    assert!(h.metrics.audio.playback_generation.load(Ordering::Acquire) > 0);
+    h.usage.send_modify(|usage| {
+        usage.speaker = true;
+        usage.speaker_epoch += 1;
+    });
+    let second = h.open().await;
+    // Coalesced microphone deselection/reselection still destroys old queues.
+    h.usage.send_modify(|usage| usage.microphone_epoch += 2);
+    h.stop_event().await;
+    let third = h.open().await;
+    assert!(second.events.is_closed());
+    h.usage.send_modify(|usage| {
+        usage.speaker_error = Some("Speaker activity cannot be verified".into());
+    });
+    h.stop_event().await;
+    assert!(third.events.is_closed());
+    h.finish().await;
 }
 
 #[tokio::test]

@@ -5,17 +5,33 @@ use super::*;
 use crate::audio::activity::EndpointUse;
 use std::future::Future;
 
-fn selected(usage: &EndpointUse, origin: TranscriptOrigin) -> (bool, u64) {
-    match origin {
-        TranscriptOrigin::Microphone => (usage.microphone, usage.microphone_epoch),
-        TranscriptOrigin::Speaker => (usage.speaker, usage.speaker_epoch),
+#[derive(Clone, Copy)]
+enum Selection {
+    Original(TranscriptOrigin),
+    MirroredMicrophone,
+}
+
+fn selected(usage: &EndpointUse, selection: Selection) -> (bool, [u64; 2]) {
+    match selection {
+        Selection::Original(TranscriptOrigin::Microphone) => {
+            (usage.microphone, [usage.microphone_epoch, 0])
+        }
+        Selection::Original(TranscriptOrigin::Speaker) => (usage.speaker, [usage.speaker_epoch, 0]),
+        Selection::MirroredMicrophone => (
+            usage.microphone && usage.speaker,
+            [usage.microphone_epoch, usage.speaker_epoch],
+        ),
     }
 }
 
-fn inspection_error(usage: &EndpointUse, origin: TranscriptOrigin) -> Option<String> {
-    usage.error.clone().or_else(|| match origin {
-        TranscriptOrigin::Microphone => usage.microphone_error.clone(),
-        TranscriptOrigin::Speaker => usage.speaker_error.clone(),
+fn inspection_error(usage: &EndpointUse, selection: Selection) -> Option<String> {
+    usage.error.clone().or_else(|| match selection {
+        Selection::Original(TranscriptOrigin::Microphone) => usage.microphone_error.clone(),
+        Selection::Original(TranscriptOrigin::Speaker) => usage.speaker_error.clone(),
+        Selection::MirroredMicrophone => usage
+            .microphone_error
+            .clone()
+            .or_else(|| usage.speaker_error.clone()),
     })
 }
 
@@ -47,8 +63,35 @@ fn waiting(metrics: &RouteMetrics, error: Option<String>) {
 }
 
 pub(super) async fn while_selected<F, Fut>(
-    mut usage: watch::Receiver<EndpointUse>,
+    usage: watch::Receiver<EndpointUse>,
     origin: TranscriptOrigin,
+    metrics: Arc<RouteMetrics>,
+    cancel: CancellationToken,
+    run: F,
+) -> Result<()>
+where
+    F: FnMut(CancellationToken) -> Fut,
+    Fut: Future<Output = Result<()>>,
+{
+    while_selected_source(usage, Selection::Original(origin), metrics, cancel, run).await
+}
+
+pub(super) async fn while_mirrored<F, Fut>(
+    usage: watch::Receiver<EndpointUse>,
+    metrics: Arc<RouteMetrics>,
+    cancel: CancellationToken,
+    run: F,
+) -> Result<()>
+where
+    F: FnMut(CancellationToken) -> Fut,
+    Fut: Future<Output = Result<()>>,
+{
+    while_selected_source(usage, Selection::MirroredMicrophone, metrics, cancel, run).await
+}
+
+async fn while_selected_source<F, Fut>(
+    mut usage: watch::Receiver<EndpointUse>,
+    selection: Selection,
     metrics: Arc<RouteMetrics>,
     cancel: CancellationToken,
     mut run: F,
@@ -63,8 +106,8 @@ where
             return Ok(());
         }
         let current = usage.borrow_and_update().clone();
-        let (active, epoch) = selected(&current, origin);
-        let error = inspection_error(&current, origin);
+        let (active, epoch) = selected(&current, selection);
+        let error = inspection_error(&current, selection);
         if !active || error.is_some() {
             waiting(&metrics, error);
             tokio::select! {
@@ -92,10 +135,10 @@ where
                         break Err(anyhow!("Virtual device usage monitor closed"));
                     }
                     let current = usage.borrow_and_update().clone();
-                    let (active, current_epoch) = selected(&current, origin);
+                    let (active, current_epoch) = selected(&current, selection);
                     // Epochs retain even a false->true transition coalesced by watch.
                     // A change in the other direction never restarts this route.
-                    if !active || current_epoch != epoch || inspection_error(&current, origin).is_some() {
+                    if !active || current_epoch != epoch || inspection_error(&current, selection).is_some() {
                         break Ok(());
                     }
                 }
@@ -115,7 +158,7 @@ where
         tokio::time::timeout(Duration::from_secs(4), &mut worker)
             .await
             .context("Timed out while suspending the virtual device")??;
-        waiting(&metrics, inspection_error(&usage.borrow(), origin));
+        waiting(&metrics, inspection_error(&usage.borrow(), selection));
         selection_changed?;
     }
 }

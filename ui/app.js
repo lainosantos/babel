@@ -8,6 +8,8 @@
   const i18n = window.BabelI18n;
   const t = (key, values) => i18n.t(key, values);
   const filePathPreview = { revision: 0, timer: null, controller: null, phase: 'idle', paths: null, error: '' };
+  const microphoneDraft = { source: 'physical_microphone', device: '' };
+  const microphoneSources = Object.freeze({ speaker_original: 'babel-source:speaker_original', speaker_output: 'babel-source:speaker_output' });
   let translationSelection = [...routeNames];
   let token = new URLSearchParams(location.hash.slice(1)).get('token');
   try {
@@ -220,7 +222,28 @@
   function profileValue(provider, field) { return byId(`profile-${provider}-${field}`)?.value || ''; }
   function sttProfileValue(provider, field) { return byId(`stt-profile-${provider}-${field}`)?.value || ''; }
   function sttProvider(route) { return byId(`stt-${route}-provider`).value; }
-  function transcribesRoute(route) { return byId('transcription-enabled').checked && byId(`transcription-${route}`).checked; }
+  function microphoneSource(config) { return config ? config.audio?.microphone_source : microphoneDraft.source; }
+  function microphoneUsesSpeaker(config) { return ['speaker_original', 'speaker_output'].includes(microphoneSource(config)); }
+  function sourceAvailable(route) { return route !== 'microphone' || !microphoneUsesSpeaker(); }
+  function translatesRoute(route) { return sourceAvailable(route) && byId(`${route}-enabled`).checked; }
+  function featureRoute(feature, route) { return sourceAvailable(route) && byId(`${feature}-enabled`).checked && byId(`${feature}-${route}`).checked; }
+  function featureSelected(feature) { return routeNames.some(route => featureRoute(feature, route)); }
+  function transcribesRoute(route) { return featureRoute('transcription', route); }
+  function updateMicrophoneSource() {
+    const incoming = microphoneUsesSpeaker();
+    const afterTranslation = microphoneSource() === 'speaker_output';
+    byId('microphone-translation-bypass').hidden = !incoming;
+    for (const note of document.querySelectorAll('[data-microphone-source-note]')) note.hidden = !incoming;
+    for (const [id, key] of [
+      ['microphone-source-hint', afterTranslation ? 'routing.speaker_output_hint' : incoming ? 'routing.speaker_source_hint' : 'routing.physical_source_hint'],
+      ['microphone-source-label', afterTranslation ? 'routing.speaker_output_label' : incoming ? 'routing.speaker_source_label' : 'ui.your_microphone'],
+      ['mic-title', incoming ? 'routing.incoming_audio' : 'ui.what_you_say'],
+      ['translation-microphone-title', incoming ? 'ui.virtual_microphone' : 'ui.what_you_say'],
+      ['translation-microphone-caption', afterTranslation ? 'routing.speaker_output' : incoming ? 'routing.speaker_original' : 'workspace.translation_microphone'],
+      ['microphone-translation-label', incoming ? 'routing.translation_paused' : 'ui.translation'],
+      ['microphone-translation-bypass', afterTranslation ? 'routing.output_translation_bypass' : 'routing.translation_bypass'],
+    ]) { const node = byId(id); delete node.dataset.i18n; node.textContent = t(key); }
+  }
   function isOpenAITranslation(model) { return model === 'gpt-realtime-translate' || model.startsWith('gpt-realtime-translate-'); }
   function dedicatedRoute(route) {
     const provider = routeProvider(route);
@@ -237,8 +260,12 @@
       if (field === 'source_language' && element.dataset.savedSource !== undefined) container[field] = element.dataset.savedSource;
       else container[field] = readValue(element);
     });
+    // Source choices have no raw config field: synthetic options must never
+    // become capture-device IDs, and switching sources keeps the physical draft.
+    config.audio.microphone_source = microphoneDraft.source;
+    config.microphone.capture_device = microphoneDraft.device;
     for (const route of routeNames) {
-      if (config[route].enabled && dedicatedRoute(route)) {
+      if (translatesRoute(route) && dedicatedRoute(route)) {
         config[route].prompt = '';
       }
     }
@@ -249,6 +276,9 @@
     if (!config.providers) throw new Error(t("ui.these_settings_use_an_old_format_restart_the_updated_babel_to_load_provider"));
     config.local_runtime = { directory: '', threads: 2, idle_unload_secs: 60, ...config.local_runtime };
     config.history ??= { enabled: true, duration_secs: 600 };
+    config.audio.microphone_source ??= 'physical_microphone';
+    microphoneDraft.source = config.audio.microphone_source;
+    microphoneDraft.device = config.microphone.capture_device || '';
     config.recording.mix = { microphone_gain_db: 0, speaker_gain_db: 0, microphone_priority: true, ducking_db: 12, microphone_threshold_db: -50, ...config.recording.mix };
     state.config = config;
     writeValue(byId('files-base_path'), config.files?.base_path ?? '');
@@ -346,8 +376,37 @@
     }
   }
 
+  function renderMicrophoneSources() {
+    const select = byId('microphone-capture_device');
+    const speakerCaptures = new Set([byId('speaker-capture_device').value, state.config?.speaker?.capture_device]);
+    const devices = state.devices.filter(device => device.direction === 'input' && !device.is_virtual && !speakerCaptures.has(device.id));
+    select.replaceChildren(new Option(t('ui.select_a_device'), ''));
+    select.options[0].dataset.physicalDevice = '';
+    const appendPhysical = (id, name, unavailable = false, disabled = false) => {
+      const value = Object.values(microphoneSources).includes(id) ? `babel-physical:${encodeURIComponent(id)}` : id;
+      const option = new Option(unavailable ? t('device.unavailable', { name }) : name, value);
+      option.dataset.physicalDevice = id; option.dataset.deviceName = name;
+      option.dataset.deviceUnavailable = String(unavailable); option.disabled = disabled;
+      select.add(option);
+    };
+    for (const device of devices) appendPhysical(device.id, device.name);
+    if (microphoneDraft.device && !devices.some(device => device.id === microphoneDraft.device)) {
+      const previous = state.devices.find(device => device.id === microphoneDraft.device);
+      appendPhysical(microphoneDraft.device, previous?.name || microphoneDraft.device, true, Boolean(previous?.is_virtual || speakerCaptures.has(microphoneDraft.device)));
+    }
+    for (const [source, value] of Object.entries(microphoneSources)) {
+      const option = new Option(t(`routing.${source}`), value);
+      option.dataset.microphoneSource = source; select.add(option);
+    }
+    const selected = [...select.options].find(option => microphoneDraft.source === 'physical_microphone'
+      ? option.dataset.physicalDevice === microphoneDraft.device : option.dataset.microphoneSource === microphoneDraft.source);
+    if (selected) selected.selected = true;
+  }
+
   function renderDevices() {
+    renderMicrophoneSources();
     for (const select of document.querySelectorAll('[data-device-direction]')) {
+      if (select.id === 'microphone-capture_device') continue;
       const selected = select.dataset.initialized ? select.value : state.config?.[select.dataset.route]?.[select.dataset.field] || '';
       const options = state.devices.filter((device) => device.direction === select.dataset.deviceDirection);
       select.replaceChildren(new Option(t("ui.select_a_device"), ''));
@@ -461,12 +520,16 @@
   }
 
   function updateProviderControls() {
+    updateMicrophoneSource();
     for (const route of routeNames) {
-      const translating = byId(`${route}-enabled`).checked;
+      const bypassed = !sourceAvailable(route);
+      const translating = translatesRoute(route);
+      byId(`${route}-enabled`).disabled = bypassed;
+      byId(`${route}-provider`).disabled = bypassed;
       const dedicated = dedicatedRoute(route) && translating;
       const provider = routeProvider(route);
       const source = byId(`${route}-source_language`);
-      source.disabled = dedicated;
+      source.disabled = dedicated || bypassed;
       if (dedicated) { if (source.dataset.savedSource === undefined) source.dataset.savedSource = source.value; source.value = t("ui.automatic"); }
       else if (!dedicated && source.dataset.savedSource !== undefined) { source.value = source.dataset.savedSource; delete source.dataset.savedSource; }
       byId(`${route}-target_language`).disabled = !translating;
@@ -484,7 +547,7 @@
     byId('profile-gemini-hint').textContent = t("translation.gemini_hint");
     byId('profile-openai-hint').textContent = t("translation.openai_hint");
     const local = routeNames.every(route => {
-      const translates = byId(`${route}-enabled`).checked;
+      const translates = translatesRoute(route);
       return (!translates || routeProvider(route) === 'local')
         && (!transcribesRoute(route) || sttProvider(route) === 'whisper');
     });
@@ -495,7 +558,12 @@
   }
 
   function updateTranscriptionControls() {
-    for (const route of routeNames) byId(`stt-${route}-language`).required = transcribesRoute(route);
+    for (const route of routeNames) {
+      byId(`stt-${route}-language`).required = transcribesRoute(route);
+      byId(`stt-${route}-language`).disabled = !sourceAvailable(route);
+      byId(`stt-${route}-provider`).disabled = !sourceAvailable(route);
+      document.querySelector(`[data-stt-route-profile="${route}"]`).disabled = !sourceAvailable(route);
+    }
     for (const provider of ['gemini', 'openai', 'deepgram', 'whisper']) {
       const used = routeNames.some(route => transcribesRoute(route) && sttProvider(route) === provider);
       byId(`stt-profile-${provider}-endpoint`).required = used && provider !== 'openai' && !(provider === 'whisper' && managedEndpoint('stt-profile-whisper-endpoint'));
@@ -520,20 +588,28 @@
     return Boolean((status?.running || status?.routing_active) && current && !current.device_error && !inactive.includes(current.state));
   }
 
+  function speakerTranslationActive(status = state.status) {
+    return Boolean(status?.running && state.config?.speaker?.enabled && routeActive('speaker', status)
+      && ['running', 'streaming', 'translating'].includes(status.speaker.state));
+  }
+
   function waitingHint(route) {
-    return t(route === 'microphone' ? 'routing.waiting_microphone' : 'routing.waiting_speaker');
+    return t(route === 'microphone' ? microphoneUsesSpeaker(state.config) ? 'routing.waiting_speaker_microphone' : 'routing.waiting_microphone' : 'routing.waiting_speaker');
   }
 
   function renderSignalPaths() {
     renderPlatformEndpoints();
     for (const route of routeNames) {
       const active = routeActive(route);
-      const translating = active && state.status?.running && state.config?.[route]?.enabled;
+      const forwardedTranslation = route === 'microphone' && microphoneSource(state.config) === 'speaker_output';
+      const translating = active && state.status?.running && (forwardedTranslation
+        ? speakerTranslationActive()
+        : state.config?.[route]?.enabled && (route !== 'microphone' || !microphoneUsesSpeaker(state.config)));
       const node = byId(`${route}-signal`);
-      node.textContent = !active ? '—' : translating ? t("ui.ai") : t("ui.original");
+      node.textContent = !active ? '—' : forwardedTranslation ? t(translating ? 'ui.translated' : 'routing.speaker_audio_short') : translating ? t("ui.ai") : t("ui.original");
       node.classList.toggle('original', Boolean(active && !translating));
-      node.parentElement.setAttribute('aria-label', `${route === 'microphone' ? t("ui.physical_microphone_to_virtual_microphone") : t("ui.virtual_output_to_headphones")}: ${routeWaiting(route) ? waitingHint(route) : !active ? t("ui.routing_unavailable") : translating ? t("ui.ai_translation") : t("ui.original_audio_routing")}.`);
-      byId(`${route}-output-label`).textContent = translating ? t("ui.translated") : t("ui.original");
+      node.parentElement.setAttribute('aria-label', `${route === 'microphone' ? t(microphoneSource() === "speaker_output" ? "routing.speaker_output_to_microphone" : microphoneUsesSpeaker() ? "routing.speaker_to_microphone" : "ui.physical_microphone_to_virtual_microphone") : t("ui.virtual_output_to_headphones")}: ${routeWaiting(route) ? waitingHint(route) : !active ? t("ui.routing_unavailable") : forwardedTranslation ? t(translating ? "routing.after_output_translation" : "routing.speaker_audio") : translating ? t("ui.ai_translation") : t("ui.original_audio_routing")}.`);
+      byId(`${route}-output-label`).textContent = forwardedTranslation ? t('routing.played_audio') : translating ? t("ui.translated") : t("ui.original");
     }
   }
 
@@ -557,7 +633,7 @@
 
   function historySelectionAvailable() {
     return byId('history-enabled').checked && state.status?.history?.enabled && routeNames.some(route =>
-      ((byId('recording-enabled').checked && byId(`recording-${route}`).checked) || transcribesRoute(route))
+      (featureRoute('recording', route) || transcribesRoute(route))
       && Number(state.status.history[`${route}_secs`]) > 0);
   }
 
@@ -603,7 +679,7 @@
     const duration = historyDuration;
     renderHistoryBuffer();
     const reason = !byId('history-enabled').checked || !state.status?.history?.enabled ? 'history.disabled_hint'
-      : !byId('recording-enabled').checked && !byId('transcription-enabled').checked ? 'history.features_hint'
+      : !featureSelected('recording') && !featureSelected('transcription') ? 'history.features_hint'
       : !historySelectionAvailable() ? 'history.empty_hint' : 'history.partial_hint';
     byId('history-availability-hint').textContent = t(reason);
     const included = Number(state.status?.history_included_secs);
@@ -613,20 +689,22 @@
   }
 
   function updateSessionFeatures(disabled) {
-    const selected = routeNames.filter(route => byId(`${route}-enabled`).checked);
+    const selected = routeNames.filter(translatesRoute);
     if (selected.length) translationSelection = selected;
     byId('session-translation-enabled').checked = selected.length > 0;
-    const scope = translationSelection.length === 2 ? 'both' : translationSelection[0];
+    const remembered = translationSelection.filter(sourceAvailable);
+    const scopeRoutes = remembered.length ? remembered : routeNames.filter(sourceAvailable);
+    const scope = scopeRoutes.length === 2 ? 'both' : scopeRoutes[0];
     byId('session-translation-scope').textContent = t(`session.features_${scope}`);
     for (const feature of ['recording', 'transcription']) {
-      byId(`session-${feature}-enabled`).checked = byId(`${feature}-enabled`).checked;
+      byId(`session-${feature}-enabled`).checked = featureSelected(feature);
     }
     for (const control of document.querySelectorAll('[data-session-feature]')) control.disabled = disabled;
   }
 
   function updateControls() {
     const running = Boolean(state.status?.running);
-    const processingSelected = routeNames.some(route => byId(`${route}-enabled`).checked) || byId('transcription-enabled').checked || byId('recording-enabled').checked;
+    const processingSelected = routeNames.some(translatesRoute) || featureSelected('transcription') || featureSelected('recording');
     const unavailable = state.busy || state.syncing || !state.authenticated || !state.config || !state.status;
     updateSessionFeatures(running || unavailable || state.starting || state.configConflict);
     updateHistoryControls(unavailable, running);
@@ -648,11 +726,11 @@
     byId('autostart-enabled').disabled = startupUnavailable;
     byId('autostart-apply').disabled = startupUnavailable || byId('autostart-enabled').checked === state.autostart?.enabled;
     const transcriptionEnabled = byId('transcription-enabled').checked;
-    for (const field of ['microphone', 'speaker', 'timestamps']) byId(`transcription-${field}`).disabled = !transcriptionEnabled;
-    for (const field of ['microphone', 'speaker']) byId(`recording-${field}`).disabled = !byId('recording-enabled').checked;
+    for (const field of ['microphone', 'speaker', 'timestamps']) byId(`transcription-${field}`).disabled = !transcriptionEnabled || !sourceAvailable(field);
+    for (const field of ['microphone', 'speaker']) byId(`recording-${field}`).disabled = !byId('recording-enabled').checked || !sourceAvailable(field);
     const recordingEnabled = byId('recording-enabled').checked;
-    for (const route of routeNames) byId(`recording-${route}-gain`).disabled = !recordingEnabled || !byId(`recording-${route}`).checked;
-    const mixedRecording = recordingEnabled && routeNames.every(route => byId(`recording-${route}`).checked);
+    for (const route of routeNames) byId(`recording-${route}-gain`).disabled = !featureRoute('recording', route);
+    const mixedRecording = recordingEnabled && routeNames.every(route => featureRoute('recording', route));
     byId('recording-microphone-priority').disabled = !mixedRecording;
     for (const field of ['ducking', 'microphone-threshold']) byId(`recording-${field}`).disabled = !mixedRecording || !byId('recording-microphone-priority').checked;
     byId('save-state').textContent = state.configConflict ? t("ui.reload_settings") : state.dirty ? t("ui.unsaved_settings") : t("ui.settings_saved");
@@ -692,6 +770,9 @@
       const current = status[route];
       if (!current) continue;
       byId(`${route}-state`).textContent = current.device_error ? t("ui.device_unavailable") : routeWaiting(route, status) ? t('routing.waiting_for_app') : translations[current.state] || current.state || t("ui.stopped");
+      if (route === 'microphone' && microphoneSource(state.config) === 'speaker_output' && routeActive(route, status)) {
+        byId(`${route}-state`).textContent = t(speakerTranslationActive(status) ? 'routing.after_output_translation' : 'routing.speaker_audio');
+      }
       byId(`${route}-state`).title = routeWaiting(route, status) ? waitingHint(route) : '';
       byId(`${route}-reconnects`).textContent = t('audio.reconnections', { count: i18n.number(current.reconnects || 0) });
       for (const metric of ['captured_frames', 'dropped_frames', 'processing_dropped_frames', 'underruns']) {
@@ -752,20 +833,34 @@
     updateControls();
   }
 
+  byId('microphone-capture_device').addEventListener('input', event => {
+    const select = event.target;
+    if (select.matches(':disabled')) return;
+    const option = select.selectedOptions[0];
+    if (!option || option.disabled) return;
+    if (option.dataset.microphoneSource) microphoneDraft.source = option.dataset.microphoneSource;
+    else { microphoneDraft.source = 'physical_microphone'; microphoneDraft.device = option.dataset.physicalDevice || ''; }
+    state.dirty = true;
+    updateProviderControls(); updateControls();
+  });
   form.addEventListener('submit', (event) => event.preventDefault());
   document.querySelectorAll('[data-session-feature]').forEach(control => control.addEventListener('input', () => {
     // These are shortcuts to the canonical fields, not extra serialized settings.
     if (control.disabled) { updateControls(); return; }
     const feature = control.dataset.sessionFeature;
     if (feature === 'translation') {
-      const selected = routeNames.filter(route => byId(`${route}-enabled`).checked);
+      const selected = routeNames.filter(translatesRoute);
       if (selected.length) translationSelection = selected;
-      // Set both before publishing the edit, preserving a single-direction draft.
-      for (const route of routeNames) byId(`${route}-enabled`).checked = control.checked && translationSelection.includes(route);
-      byId('microphone-enabled').dispatchEvent(new Event('input', { bubbles: true }));
+      const available = routeNames.filter(sourceAvailable);
+      const remembered = translationSelection.filter(sourceAvailable);
+      const chosen = remembered.length ? remembered : available;
+      // Update eligible routes together, keeping bypassed microphone preferences intact.
+      for (const route of available) byId(`${route}-enabled`).checked = control.checked && chosen.includes(route);
+      byId(`${available[0]}-enabled`).dispatchEvent(new Event('input', { bubbles: true }));
     } else {
       const field = byId(`${feature}-enabled`);
       field.checked = control.checked;
+      if (control.checked && microphoneUsesSpeaker() && !featureSelected(feature)) byId(`${feature}-speaker`).checked = true;
       field.dispatchEvent(new Event('input', { bubbles: true }));
     }
   }));
@@ -773,7 +868,7 @@
     if (!event.target.matches('[data-field]')) return;
     state.dirty = true;
     updateGainLabels();
-    if (['provider', 'enabled', 'engine', 'model'].includes(event.target.dataset.field) || event.target.dataset.section === 'transcription' || event.target.dataset.transcriptionProfile || event.target.dataset.profile === 'local') updateProviderControls();
+    if (['provider', 'enabled', 'engine', 'model', 'microphone_source'].includes(event.target.dataset.field) || event.target.dataset.section === 'transcription' || event.target.dataset.transcriptionProfile || event.target.dataset.profile === 'local') updateProviderControls();
     if (event.target.dataset.section === 'local_runtime') validateLocalDirectory();
     if (event.target.id === 'audio-quality') updateQualityHint();
     if (['files-base_path', 'transcription-directory', 'recording-directory'].includes(event.target.id)) scheduleFilePathPreview();
@@ -958,6 +1053,7 @@
     // Update labels in place so drafts, focus and native select values remain
     // attached to the same nodes during a language change.
     for (const option of document.querySelectorAll('[data-device-direction] option')) {
+      if (option.dataset.microphoneSource) { option.textContent = t(`routing.${option.dataset.microphoneSource}`); continue; }
       const name = option.dataset.deviceName;
       option.textContent = !option.value ? t('ui.select_a_device')
         : option.dataset.deviceUnavailable === 'true' ? t('device.unavailable', { name })

@@ -325,11 +325,20 @@ impl Default for TranscriptionConfig {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct AudioConfig {
+    pub microphone_source: MicrophoneSource,
     pub quality: Quality,
     pub capture_queue_ms: u32,
     pub playback_queue_ms: u32,
     pub max_capture_age_ms: u32,
     pub device_latency_ms: u32,
+}
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MicrophoneSource {
+    #[default]
+    PhysicalMicrophone,
+    SpeakerOriginal,
+    SpeakerOutput,
 }
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -358,6 +367,7 @@ impl Quality {
 impl Default for AudioConfig {
     fn default() -> Self {
         Self {
+            microphone_source: MicrophoneSource::default(),
             quality: Quality::Balanced,
             capture_queue_ms: 200,
             playback_queue_ms: 2000,
@@ -637,6 +647,7 @@ impl AppConfig {
         Ok(())
     }
     pub fn validate(&self) -> Result<()> {
+        let microphone = self.effective_microphone();
         self.interface.validate()?;
         self.agent.validate()?;
         self.local_runtime.validate()?;
@@ -700,7 +711,7 @@ impl AppConfig {
         );
         // Validate only transports needed by selected features. An original-only
         // session must not require an unused translator, synthesizer or ASR setup.
-        for route in [&self.microphone, &self.speaker] {
+        for route in [&microphone, &self.speaker] {
             if route.enabled {
                 crate::provider::create_configured_provider(
                     &route.provider,
@@ -712,7 +723,7 @@ impl AppConfig {
         for (recognition, selected) in [
             (
                 &self.transcription.microphone_recognition,
-                self.transcription.microphone,
+                self.transcription.microphone && !self.microphone_uses_speaker(),
             ),
             (
                 &self.transcription.speaker_recognition,
@@ -750,7 +761,7 @@ impl AppConfig {
             );
             crate::storage::validate_path(&self.transcription.directory, "transcript folder")?;
         }
-        for (name, route) in [("microphone", &self.microphone), ("speaker", &self.speaker)] {
+        for (name, route) in [("microphone", &microphone), ("speaker", &self.speaker)] {
             ensure!(
                 matches!(route.provider.as_str(), "gemini" | "openai" | "local"),
                 "Unknown translation provider for {name}"
@@ -793,6 +804,7 @@ impl AppConfig {
     /// Validate routing independently of cloud credentials or feature switches.
     /// Incomplete routes are allowed while the user configures their devices.
     pub fn validate_routing(&self) -> Result<()> {
+        let microphone = self.effective_microphone();
         for (name, route) in [("microphone", &self.microphone), ("speaker", &self.speaker)] {
             for device in [&route.capture_device, &route.playback_device] {
                 ensure!(
@@ -802,6 +814,11 @@ impl AppConfig {
                     "Use explicit, valid devices for {name}"
                 );
             }
+            let route = if name == "microphone" {
+                &microphone
+            } else {
+                route
+            };
             if !route_configured(route) {
                 continue;
             }
@@ -810,20 +827,38 @@ impl AppConfig {
                 "The {name} route feeds back into its own device; use independent cables"
             );
         }
-        if route_configured(&self.microphone) && route_configured(&self.speaker) {
+        if route_configured(&microphone) && route_configured(&self.speaker) {
             ensure!(
                 canonical_device(&self.microphone.playback_device)
                     != canonical_device(&self.speaker.capture_device),
                 "The virtual microphone and speaker require two independent cables"
             );
+            if self.microphone_uses_speaker() {
+                ensure!(
+                    canonical_device(&microphone.playback_device)
+                        != canonical_device(&self.speaker.playback_device),
+                    "The virtual microphone and physical output must use different playback devices"
+                );
+            }
         }
         Ok(())
     }
     pub fn validate_for_start(&self) -> Result<()> {
         self.validate()?;
         self.validate_routing()?;
+        let microphone = self.effective_microphone();
+        if self.microphone_uses_speaker() {
+            ensure!(
+                !self.transcription.enabled || self.transcription.speaker,
+                "Select original output for transcription when the virtual microphone uses Babel Speaker"
+            );
+            ensure!(
+                !self.recording.enabled || self.recording.speaker,
+                "Select original output for recording when the virtual microphone uses Babel Speaker"
+            );
+        }
         ensure!(
-            self.microphone.enabled
+            microphone.enabled
                 || self.speaker.enabled
                 || self.transcription.enabled
                 || self.recording.enabled,
@@ -832,9 +867,9 @@ impl AppConfig {
         for (name, route, transcribe, record) in [
             (
                 "microphone",
-                &self.microphone,
-                self.transcription.microphone,
-                self.recording.microphone,
+                &microphone,
+                self.transcription.microphone && !self.microphone_uses_speaker(),
+                self.recording.microphone && !self.microphone_uses_speaker(),
             ),
             (
                 "speaker",
@@ -858,7 +893,7 @@ impl AppConfig {
         for (recognition, selected) in [
             (
                 &self.transcription.microphone_recognition,
-                self.transcription.microphone,
+                self.transcription.microphone && !self.microphone_uses_speaker(),
             ),
             (
                 &self.transcription.speaker_recognition,
@@ -876,6 +911,22 @@ impl AppConfig {
             }
         }
         Ok(())
+    }
+
+    pub fn microphone_uses_speaker(&self) -> bool {
+        self.audio.microphone_source != MicrophoneSource::PhysicalMicrophone
+    }
+
+    /// Resolve the routing source without overwriting the remembered physical
+    /// microphone or translation settings. Shared speaker PCM always bypasses
+    /// microphone translation; original file capture keeps Speaker provenance.
+    pub fn effective_microphone(&self) -> RouteConfig {
+        let mut route = self.microphone.clone();
+        if self.microphone_uses_speaker() {
+            route.capture_device = self.speaker.capture_device.clone();
+            route.enabled = false;
+        }
+        route
     }
 }
 
@@ -1324,6 +1375,78 @@ mod tests {
         cfg.speaker.capture_device = "babel_speaker.monitor".into();
         cfg.speaker.playback_device = "physical-speakers".into();
         cfg
+    }
+
+    #[test]
+    fn microphone_source_is_explicit_and_legacy_settings_keep_physical_input() {
+        let mut document = serde_json::to_value(configured_routes()).unwrap();
+        document["audio"]
+            .as_object_mut()
+            .unwrap()
+            .remove("microphone_source");
+        let legacy: AppConfig = serde_json::from_value(document.clone()).unwrap();
+        assert!(!legacy.microphone_uses_speaker());
+        document["audio"]["microphone_source"] = "speaker_original".into();
+        let mirror: AppConfig = serde_json::from_value(document.clone()).unwrap();
+        assert!(mirror.microphone_uses_speaker());
+        assert_eq!(
+            mirror.effective_microphone().capture_device,
+            mirror.speaker.capture_device
+        );
+        assert!(!mirror.effective_microphone().enabled);
+        assert_eq!(mirror.microphone.capture_device, "physical-mic");
+        assert!(mirror.microphone.enabled);
+        document["audio"]["microphone_source"] = "speaker_output".into();
+        let after_translation: AppConfig = serde_json::from_value(document.clone()).unwrap();
+        assert!(after_translation.microphone_uses_speaker());
+        assert!(!after_translation.effective_microphone().enabled);
+        document["audio"]["microphone_source"] = "system_output".into();
+        assert!(serde_json::from_value::<AppConfig>(document).is_err());
+    }
+
+    #[test]
+    fn speaker_source_bypasses_unused_mic_processing_but_requires_original_output_sources() {
+        let mut cfg = configured_routes();
+        cfg.audio.microphone_source = MicrophoneSource::SpeakerOriginal;
+        cfg.microphone.capture_device.clear();
+        cfg.microphone.provider = "local".into();
+        cfg.providers.local.piper_endpoint.clear();
+        cfg.speaker.enabled = false;
+        cfg.recording.enabled = true;
+        cfg.recording.microphone = true;
+        cfg.recording.speaker = true;
+        // No physical input, microphone model or credentials are needed.
+        cfg.validate_for_start().unwrap();
+        cfg.recording.speaker = false;
+        assert!(
+            cfg.validate_for_start()
+                .unwrap_err()
+                .to_string()
+                .contains("original output for recording")
+        );
+        cfg.recording.speaker = true;
+        cfg.transcription.enabled = true;
+        cfg.transcription.microphone = true;
+        cfg.transcription.speaker = false;
+        assert!(
+            cfg.validate_for_start()
+                .unwrap_err()
+                .to_string()
+                .contains("original output for transcription")
+        );
+        cfg.transcription.enabled = false;
+        cfg.microphone.playback_device = cfg.speaker.playback_device.clone();
+        assert!(
+            cfg.validate_routing()
+                .unwrap_err()
+                .to_string()
+                .contains("different playback devices")
+        );
+        cfg.microphone.playback_device = cfg.speaker.capture_device.clone();
+        assert!(
+            cfg.validate_routing().is_err(),
+            "the source cannot feed back into its own cable"
+        );
     }
 
     #[test]

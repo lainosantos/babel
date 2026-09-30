@@ -41,6 +41,9 @@ threads = 2
 idle_unload_secs = 60 # Release session models from RAM after this idle interval.
 
 [audio]
+# "speaker_original" shares incoming Babel Speaker audio with the virtual mic.
+# "speaker_output" shares what Babel plays, after translation when active.
+microphone_source = "physical_microphone"
 quality = "balanced"
 capture_queue_ms = 200
 playback_queue_ms = 2000
