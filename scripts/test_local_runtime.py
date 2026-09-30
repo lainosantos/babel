@@ -42,6 +42,10 @@ class RuntimeTests(unittest.TestCase):
                 self.assertEqual(args[args.index("-G") + 1], "Visual Studio 17 2022")
                 self.assertEqual(args[args.index("-A") + 1], platform)
                 self.assertIn("-DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreadedDLL", args)
+                if architecture == "aarch64":
+                    self.assertEqual(args[args.index("-T") + 1], "ClangCL")
+                else:
+                    self.assertNotIn("-T", args)
 
     def test_windows_shared_crt_is_bundled_and_checked_for_every_service(self):
         with tempfile.TemporaryDirectory() as directory:

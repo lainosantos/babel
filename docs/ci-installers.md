@@ -70,8 +70,9 @@ Piper from archives pinned by commit, size and SHA-256 in
 
 Windows builds discover the installed Visual Studio version with `vswhere` and
 select a matching CMake generator. The ARM64 runner uses CMake 4.2.3 for Visual
-Studio 2026; the other runners retain CMake 3.31.10. These are build tools only,
-not dependencies of the installed application.
+Studio 2026 and its ClangCL toolset, as required by GGML on Windows ARM64; the
+other runners retain CMake 3.31.10. These are build tools only, not dependencies
+of the installed application.
 
 Each payload includes native libraries, eSpeak data, licenses, corresponding
 Piper/eSpeak sources and an integrity manifest. Windows runtimes privately

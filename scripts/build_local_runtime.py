@@ -170,6 +170,10 @@ def cmake(source, build, extra, jobs, targets):
     if sys.platform == "win32":
         # NMake rejects -A and does not initialize the MSVC environment itself.
         common += ["-G", windows_cmake_generator(), "-A", "ARM64" if host()[1] == "aarch64" else "x64"]
+        if host()[1] == "aarch64":
+            # The pinned GGML ARM backend requires Clang's ARM intrinsics and
+            # explicitly rejects cl.exe. Keep the Visual Studio ABI/shared CRT.
+            common += ["-T", "ClangCL"]
         # Existing native engines use narrow argv/filesystem paths. Windows
         # 10 1903+ UTF-8 activation preserves non-ASCII user/model directories.
         common += [f'-DCMAKE_EXE_LINKER_FLAGS=/MANIFEST:EMBED /MANIFESTINPUT:"{ROOT / "scripts/windows_utf8.manifest"}"']
@@ -339,7 +343,7 @@ def build(args):
             copy_regular(path, payload / "sources/scripts" / path.name)
         for patch in PATCHES.values():
             copy_regular(ROOT / "scripts/patches" / patch, payload / "sources/scripts/patches" / patch)
-        (payload / "sources/README.txt").write_text("Corresponding source for the separate GPL-3.0 Piper/eSpeak subprocess is included here. Extract the two source archives and apply scripts/patches/piper-managed.patch. scripts/build_local_runtime.py and scripts/local_runtime.lock.json record the exact build flags and all dependency hashes. Build requires CMake 3.26+ (4.2+ when using Visual Studio 2026), a C++17 compiler, Git and Python 3.11+; none is required by the installed application. Whisper/llama.cpp/ONNX Runtime are MIT licensed. The Babel application communicates through separate-process IPC. Voice model licenses are supplied with model downloads.\n")
+        (payload / "sources/README.txt").write_text("Corresponding source for the separate GPL-3.0 Piper/eSpeak subprocess is included here. Extract the two source archives and apply scripts/patches/piper-managed.patch. scripts/build_local_runtime.py and scripts/local_runtime.lock.json record the exact build flags and all dependency hashes. Build requires CMake 3.26+ (4.2+ when using Visual Studio 2026), a C++17 compiler (Visual Studio ClangCL tools on Windows ARM64), Git and Python 3.11+; none is required by the installed application. Whisper/llama.cpp/ONNX Runtime are MIT licensed. The Babel application communicates through separate-process IPC. Voice model licenses are supplied with model downloads.\n")
         if system == "windows":
             windows_runtime(payload, arch)
         elif system == "macos":
