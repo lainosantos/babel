@@ -1,8 +1,0 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
-  <title>Babel</title>
-  <rect width="64" height="64" rx="15" fill="#17252c"/>
-  <g fill="none" stroke-linecap="round" stroke-width="5">
-    <path d="M14 26v12m9-21v30m9-24v18" stroke="#62dfbd"/>
-    <path d="M41 17v30m9-21v12" stroke="#f6bd68"/>
-  </g>
-</svg>

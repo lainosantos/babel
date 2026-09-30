@@ -261,16 +261,10 @@ struct TrayUi {
     state: TraySnapshot,
 }
 fn icon_rgba() -> Vec<u8> {
-    let mut pixels = vec![0; 32 * 32 * 4];
-    for (bar, height) in [8_usize, 18, 28, 18, 8].into_iter().enumerate() {
-        for x in (4 + bar * 5)..(7 + bar * 5) {
-            for y in ((32 - height) / 2)..((32 + height) / 2) {
-                let i = (y * 32 + x) * 4;
-                pixels[i..i + 4].copy_from_slice(&[83, 222, 191, 255]);
-            }
-        }
-    }
-    pixels
+    // Pre-render the shared brand asset so every platform needs only a tiny
+    // byte copy at startup, without image decoding or filesystem access.
+    const ICON: &[u8; 32 * 32 * 4] = include_bytes!("../assets/babel-tray.rgba");
+    ICON.to_vec()
 }
 impl TrayUi {
     fn new(language: String) -> Result<Self> {
@@ -1012,6 +1006,13 @@ mod tests {
         assert_eq!(rgba.len(), 32 * 32 * 4);
         assert!(rgba.as_chunks::<4>().0.iter().any(|p| p[3] == 255));
         assert!(rgba.as_chunks::<4>().0.iter().any(|p| p[3] == 0));
+        assert!(
+            rgba.as_chunks::<4>()
+                .0
+                .iter()
+                .any(|p| p[3] == 255 && p[..3].iter().all(|channel| *channel >= 245)),
+            "the brand glyph must be visible, not just the background"
+        );
     }
     #[test]
     fn physical_menus_filter_virtual_and_wrong_direction_and_mark_saved_choice() {

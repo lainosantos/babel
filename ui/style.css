@@ -55,9 +55,8 @@ code { font-size: .92em; }
 .app-sidebar { position: fixed; inset: 0 auto 0 0; z-index: 15; display: flex; flex-direction: column; width: var(--sidebar-width); padding: 34px 18px 24px; background: var(--panel); border-right: 1px solid var(--line); }
 .brand { display: inline-flex; align-items: center; gap: 10px; margin: 0 10px; color: var(--text); font-size: 29px; font-weight: 800; letter-spacing: -1.3px; text-decoration: none; line-height: 1.2; }
 .brand:hover { color: var(--text); }
-.brand svg { width: 34px; height: 34px; color: var(--accent); }
-.brand-mark { display: grid; place-items: center; width: 36px; height: 36px; border-radius: 10px; background: var(--accent); color: #fff; }
-.brand-mark svg { width: 23px; height: 23px; color: inherit; }
+.brand-mark { display: block; width: 36px; height: 36px; }
+.brand-mark img { display: block; width: 100%; height: 100%; }
 .brand-caption { margin: 13px 11px 0; color: var(--muted); font-size: 11px; }
 .local-label { display: inline-flex; align-items: center; gap: 7px; color: var(--muted); font-size: 11px; }
 .app-sidebar > .local-label { margin: 11px 11px 0; }
@@ -450,9 +449,7 @@ dialog::backdrop { background: #152c4866; }
   :root { --sidebar-width: 0px; }
   .app-sidebar { position: relative; inset: auto; width: 100%; height: auto; padding: 19px 20px 0; border-right: 0; border-bottom: 1px solid var(--line); }
   .brand { width: fit-content; margin: 0; font-size: 25px; }
-  .brand svg { width: 30px; height: 30px; }
-  .brand-mark { width: 32px; height: 32px; border-radius: 9px; }
-  .brand-mark svg { width: 21px; height: 21px; }
+  .brand-mark { width: 32px; height: 32px; }
   .brand-caption { margin: 8px 0 0; font-size: 10px; }
   .app-sidebar > .local-label { position: absolute; top: 20px; right: 20px; margin: 8px 0 0; }
   .workspace-nav { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 4px; margin: 18px -4px 0; padding-bottom: 10px; }

@@ -125,7 +125,7 @@ def stage_payload(bin_dir: Path, payload: Path, version: str, runtime_dir: Path 
     dependencies.extend(["pulseaudio-utils", "xdg-utils", "dbus-user-session | dbus-x11"])
     copy_file(HERE / "babel-launch", payload / "bin/babel-launch", 0o755)
     copy_file(HERE / "org.babel.audio.desktop", payload / "share/applications/org.babel.audio.desktop")
-    copy_file(HERE / "org.babel.audio.svg", payload / "share/icons/hicolor/scalable/apps/org.babel.audio.svg")
+    copy_file(PROJECT / "assets/babel.svg", payload / "share/icons/hicolor/scalable/apps/org.babel.audio.svg")
     copy_file(HERE / "org.babel.audio.service", payload / "lib/systemd/user/org.babel.audio.service")
     rpm_requires = [f"glibc >= {minimum}", "/bin/sh", "/usr/bin/pactl", "/usr/bin/parec", "/usr/bin/pacat", "/usr/bin/xdg-open", "dbus"]
     if "libgcc_s.so.1" in needed:

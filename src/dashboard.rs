@@ -158,6 +158,15 @@ fn router(state: DashboardState) -> Router {
             get(|| async { Html(include_str!("../ui/index.html")) }),
         )
         .route(
+            "/brand.svg",
+            get(|| async {
+                (
+                    [(header::CONTENT_TYPE, "image/svg+xml")],
+                    include_str!("../assets/babel.svg"),
+                )
+            }),
+        )
+        .route(
             "/app.js",
             get(|| async {
                 (
