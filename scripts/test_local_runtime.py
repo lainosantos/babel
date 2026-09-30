@@ -41,6 +41,38 @@ class RuntimeTests(unittest.TestCase):
                 args = run.call_args_list[0].args
                 self.assertEqual(args[args.index("-G") + 1], "Visual Studio 17 2022")
                 self.assertEqual(args[args.index("-A") + 1], platform)
+                self.assertIn("-DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreadedDLL", args)
+
+    def test_windows_shared_crt_is_bundled_and_checked_for_every_service(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            vs = root / "vs"
+            crt = vs / "VC/Redist/MSVC/14.44.1/x64/Microsoft.VC143.CRT"
+            crt.mkdir(parents=True)
+            for name in ("vcruntime140.dll", "msvcp140.dll"):
+                (crt / name).write_bytes(b"private CRT fixture")
+            inspector = vs / "VC/Tools/MSVC/14.44.1/bin/Hostx64/x64/dumpbin.exe"
+            inspector.parent.mkdir(parents=True)
+            inspector.touch()
+            destination = root / "runtime"
+            for service in ("whisper", "llama", "piper"):
+                binary = destination / service / "bin" / (service + ".exe")
+                binary.parent.mkdir(parents=True)
+                binary.touch()
+
+            def inspect(*args, **kwargs):
+                if "-property" in args:
+                    return mock.Mock(stdout=str(vs))
+                return mock.Mock(stdout="    vcruntime140.dll\n    msvcp140.dll\n    KERNEL32.dll\n")
+
+            with mock.patch.object(build, "run", side_effect=inspect) as run:
+                build.windows_runtime(destination, "x86_64")
+            inspected = {Path(call.args[2]) for call in run.call_args_list if call.args[1] == "/DEPENDENTS"}
+            for service in ("whisper", "llama", "piper"):
+                binaries = destination / service / "bin"
+                for name in ("vcruntime140.dll", "msvcp140.dll"):
+                    self.assertEqual((binaries / name).read_bytes(), b"private CRT fixture")
+                self.assertIn(binaries / (service + ".exe"), inspected)
 
     def test_windows_generator_matches_installed_visual_studio_and_cmake(self):
         generators = json.dumps({"generators": [{"name": name} for name in ["NMake Makefiles", "Visual Studio 17 2022", "Visual Studio 18 2026"]]})

@@ -163,7 +163,10 @@ def windows_cmake_generator():
 
 
 def cmake(source, build, extra, jobs, targets):
-    common = ["-DCMAKE_BUILD_TYPE=Release", "-DCMAKE_POLICY_DEFAULT_CMP0091=NEW", "-DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded", "-DCMAKE_BUILD_WITH_INSTALL_RPATH=ON"]
+    # GGML passes CRT-owned FILE pointers between its shared libraries. /MT
+    # creates a separate CRT per DLL and breaks _fileno/_get_osfhandle on Windows.
+    # Use one shared CRT and bundle its redistributables beside every service.
+    common = ["-DCMAKE_BUILD_TYPE=Release", "-DCMAKE_POLICY_DEFAULT_CMP0091=NEW", "-DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreadedDLL", "-DCMAKE_BUILD_WITH_INSTALL_RPATH=ON"]
     if sys.platform == "win32":
         # NMake rejects -A and does not initialize the MSVC environment itself.
         common += ["-G", windows_cmake_generator(), "-A", "ARM64" if host()[1] == "aarch64" else "x64"]
@@ -231,14 +234,15 @@ def stage_piper(source, espeak, pins, cache, work, destination, system, arch, jo
 
 
 def windows_runtime(destination, arch):
-    """ORT uses the VC runtime. Redistribute its DLLs privately, no installer."""
+    """Share the VC runtime within each service, with no system installation."""
     vswhere = Path(os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)")) / "Microsoft Visual Studio/Installer/vswhere.exe"
     vs = run(vswhere, "-latest", "-products", "*", "-property", "installationPath", capture_output=True, text=True).stdout.strip()
     candidates = sorted((Path(vs) / "VC/Redist/MSVC").glob("*/" + ("arm64" if arch == "aarch64" else "x64") + "/Microsoft.VC*.CRT"))
     if not candidates:
         raise ValueError("Visual C++ redistributable DLLs are missing from the build toolchain")
     for dll in candidates[-1].glob("*.dll"):
-        copy_regular(dll, destination / "piper/bin" / dll.name, True)
+        for service in ("whisper", "llama", "piper"):
+            copy_regular(dll, destination / service / "bin" / dll.name, True)
     notices = list((Path(vs) / "Licenses").glob("**/*REDIST*"))
     if notices:
         for index, notice in enumerate(notices):

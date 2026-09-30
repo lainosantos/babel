@@ -40,6 +40,11 @@ jobs:
           path: .tools/inference-test-models
           key: inference-smoke-models-${{ hashFiles('src/local_runtime/models.json') }}
       - name: Verify dynamic listeners and actual local inference with synthetic audio
+        env:
+          # Hosted macOS workers do not guarantee an available GPU. The pinned
+          # GGML runtime skips Metal device creation at zero; shipped libraries
+          # retain Metal and the installed application does not set this value.
+          GGML_METAL_DEVICES: ${{ startsWith(matrix.os, 'macos-') && '0' || '' }}
         run: python scripts/test_bundled_inference.py --runtime-dir artifacts/local-runtime/${{ matrix.name }} --model-cache .tools/inference-test-models
       - uses: actions/upload-artifact@v4
         with:

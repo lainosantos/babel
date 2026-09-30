@@ -75,8 +75,8 @@ not dependencies of the installed application.
 
 Each payload includes native libraries, eSpeak data, licenses, corresponding
 Piper/eSpeak sources and an integrity manifest. Windows runtimes privately
-bundle the Visual C++ DLLs required by ONNX; users do not need to install a
-separate redistributable. On macOS, Intel/ARM64 runtimes remain separate inside
+bundle the shared Visual C++ DLLs used by the inference engines and ONNX; users
+do not need to install a separate redistributable. On macOS, Intel/ARM64 runtimes remain separate inside
 the universal app; after signing their binaries, packaging refreshes hashes
 before signing the outer bundle.
 
@@ -84,6 +84,10 @@ The job runs `scripts/test_bundled_inference.py` with pinned catalog weights:
 Whisper receives synthetic silence, Qwen translates a fixed sentence, and the
 same Piper process produces two WAV files. This checks real loading, dynamic
 ports, JSON, Unicode paths and valid audio, without a microphone or credentials.
+The synthetic smoke uses CPU inference. On macOS, its environment disables
+Metal device probing because the hosted runner may lack a usable GPU; the
+distributed libraries still include Metal acceleration and embedded shaders.
+This smoke does not validate GPU execution on physical Macs.
 Test models use a cache keyed by the hash of `src/local_runtime/models.json`
 and are not included in installers. All these jobs must pass before package
 builds proceed.

@@ -311,7 +311,9 @@ def main(args):
     checked_model(voice["license"], cache)
     executable = lambda name: runtime / manifest["services"][name]["executable"]
 
-    with Child([executable("whisper"), "--host", "127.0.0.1", "--port", "0", "-t", "2", "-m", whisper], args.timeout) as child:
+    # Hosted runners need not expose a GPU; verify the portable CPU path even
+    # when the packaged engine also contains an optional GPU backend.
+    with Child([executable("whisper"), "--host", "127.0.0.1", "--port", "0", "--no-gpu", "-t", "2", "-m", whisper], args.timeout) as child:
         endpoint = ready_http(child, "babel-whisper", "/inference")
         body, content_type = whisper_multipart()
         result = request_json(endpoint, body, content_type, args.timeout)

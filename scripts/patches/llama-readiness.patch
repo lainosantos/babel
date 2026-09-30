@@ -1,7 +1,24 @@
+diff --git a/common/arg.cpp b/common/arg.cpp
+index 63e3427..96beaf4 100644
+--- a/common/arg.cpp
++++ b/common/arg.cpp
+@@ -2673,7 +2673,9 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
+             params.video_ffmpeg_bin_dir = value;
+         }
+     ).set_examples(mmproj_examples).set_env("LLAMA_ARG_VIDEO_FFMPEG_DIR"));
+-    if (params.is_gen_docs || llama_supports_rpc()) {
++    // Argument registration must not initialize compute backends for --help.
++    // add_rpc_devices validates backend support when --rpc is actually used.
++    {
+         add_opt(common_arg(
+             {"--rpc"}, "SERVERS",
+             "comma-separated list of RPC servers (host:port)",
+diff --git a/tools/server/server.cpp b/tools/server/server.cpp
+index 049bdce..8814ac5 100644
 --- a/tools/server/server.cpp
 +++ b/tools/server/server.cpp
-@@ -481,6 +481,15 @@
- 
+@@ -481,6 +481,15 @@ int llama_server(common_params & params, int argc, char ** argv) {
+
          routes.update_meta(ctx_server);
          ctx_http.is_ready.store(true);
 +        // Babel discovers only the socket already owned by this process.
@@ -13,6 +30,6 @@
 +            printf("BABEL_SERVICE_READY %s\n", ready.dump().c_str());
 +            fflush(stdout);
 +        }
- 
+
          SRV_INF("%s", "model loaded\n");
- 
+
