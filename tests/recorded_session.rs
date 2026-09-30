@@ -154,6 +154,9 @@ async fn original_tones_share_one_recorded_timeline_without_changing_babel_devic
     cfg.recording.enabled = true;
     cfg.recording.microphone = true;
     cfg.recording.speaker = true;
+    // Verify original-source capture at fixed headroom. Recording-only level
+    // balance and microphone priority have separate synthetic DSP regressions.
+    cfg.recording.mix.microphone_priority = false;
     cfg.recording.directory = directory
         .path()
         .join("recordings")
@@ -386,7 +389,14 @@ async fn idle_routing_recording_and_transcription_are_independent_without_cloud(
         let path=files[0].path();ensure!(path.file_name().unwrap().to_string_lossy().starts_with("noai_gravação-sem-ia_"),"Recording-only name pattern was not applied");
         let mut wav=hound::WavReader::open(path)?;
         let samples=wav.samples::<i16>().collect::<std::result::Result<Vec<_>,_>>()?;
-        ensure!(samples.windows(16000).step_by(1600).any(|window|amplitude(window,440.0)>3500.0 && amplitude(window,880.0)>3500.0),"Original mixed recording must contain both sources even with all translation disabled");
+        // Default microphone priority reduces only the recorded incoming tone.
+        // The live observations above still require both original routes at
+        // full level, including while this recording-only session is active.
+        ensure!(samples.windows(16000).step_by(1600).any(|window| {
+            let microphone=amplitude(window,440.0);
+            let incoming=amplitude(window,880.0);
+            microphone>3500.0 && (700.0..2500.0).contains(&incoming) && microphone>3.0*incoming
+        }),"Original mixed recording must retain both sources with microphone priority confined to the saved WAV");
         println!("Idle original audio -> recording-only ({:.2}s mixed WAV) -> original audio verified without provider",samples.len() as f64/16000.0);
 
         // A transcription-only local session keeps the same original-audio

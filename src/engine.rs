@@ -858,12 +858,13 @@ async fn create_session_files(
     };
     let audio = if let Some(directory) = recording_directory {
         Some(
-            SessionAudioRecorder::create(
+            SessionAudioRecorder::create_with_mix(
                 &directory,
                 &stem,
                 origin,
                 config.recording.microphone && crate::config::route_configured(&config.microphone),
                 config.recording.speaker && crate::config::route_configured(&config.speaker),
+                &config.recording.mix,
             )
             .await?,
         )
@@ -1704,6 +1705,56 @@ mod tests {
                 assert!(!launch.path().join("audio").exists());
             }
         }
+    }
+
+    #[tokio::test]
+    async fn session_file_uses_recording_levels_without_translation_gain() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut cfg = AppConfig::default();
+        cfg.files.base_path = directory.path().to_str().unwrap().into();
+        cfg.recording.enabled = true;
+        cfg.recording.mix.microphone_gain_db = 12.0;
+        cfg.recording.mix.speaker_gain_db = -6.0;
+        cfg.recording.mix.microphone_priority = false;
+        cfg.microphone.capture_device = "original-mic".into();
+        cfg.microphone.playback_device = "virtual-mic".into();
+        cfg.speaker.capture_device = "original-output".into();
+        cfg.speaker.playback_device = "physical-output".into();
+        cfg.microphone.gain = 0.0;
+        cfg.speaker.gain = 4.0;
+        let before = toml::to_string(&cfg).unwrap();
+        let session = crate::session::SessionIdentity::new(Some("Recording levels")).unwrap();
+        let origin = Instant::now() - Duration::from_secs(2);
+        let files = create_session_files(&cfg, &session, origin).await.unwrap();
+        let recorder = files.audio.unwrap();
+        let path = recorder.path().to_owned();
+        let (sender, receiver) = mpsc::channel(2);
+        for (lane, value) in [
+            (RecordingLane::Microphone, 1000),
+            (RecordingLane::Speaker, 2000),
+        ] {
+            sender
+                .send(AudioRecord {
+                    lane,
+                    samples: vec![value; 16000],
+                    captured_at: origin + Duration::from_secs(1),
+                })
+                .await
+                .unwrap();
+        }
+        drop(sender);
+        recorder.run(receiver).await.unwrap();
+        let mut wave = hound::WavReader::open(path).unwrap();
+        let samples: Vec<i16> = wave
+            .samples()
+            .collect::<std::result::Result<_, _>>()
+            .unwrap();
+        assert_eq!(samples.len(), 16000);
+        let expected = ((1000.0 * 10.0_f32.powf(12.0 / 20.0) + 2000.0 * 10.0_f32.powf(-6.0 / 20.0))
+            / 2.0)
+            .round() as i16;
+        assert!(samples.iter().all(|sample| sample.abs_diff(expected) <= 1));
+        assert_eq!(toml::to_string(&cfg).unwrap(), before);
     }
 
     #[tokio::test]

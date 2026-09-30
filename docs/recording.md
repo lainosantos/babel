@@ -19,6 +19,13 @@ microphone = true
 speaker = true
 directory = "recordings"
 
+[recording.mix]
+microphone_gain_db = 0.0
+speaker_gain_db = 0.0
+microphone_priority = true
+ducking_db = 12.0
+microphone_threshold_db = -50.0
+
 [files]
 # Choose and adapt an absolute base for your OS:
 # base_path = '/home/ana/Babel'
@@ -85,7 +92,7 @@ and choose how many minutes to include. The default is ten minutes, bounded
 by configured capacity. The option starts unchecked and resets after every
 successful start.
 
-The dashboard shows available microphone/incoming-audio history. Only sources
+The dashboard shows the combined duration of original audio available in memory. Only sources
 selected in **Recording** enter the WAV; **Transcription** selections remain
 independent. If available history is shorter than requested, Babel includes
 only what remains. With no history in any selected source, the option is
@@ -126,11 +133,45 @@ not a multichannel 48 kHz hardware archive. Original live routing retains its
 negotiated float format independently. Recording precedes translation,
 synthesis and output gain.
 
-With both recording sources enabled, each contributes a gain of 0.5. This
-leaves headroom for summing and prevents clipping when both peak. With one
-recording source enabled, gain is 1. The mixed file cannot perfectly separate
-the two voices afterward; that would require a different recording format
-with separate channels.
+The two sources can have very different levels: a quiet microphone can become
+inaudible under louder music even though both original signals are present.
+**Recording → Recording balance** controls this balance only in the saved WAV:
+
+- **Microphone level** and **Incoming audio level** independently adjust the original
+  sources from −24 to +24 dB; both default to 0 dB. Increase the microphone gain
+  when its original capture is too quiet. Positive gain also raises any noise
+  already captured by that microphone.
+- **Keep microphone audible** is on by default. While the original microphone
+  exceeds the activity threshold, Babel smoothly reduces the incoming source in
+  the recording. It never mutes or gates the microphone. Attack, hold and release
+  prevent abrupt volume switches between syllables.
+- **Incoming audio reduction** sets that reduction from 0 to 30 dB, default 12 dB.
+  A larger value gives the microphone more space while both sources overlap.
+- **Microphone activity threshold** ranges from −60 to −20 dBFS, default −50.
+  It is measured before microphone gain. A more negative value detects quieter
+  activity; a less negative value rejects more background noise. This is level
+  detection, not speech recognition: loud noise at the microphone can activate it.
+
+These settings apply to the next session. They never change the physical device
+volume, original live routing, translated voice gain, STT input, or in-memory
+history. History included at session start uses the same recording mix exactly
+once, followed by live originals without resetting the mix state. Speaker-only
+recording never ducks itself, and microphone-only recording cannot attenuate an
+unselected incoming source. No model, service or network request is involved.
+
+The mixer retains its fixed summing headroom: each selected source contributes
+0.5 when both are selected, or 1 with only one selected, before the recording
+gain and priority adjustments. With priority off and both gains at 0 dB, the
+previous fixed mix is preserved exactly. Added gains use linked peak protection
+with five milliseconds of lookahead inside the file worker, preserving relative
+levels without integer clipping. This introduces no latency into live routing.
+There is no automatic normalization of quiet microphone noise toward a target
+level. Turn priority off when you want fixed original-source levels.
+
+The mixed file cannot perfectly separate the two voices afterward. Changing
+these controls does not repair a previously saved mix or recover a microphone
+that was not captured; separate-source recovery would require a different
+recording format with independent channels.
 
 Disk use is approximately **115 MB per hour**. RIFF WAV's container limit is
 about 37 hours in this format. Reaching it reports a recording error instead
@@ -150,8 +191,10 @@ timestamps, not shared hardware clocks: device-specific latency can offset the
 two sources.
 
 The mixer keeps a bounded two-second window for both inputs before committing
-their sum. It reserves at most three seconds of mixed samples, including room
-for one incoming frame, and writes long gaps in bounded blocks. Its input queue
+their sum. It reserves at most three seconds of separate source samples (about
+384 KiB), including room for one incoming frame, plus a small fixed lookahead
+queue. Gains and priority are applied after timestamp alignment, independent of
+frame size or source arrival order. Long gaps are written in bounded blocks. Its input queue
 is also bounded. Excessively delayed input or write failure is reported to the
 session supervisor rather than silently losing recording data. Such failures
 are visible without canceling original routing.
@@ -177,7 +220,9 @@ cargo test --lib recording:: -- --nocapture
 ```
 
 Tests use only synthetic PCM and temporary directories. They cover overlapping
-mixes in one file, headroom, one source, silence, jitter compensation, long gaps
+mixes in one file, quiet-microphone/loud-music balance, original-only source gains,
+noise and silence, peak protection, chunk/order invariance, headroom, one source,
+jitter compensation, long gaps
 without unbounded memory growth, excessive delay, error finalization, shutdown
 draining, valid headers, privacy and overwrite refusal. No test captures
 personal speech or enables recording in the actual user configuration.

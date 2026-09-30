@@ -394,7 +394,20 @@ enabled = false
 microphone = true
 speaker = true
 directory = "recordings"
+
+[recording.mix]
+microphone_gain_db = 0.0 # -24..24 dB, saved WAV only
+speaker_gain_db = 0.0 # -24..24 dB, saved WAV only
+microphone_priority = true # Smoothly lower incoming audio during microphone activity
+ducking_db = 12.0 # 0..30 dB reduction
+microphone_threshold_db = -50.0 # -60..-20 dBFS, before microphone gain
 ```
+
+Recording mix controls use the original sources, including any selected history.
+They never modify live routing, translated playback, STT input, or retained history.
+Disabling microphone priority with both gains at zero preserves the fixed original
+mix. See [recording levels and activity detection](recording.md#format-and-volume)
+for peak protection, noise sensitivity and the limits of an already mixed WAV.
 
 `babel init` populates `base_path` with the `Babel` folder inside the home directory.
 When creating TOML manually, set this field explicitly: an existing file without

@@ -132,6 +132,13 @@ Enabling a feature with no selected source is a configuration error. The source
 must be selected and configured, but its translation may be off. Writers work
 outside audio callbacks.
 
+The recording worker aligns the two original sources before applying its own
+source gains and optional microphone-priority attenuation of incoming audio.
+Boosted mixes use bounded lookahead peak protection. This processing is confined
+to the WAV worker: original routing, STT and retained history keep their original
+samples. Included history and live capture share one continuous recording mix
+state; the worker drains its lookahead without extending the file timeline.
+
 `EngineStatus.running` represents the processing/file session; it may contain
 recording only, recognition only or a combination with translation. Without a
 session, `routing_active` and `routing_error` describe local original routing.

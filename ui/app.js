@@ -101,6 +101,7 @@
   }
 
   function fieldContainer(config, element) {
+    if (element.dataset.recordingMix !== undefined) return config.recording?.mix;
     if (element.dataset.transcriptionProfile) return config.transcription?.providers?.[element.dataset.transcriptionProfile];
     if (element.dataset.recognitionRoute) return config.transcription?.[`${element.dataset.recognitionRoute}_recognition`];
     if (element.dataset.profile) return config.providers?.[element.dataset.profile];
@@ -260,6 +261,7 @@
     if (!config.providers) throw new Error(t("ui.these_settings_use_an_old_format_restart_the_updated_babel_to_load_provider"));
     config.local_runtime = { directory: '', threads: 2, idle_unload_secs: 60, ...config.local_runtime };
     config.history ??= { enabled: true, duration_secs: 600 };
+    config.recording.mix = { microphone_gain_db: 0, speaker_gain_db: 0, microphone_priority: true, ducking_db: 12, microphone_threshold_db: -50, ...config.recording.mix };
     state.config = config;
     writeValue(byId('files-base_path'), config.files?.base_path ?? '');
     document.querySelectorAll('[data-field]').forEach((element) => {
@@ -697,6 +699,11 @@
     const transcriptionEnabled = byId('transcription-enabled').checked;
     for (const field of ['microphone', 'speaker', 'timestamps']) byId(`transcription-${field}`).disabled = !transcriptionEnabled;
     for (const field of ['microphone', 'speaker']) byId(`recording-${field}`).disabled = !byId('recording-enabled').checked;
+    const recordingEnabled = byId('recording-enabled').checked;
+    for (const route of routeNames) byId(`recording-${route}-gain`).disabled = !recordingEnabled || !byId(`recording-${route}`).checked;
+    const mixedRecording = recordingEnabled && routeNames.every(route => byId(`recording-${route}`).checked);
+    byId('recording-microphone-priority').disabled = !mixedRecording;
+    for (const field of ['ducking', 'microphone-threshold']) byId(`recording-${field}`).disabled = !mixedRecording || !byId('recording-microphone-priority').checked;
     byId('save-state').textContent = state.configConflict ? t("ui.reload_settings") : state.dirty ? t("ui.unsaved_settings") : t("ui.settings_saved");
     byId('save-state').classList.toggle('dirty', state.dirty || state.configConflict);
     byId('session-hint').textContent = !state.authenticated

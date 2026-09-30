@@ -148,6 +148,14 @@ microphone = true
 speaker = true
 directory = "recordings"
 
+[recording.mix]
+# Saved WAV only: original live routing, STT and in-memory history stay unchanged.
+microphone_gain_db = 0.0 # -24..24 dB
+speaker_gain_db = 0.0 # -24..24 dB
+microphone_priority = true
+ducking_db = 12.0 # Lower incoming audio by 0..30 dB during microphone activity.
+microphone_threshold_db = -50.0 # Activity threshold before gain, -60..-20 dBFS.
+
 [files]
 # Set an absolute base folder; choose and adapt one of the examples below.
 # babel init uses HOME/Babel (Linux/macOS) or USERPROFILE\Babel (Windows).

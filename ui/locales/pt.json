@@ -686,5 +686,17 @@
   "session.translation": "Tradução",
   "session.features_both": "Ambas as direções",
   "session.features_microphone": "Só o microfone",
-  "session.features_speaker": "Só o áudio recebido"
+  "session.features_speaker": "Só o áudio recebido",
+  "recording.mix_title": "Equilíbrio da gravação",
+  "recording.mix_hint": "Ajuste as fontes originais no WAV salvo. Estes ajustes são aplicados ao iniciar a próxima sessão.",
+  "recording.microphone_level": "Nível do microfone",
+  "recording.speaker_level": "Nível do áudio recebido",
+  "recording.level_hint": "0 dB mantém o nível capturado. Aumente um microfone baixo ou reduza o áudio recebido; um limitador evita a saturação da mistura.",
+  "recording.microphone_priority": "Manter o microfone audível",
+  "recording.priority_hint": "Reduz o áudio recebido enquanto o microfone está ativo. Roteamento, transcrição e buffer de memória mantêm os níveis originais.",
+  "recording.advanced": "Ajustes avançados de equilíbrio",
+  "recording.ducking": "Redução do áudio recebido",
+  "recording.ducking_hint": "Quanto reduzir o áudio recebido durante a atividade do microfone.",
+  "recording.microphone_threshold": "Limiar de atividade do microfone",
+  "recording.threshold_hint": "Valores menores detectam falas mais baixas, mas também podem detectar ruídos de fundo."
 }

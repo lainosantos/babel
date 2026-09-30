@@ -107,6 +107,7 @@ pub struct RecordingConfig {
     pub microphone: bool,
     pub speaker: bool,
     pub directory: String,
+    pub mix: RecordingMixConfig,
 }
 impl Default for RecordingConfig {
     fn default() -> Self {
@@ -115,7 +116,60 @@ impl Default for RecordingConfig {
             microphone: true,
             speaker: true,
             directory: "recordings".into(),
+            mix: RecordingMixConfig::default(),
         }
+    }
+}
+
+/// Recording-only levels. Original routing, STT and retained history stay raw.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct RecordingMixConfig {
+    pub microphone_gain_db: f32,
+    pub speaker_gain_db: f32,
+    pub microphone_priority: bool,
+    pub ducking_db: f32,
+    pub microphone_threshold_db: f32,
+}
+impl Default for RecordingMixConfig {
+    fn default() -> Self {
+        Self {
+            microphone_gain_db: 0.0,
+            speaker_gain_db: 0.0,
+            microphone_priority: true,
+            ducking_db: 12.0,
+            microphone_threshold_db: -50.0,
+        }
+    }
+}
+impl RecordingMixConfig {
+    /// The previous fixed-headroom sum, without added gain or priority.
+    pub fn transparent() -> Self {
+        Self {
+            microphone_priority: false,
+            ..Self::default()
+        }
+    }
+    pub fn validate(&self) -> Result<()> {
+        for (name, gain) in [
+            ("microphone", self.microphone_gain_db),
+            ("incoming audio", self.speaker_gain_db),
+        ] {
+            ensure!(
+                gain.is_finite() && (-24.0..=24.0).contains(&gain),
+                "Recording {name} gain must be between -24 and 24 dB"
+            );
+        }
+        ensure!(
+            self.ducking_db.is_finite() && (0.0..=30.0).contains(&self.ducking_db),
+            "Recording incoming-audio reduction must be between 0 and 30 dB"
+        );
+        ensure!(
+            self.microphone_threshold_db.is_finite()
+                && (-60.0..=-20.0).contains(&self.microphone_threshold_db),
+            "Recording microphone activity threshold must be between -60 and -20 dBFS"
+        );
+        Ok(())
     }
 }
 
@@ -553,6 +607,7 @@ impl AppConfig {
         self.agent.validate()?;
         self.local_runtime.validate()?;
         self.history.validate()?;
+        self.recording.mix.validate()?;
         ensure!(self.version == 1, "Unsupported configuration version");
         crate::storage::resolve_base(&self.files.base_path)?;
         crate::session::validate_pattern(&self.files.name_pattern)?;
@@ -1406,6 +1461,61 @@ mod tests {
         cfg.speaker.gain = f32::NAN;
         assert!(cfg.validate().is_err());
         assert!(toml::from_str::<AppConfig>("versoin = 1").is_err());
+    }
+    #[test]
+    fn recording_mix_defaults_and_roundtrip_are_independent_of_translation() {
+        let legacy: RecordingConfig = toml::from_str("enabled = true\n").unwrap();
+        assert!(legacy.mix.microphone_priority);
+        assert_eq!(legacy.mix.microphone_gain_db, 0.0);
+        assert_eq!(legacy.mix.speaker_gain_db, 0.0);
+        assert_eq!(legacy.mix.ducking_db, 12.0);
+        let mut cfg = AppConfig::default();
+        cfg.recording.mix.microphone_gain_db = 12.0;
+        cfg.recording.mix.speaker_gain_db = -6.0;
+        cfg.recording.mix.ducking_db = 18.0;
+        cfg.recording.mix.microphone_threshold_db = -45.0;
+        cfg.validate().unwrap();
+        let saved = toml::to_string(&cfg).unwrap();
+        let restored: AppConfig = toml::from_str(&saved).unwrap();
+        assert_eq!(restored.recording.mix.microphone_gain_db, 12.0);
+        assert_eq!(restored.recording.mix.speaker_gain_db, -6.0);
+        assert_eq!(restored.recording.mix.ducking_db, 18.0);
+        assert_eq!(restored.recording.mix.microphone_threshold_db, -45.0);
+        assert_eq!(restored.microphone.gain, 1.0);
+        assert_eq!(restored.speaker.gain, 1.0);
+        assert!(toml::from_str::<RecordingConfig>("[mix]\nunknown_gain = 12\n").is_err());
+    }
+    #[test]
+    fn recording_mix_rejects_non_finite_and_out_of_range_values_even_when_disabled() {
+        for value in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY, -24.1, 24.1] {
+            let mut cfg = AppConfig::default();
+            cfg.recording.mix.microphone_gain_db = value;
+            assert!(cfg.validate().is_err());
+            cfg.recording.mix = RecordingMixConfig::default();
+            cfg.recording.mix.speaker_gain_db = value;
+            assert!(cfg.validate().is_err());
+        }
+        for value in [f32::NAN, f32::INFINITY, -1.0, 30.1] {
+            let mut cfg = AppConfig::default();
+            cfg.recording.mix.ducking_db = value;
+            assert!(cfg.validate().is_err());
+        }
+        for value in [f32::NAN, f32::NEG_INFINITY, -60.1, -19.9] {
+            let mut cfg = AppConfig::default();
+            cfg.recording.mix.microphone_threshold_db = value;
+            assert!(cfg.validate().is_err());
+        }
+        for (gain, reduction, threshold) in [(-24.0, 0.0, -60.0), (24.0, 30.0, -20.0)] {
+            RecordingMixConfig {
+                microphone_gain_db: gain,
+                speaker_gain_db: gain,
+                ducking_db: reduction,
+                microphone_threshold_db: threshold,
+                ..Default::default()
+            }
+            .validate()
+            .unwrap();
+        }
     }
     #[test]
     fn catches_feedback_across_native_endpoint_directions() {

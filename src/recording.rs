@@ -1,6 +1,10 @@
 //! One bounded, mixed recording of the two original capture streams.
 //! Input is mono PCM16/16 kHz after device resampling, before translation/gain.
+use crate::config::RecordingMixConfig;
 use anyhow::{Context, Result, ensure};
+
+mod mix;
+use mix::RecordingMixer;
 use std::{
     collections::VecDeque,
     path::{Path, PathBuf},
@@ -50,10 +54,13 @@ pub struct SessionAudioRecorder {
     file: BufWriter<File>,
     origin: Instant,
     active: [bool; 2],
-    divisor: i32,
+    mixer: RecordingMixer,
     clocks: [LaneClock; 2],
-    /// The sum for samples [written, written+pending.len()). Both lanes add here.
-    pending: VecDeque<i32>,
+    /// Separate sources for [processed, processed+pending.len()). Mix only once
+    /// both lanes have been aligned, independent of callback/chunk arrival order.
+    pending: VecDeque<[i32; 2]>,
+    processed: u64,
+    /// Physical WAV samples; bounded limiter lookahead can trail processed PCM.
     written: u64,
     latest_end: u64,
     bytes: Vec<u8>,
@@ -67,6 +74,27 @@ impl SessionAudioRecorder {
         microphone: bool,
         speaker: bool,
     ) -> Result<Self> {
+        Self::create_with_mix(
+            directory,
+            stem,
+            origin,
+            microphone,
+            speaker,
+            &RecordingMixConfig::transparent(),
+        )
+        .await
+    }
+
+    pub async fn create_with_mix(
+        directory: &Path,
+        stem: &str,
+        origin: Instant,
+        microphone: bool,
+        speaker: bool,
+        mix: &RecordingMixConfig,
+    ) -> Result<Self> {
+        // Invalid DSP settings must not create directories or partial files.
+        mix.validate()?;
         ensure!(microphone || speaker, "Select at least one input to record");
         ensure!(
             origin <= Instant::now(),
@@ -95,9 +123,10 @@ impl SessionAudioRecorder {
             file,
             origin,
             active: [microphone, speaker],
-            divisor: if microphone && speaker { 2 } else { 1 },
+            mixer: RecordingMixer::new(mix, microphone, speaker),
             clocks: Default::default(),
             pending: VecDeque::with_capacity((HOLDBACK_SAMPLES + SAMPLE_RATE) as usize),
+            processed: 0,
             written: 0,
             latest_end: 0,
             bytes: Vec::with_capacity(WRITE_SAMPLES * 2),
@@ -110,7 +139,10 @@ impl SessionAudioRecorder {
     /// pauses original routing. Rebase only before any PCM has been accepted.
     pub(crate) fn set_origin(&mut self, origin: Instant) -> Result<()> {
         ensure!(
-            self.written == 0 && self.latest_end == 0 && self.pending.is_empty(),
+            self.processed == 0
+                && self.written == 0
+                && self.latest_end == 0
+                && self.pending.is_empty(),
             "Cannot change the start after receiving audio"
         );
         ensure!(origin <= Instant::now(), "Recording time is in the future");
@@ -190,23 +222,23 @@ impl SessionAudioRecorder {
             "Recording reached the WAV RIFF limit of approximately 37 hours; start a new session"
         );
         ensure!(
-            start >= self.written,
+            start >= self.processed,
             "A capture arrived more than 2 seconds late for recording; the session stopped to prevent silent data loss"
         );
         let latest = self.latest_end.max(end);
         self.flush_until(latest.saturating_sub(HOLDBACK_SAMPLES))
             .await?;
-        let needed = end.saturating_sub(self.written) as usize;
+        let needed = end.saturating_sub(self.processed) as usize;
         ensure!(
             needed <= (HOLDBACK_SAMPLES + SAMPLE_RATE) as usize,
             "Mixing window exceeded the memory limit"
         );
         if self.pending.len() < needed {
-            self.pending.resize(needed, 0);
+            self.pending.resize(needed, [0; 2]);
         }
-        let offset = (start - self.written) as usize;
+        let offset = (start - self.processed) as usize;
         for (index, sample) in record.samples.into_iter().enumerate() {
-            self.pending[offset + index] += i32::from(sample);
+            self.pending[offset + index][lane] += i32::from(sample);
         }
         self.latest_end = latest;
         self.clocks[lane].next_sample = Some(end);
@@ -215,19 +247,27 @@ impl SessionAudioRecorder {
     }
     async fn flush_until(&mut self, end: u64) -> Result<()> {
         ensure!(end <= MAX_WAV_SAMPLES, "Maximum WAV file duration exceeded");
-        while self.written < end {
-            let count = (end - self.written).min(WRITE_SAMPLES as u64) as usize;
+        while self.processed < end {
+            let count = (end - self.processed).min(WRITE_SAMPLES as u64) as usize;
             self.bytes.clear();
             for _ in 0..count {
-                let mixed = self.pending.pop_front().unwrap_or(0) / self.divisor;
-                let sample = mixed.clamp(i32::from(i16::MIN), i32::from(i16::MAX)) as i16;
-                self.bytes.extend_from_slice(&sample.to_le_bytes());
+                let sources = self.pending.pop_front().unwrap_or([0; 2]);
+                if let Some(sample) = self.mixer.push(sources) {
+                    self.bytes.extend_from_slice(&sample.to_le_bytes());
+                }
             }
+            self.write_mixed_bytes().await?;
+            self.processed += count as u64;
+        }
+        Ok(())
+    }
+    async fn write_mixed_bytes(&mut self) -> Result<()> {
+        if !self.bytes.is_empty() {
             self.file
                 .write_all(&self.bytes)
                 .await
                 .context("Failed to write session audio")?;
-            self.written += count as u64;
+            self.written += (self.bytes.len() / 2) as u64;
         }
         Ok(())
     }
@@ -246,6 +286,13 @@ impl SessionAudioRecorder {
     }
     async fn finalize(&mut self) -> Result<()> {
         self.flush_until(self.latest_end).await?;
+        // Only the fixed lookahead remains; do not pad the saved timeline or
+        // discard its final originals when the session ends.
+        self.bytes.clear();
+        while let Some(sample) = self.mixer.finish_sample() {
+            self.bytes.extend_from_slice(&sample.to_le_bytes());
+        }
+        self.write_mixed_bytes().await?;
         self.checkpoint().await?;
         self.file
             .get_ref()
@@ -300,6 +347,157 @@ mod tests {
         assert_eq!(wav.spec().channels, 1);
         assert_eq!(wav.spec().bits_per_sample, 16);
         wav.samples::<i16>().map(Result::unwrap).collect()
+    }
+
+    async fn balanced_wave(
+        chunk_samples: usize,
+        reverse_lanes: bool,
+        history_samples: usize,
+    ) -> Vec<i16> {
+        use std::f64::consts::TAU;
+        let directory = tempfile::tempdir().unwrap();
+        let origin = Instant::now() - Duration::from_secs(10);
+        let config = RecordingMixConfig {
+            microphone_gain_db: 12.0,
+            speaker_gain_db: 12.0,
+            ..Default::default()
+        };
+        let recorder = SessionAudioRecorder::create_with_mix(
+            directory.path(),
+            "balance",
+            origin,
+            true,
+            true,
+            &config,
+        )
+        .await
+        .unwrap();
+        let path = recorder.path().to_owned();
+        let mut history = Vec::new();
+        let mut live = Vec::new();
+        let microphone: Vec<_> = (0..48_000)
+            .map(|index| {
+                if (8000..24_000).contains(&index) {
+                    (260.0 * (TAU * 300.0 * index as f64 / 16_000.0).sin()).round() as i16
+                } else {
+                    0
+                }
+            })
+            .collect();
+        let speaker: Vec<_> = (0..48_000)
+            .map(|index| (22_000.0 * (TAU * 900.0 * index as f64 / 16_000.0).sin()).round() as i16)
+            .collect();
+        for start in (0..48_000).step_by(chunk_samples) {
+            let end = start + chunk_samples;
+            let mut sources = [RecordingLane::Microphone, RecordingLane::Speaker];
+            if reverse_lanes {
+                sources.reverse();
+            }
+            for lane in sources {
+                let samples = match lane {
+                    RecordingLane::Microphone => microphone[start..end].to_vec(),
+                    RecordingLane::Speaker => speaker[start..end].to_vec(),
+                };
+                let record = record(lane, origin, start as u64 / 16, samples);
+                if end <= history_samples {
+                    history.push(record);
+                } else {
+                    live.push(record);
+                }
+            }
+        }
+        let (sender, received) = mpsc::channel(live.len().max(1));
+        for frame in live {
+            sender.send(frame).await.unwrap();
+        }
+        drop(sender);
+        recorder.run_with_history(received, history).await.unwrap();
+        pcm(&path)
+    }
+
+    #[tokio::test]
+    async fn balanced_mix_is_invariant_to_chunk_sizes_lane_order_and_history_boundary() {
+        let continuous = balanced_wave(160, false, 0).await;
+        let reordered = balanced_wave(800, true, 0).await;
+        let prefix = balanced_wave(800, false, 16_000).await;
+        assert_eq!(
+            continuous.len(),
+            48_000,
+            "EOF retains the limiter lookahead without padding"
+        );
+        assert_eq!(continuous, reordered);
+        assert_eq!(continuous, prefix);
+        assert!(
+            continuous
+                .iter()
+                .all(|sample| i32::from(*sample).abs() <= 32_113)
+        );
+    }
+
+    #[tokio::test]
+    async fn boosted_checkpoint_and_eof_preserve_exact_sample_count_with_bounded_storage() {
+        let directory = tempfile::tempdir().unwrap();
+        let origin = Instant::now() - Duration::from_secs(10);
+        let config = RecordingMixConfig {
+            microphone_gain_db: 12.0,
+            ..Default::default()
+        };
+        let mut recorder = SessionAudioRecorder::create_with_mix(
+            directory.path(),
+            "limited",
+            origin,
+            true,
+            true,
+            &config,
+        )
+        .await
+        .unwrap();
+        let path = recorder.path().to_owned();
+        for second in 0..4 {
+            for lane in [RecordingLane::Microphone, RecordingLane::Speaker] {
+                recorder
+                    .append(record(lane, origin, second * 1000, vec![16_000; 16_000]))
+                    .await
+                    .unwrap();
+                assert!(recorder.pending.len() <= (HOLDBACK_SAMPLES + SAMPLE_RATE) as usize);
+                assert!(recorder.processed - recorder.written <= 80);
+                assert!(recorder.bytes.capacity() <= WRITE_SAMPLES * 2);
+            }
+        }
+        recorder.checkpoint().await.unwrap();
+        assert_eq!(pcm(&path).len() as u64, recorder.written);
+        let (sender, received) = mpsc::channel(1);
+        drop(sender);
+        recorder.run(received).await.unwrap();
+        let final_pcm = pcm(&path);
+        assert_eq!(final_pcm.len(), 64_000);
+        assert!(
+            final_pcm[63_920..].iter().all(|sample| *sample != 0),
+            "the fixed lookahead tail is saved exactly once"
+        );
+    }
+
+    #[tokio::test]
+    async fn invalid_recording_mix_does_not_create_a_folder_or_file() {
+        let directory = tempfile::tempdir().unwrap();
+        let output = directory.path().join("not-created").join("nested");
+        let config = RecordingMixConfig {
+            microphone_gain_db: f32::NAN,
+            ..Default::default()
+        };
+        assert!(
+            SessionAudioRecorder::create_with_mix(
+                &output,
+                "invalid",
+                Instant::now(),
+                true,
+                true,
+                &config
+            )
+            .await
+            .is_err()
+        );
+        assert!(!directory.path().join("not-created").exists());
     }
     #[tokio::test]
     async fn historical_prefix_and_live_audio_share_one_mixed_timeline_without_duplicates() {

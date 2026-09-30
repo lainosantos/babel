@@ -686,5 +686,17 @@
   "session.translation": "Translation",
   "session.features_both": "Both directions",
   "session.features_microphone": "Microphone only",
-  "session.features_speaker": "Incoming audio only"
+  "session.features_speaker": "Incoming audio only",
+  "recording.mix_title": "Recording balance",
+  "recording.mix_hint": "Adjust the original sources in the saved WAV. These settings apply when you start the next session.",
+  "recording.microphone_level": "Microphone level",
+  "recording.speaker_level": "Incoming audio level",
+  "recording.level_hint": "0 dB keeps the captured level. Raise a quiet microphone or lower incoming audio; a limiter prevents the mix from clipping.",
+  "recording.microphone_priority": "Keep microphone audible",
+  "recording.priority_hint": "Lower incoming audio while the microphone is active. Routing, transcription and the memory buffer keep their original levels.",
+  "recording.advanced": "Advanced balance settings",
+  "recording.ducking": "Incoming audio reduction",
+  "recording.ducking_hint": "How much to lower incoming audio during microphone activity.",
+  "recording.microphone_threshold": "Microphone activity threshold",
+  "recording.threshold_hint": "Lower values detect quieter speech, but may also detect background noise."
 }
