@@ -657,5 +657,8 @@
   "runtime.could_not_start_the_tray": "Could not start the tray",
   "runtime.dashboard_server_interrupted": "Dashboard server interrupted",
   "runtime.transcription_interrupted_error": "Transcription interrupted: {{error}}",
-  "config.transcription_model_length": "Transcription model settings exceed the limit for {{value}}"
+  "config.transcription_model_length": "Transcription model settings exceed the limit for {{value}}",
+  "command.history_replaced": "A new wake name replaced the pending command",
+  "command.history_changed": "Command cancelled because microphone routing or agent settings changed",
+  "command.history_stopped": "Babel stopped while a command was pending"
 }

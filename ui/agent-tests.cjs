@@ -17,6 +17,9 @@ async function page(t, options = {}) {
   const { window } = dom; const doc = window.document; const byId = id => doc.getElementById(id);
   let config = defaults(); options.configure?.(config); let revision = 7; let interval; let oauthAuthenticated = false;
   let status = { phase: 'listening', wake_name: 'Babel', microphone_active: true, sequence: 1, activation_id: 0, command: null, tool: null, result: null, error: null, dropped_frames: 0, whisper_endpoint: null, needle_endpoint: null, ...options.status };
+  let history = structuredClone(options.history || { revision: 1, capacity: 100, entries: [] });
+  let historyFailure = options.historyFailure; let now = Date.now(); let deferHistory = false; let releaseHistory;
+  window.Date.now = () => now;
   const calls = []; const secrets = new Set(); const timers = new Map(); let timerId = 0;
   window.structuredClone = structuredClone; window.AbortSignal = AbortSignal;
   window.BabelDashboard = { authorization: () => `Bearer ${'a'.repeat(64)}` };
@@ -32,7 +35,16 @@ async function page(t, options = {}) {
     if (request.headers['If-Match'] && request.headers['If-Match'] !== `"${revision}"`) return reply({ error: 'Agent revision conflict' }, 412);
     if (parsed.pathname === '/api/agent' && request.method === 'GET') return reply(config);
     if (parsed.pathname === '/api/agent' && request.method === 'PUT') { config = body; revision++; return reply({ ok: true }); }
-    if (parsed.pathname === '/api/agent/status') return reply({ ...status, config_revision: revision });
+    if (parsed.pathname === '/api/agent/status') return reply({ ...status, config_revision: revision, history_revision: history.revision });
+    if (parsed.pathname === '/api/agent/history') {
+      if (historyFailure) return reply({ error: historyFailure }, 503);
+      if (request.method === 'DELETE') history = { ...history, revision: history.revision + 1, entries: [] };
+      else if (deferHistory) {
+        deferHistory = false; const snapshot = structuredClone(history);
+        return new Promise(resolve => { releaseHistory = () => resolve(reply(snapshot)); });
+      }
+      return reply(history);
+    }
     if (parsed.pathname === '/api/credentials') return reply({ configured: secrets.has(parsed.searchParams.get('api_key_env')) });
     if (parsed.pathname === '/api/agent/credentials') { secrets.add(body.api_key_env); return reply({ ok: true }); }
     if (parsed.pathname === '/api/agent/credentials/clear') { secrets.delete(body.api_key_env); return reply({ ok: true }); }
@@ -50,7 +62,7 @@ async function page(t, options = {}) {
   await settle(() => byId('agent-wake_name') && !byId('agent-fields').disabled && byId('agent-summary').dataset.stage);
   const set = (id, value) => { const input = byId(id); assert.ok(input, id); if (input.type === 'checkbox') input.checked = value; else input.value = value; input.dispatchEvent(new window.Event('input', { bubbles: true })); input.dispatchEvent(new window.Event('change', { bubbles: true })); };
   const save = async () => { byId('agent-form').dispatchEvent(new window.Event('submit', { bubbles: true, cancelable: true })); await settle(() => byId('agent-save').disabled && byId('agent-notice').textContent.includes(window.BabelI18n.language === 'pt' ? 'Ajustes do agente salvos.' : 'Agent settings saved.')); };
-  return { window, doc, byId, calls, set, save, timers, expire: () => { const pending = [...timers.values()]; timers.clear(); for (const timer of pending) timer.callback(); }, poll: () => interval(), config: () => config, updateStatus: value => { status = { ...status, ...value }; }, externalChange: update => { update(config); revision++; }, authenticate: () => { oauthAuthenticated = true; } };
+  return { window, doc, byId, calls, set, save, timers, expire: () => { const pending = [...timers.values()]; timers.clear(); for (const timer of pending) timer.callback(); }, poll: (elapsed = 2000) => { now += elapsed; return interval(); }, config: () => config, history: () => history, updateHistory: (entries, advanceRevision = true) => { history = { ...history, revision: history.revision + Number(advanceRevision), entries }; }, failHistory: value => { historyFailure = value; }, deferHistory: () => { deferHistory = true; }, releaseHistory: () => releaseHistory?.(), updateStatus: value => { status = { ...status, ...value }; }, externalChange: update => { update(config); revision++; }, authenticate: () => { oauthAuthenticated = true; } };
 }
 
 test('voice settings save independently while the audio/session fieldset is disabled', async t => {
@@ -468,4 +480,213 @@ test('a first command completing between polls appears after an initially empty 
   p.updateStatus({ activation_id: 1, feedback: { activation_id: 1, sequence: 3, phase: 'succeeded', age_ms: 50 } }); await p.poll();
   assert.equal(p.byId('agent-activity').hidden, false);
   assert.equal(p.byId('agent-activity-title').textContent, 'Command completed');
+});
+
+
+const historyEntry = (overrides = {}) => ({ id: 1, started_at_ms: Date.UTC(2026, 8, 30, 15, 20, 25), updated_at_ms: Date.UTC(2026, 8, 30, 15, 20, 28), command: 'List my appointments', phase: 'succeeded', confidence: 0.97, tools: [{ integration: 'calendar', tool: 'list_events', phase: 'succeeded', result: 'No appointments today.', error: null }], result: 'No appointments today.', error: null, recognition_ms: 421, decision_ms: 184, ...overrides });
+async function openHistory(p) {
+  p.window.BabelWorkspace.navigate('commands');
+  await settle(() => p.calls.some(call => call.path === '/api/agent/history') && !p.byId('agent-history-empty').textContent.includes('Loading'));
+}
+
+test('command history renders original commands, selected tools, confidence and escaped results without replaying feedback', async t => {
+  const unsafe = '<img src=x onerror=alert(1)>';
+  const completed = historyEntry({ command: `Original command ${unsafe}`, confidence: 1, tools: [{ integration: `calendar ${unsafe}`, tool: 'list_events', phase: 'succeeded', result: `<script>untrusted response</script>`, error: null }], result: '<script>untrusted response</script>' });
+  const failed = historyEntry({ id: 2, phase: 'failed', confidence: 0, command: 'Read a missing file', tools: [{ integration: 'files', tool: 'read', phase: 'failed', result: null, error: unsafe }], result: null, error: unsafe });
+  const p = await page(t, { language: 'en', history: { revision: 3, capacity: 100, entries: [failed, completed] } });
+  assert.equal(p.calls.some(call => call.path === '/api/agent/history'), false, 'hidden Commands never requests history');
+  await openHistory(p);
+  const rows = p.doc.querySelectorAll('.command-history-entry');
+  assert.deepEqual([...rows].map(row => row.dataset.historyId), ['2', '1']);
+  assert.equal(rows[0].querySelector('.command-history-phase').textContent, 'Failed');
+  assert.equal(rows[1].querySelector('.command-history-phase').textContent, 'Completed');
+  assert.equal(rows[0].querySelector('.command-history-confidence').textContent, 'Confidence 0.00');
+  assert.equal(rows[1].querySelector('.command-history-confidence').textContent, 'Confidence 1.00');
+  assert.equal(rows[1].querySelector('time').dateTime, '2026-09-30T15:20:25.000Z');
+  assert.match(rows[1].querySelector('.command-history-tools').textContent, /calendar.*list_events/);
+  assert.match(rows[1].querySelector('.command-history-timing').textContent, /421 ms.*184 ms/);
+  assert.equal(rows[0].querySelector('.command-history-error').textContent, unsafe);
+  assert.equal(rows[1].querySelector('pre').textContent, '<script>untrusted response</script>');
+  assert.equal(rows[1].querySelectorAll('pre').length, 1, 'duplicate entry and tool results are shown once');
+  assert.equal(p.byId('agent-history-list').querySelector('script,img'), null);
+  assert.equal(rows[0].open, false); assert.equal(rows[1].open, false);
+  assert.equal(p.byId('agent-activity').hidden, true, 'stored commands do not replay a completion notification');
+  assert.match(p.byId('agent-history-retention').textContent, /100.*memory.*exits/);
+  assert.equal(p.window.localStorage.length, 0);
+  assert.equal(p.window.sessionStorage.getItem('agent-history'), null);
+  assert.equal(p.calls.some(call => call.path.includes('tools/call')), false);
+});
+
+test('live history keeps expanded rows, keyboard focus, settings drafts and session controls intact', async t => {
+  const active = historyEntry({ phase: 'activated', command: null, confidence: null, tools: [], result: null, recognition_ms: null, decision_ms: null });
+  const p = await page(t, { language: 'en', history: { revision: 1, capacity: 100, entries: [active] } });
+  await openHistory(p);
+  const row = p.doc.querySelector('.command-history-entry');
+  assert.match(row.querySelector('.command-history-command').textContent, /Waiting/);
+  assert.equal(row.querySelector('.command-history-confidence').textContent, 'Confidence —');
+  assert.equal(row.querySelector('.command-history-phase').textContent, 'Listening to your command');
+  row.open = true; row.querySelector('summary').focus();
+  const summary = row.querySelector('summary');
+  p.set('agent-wake_name', 'Atlas draft');
+  p.byId('speaker-target_language').value = 'ja-JP';
+  p.updateHistory([historyEntry({ phase: 'executing', result: null, tools: [{ integration: 'calendar', tool: 'list_events', phase: 'executing', result: null, error: null }] })]);
+  await p.poll(); await p.poll();
+  assert.equal(p.doc.querySelector('.command-history-entry'), row);
+  assert.equal(row.querySelector('summary'), summary);
+  assert.equal(row.open, true);
+  assert.equal(p.doc.activeElement, summary);
+  assert.equal(row.querySelector('.command-history-phase').textContent, 'Running the tool');
+  assert.equal(p.byId('agent-wake_name').value, 'Atlas draft');
+  assert.equal(p.byId('agent-save').disabled, false);
+  assert.equal(p.byId('speaker-target_language').value, 'ja-JP');
+  await p.window.BabelI18n.setLanguage('pt');
+  assert.equal(row.open, true);
+  assert.equal(row.querySelector('.command-history-confidence').textContent, 'Confiança 0,97');
+  assert.equal(p.byId('agent-history-title').textContent, 'Histórico de comandos');
+  assert.equal(p.byId('agent-wake_name').value, 'Atlas draft');
+  p.updateHistory([historyEntry({ id: 2, command: 'Second command' }), historyEntry()]);
+  await p.poll(); await p.poll();
+  assert.deepEqual([...p.doc.querySelectorAll('.command-history-entry')].map(item => item.dataset.historyId), ['2', '1']);
+  assert.equal(row.open, true);
+  assert.equal(p.doc.activeElement, summary);
+  p.updateHistory([historyEntry({ id: 2 })]); await p.poll(); await p.poll();
+  assert.equal(p.doc.querySelectorAll('.command-history-entry').length, 1);
+  assert.equal(row.isConnected, false, 'evicted server entries leave the DOM');
+  assert.equal(p.calls.some(call => ['/api/config', '/api/start', '/api/stop'].includes(call.path)), false);
+});
+
+test('history polling runs only for visible Commands and skips unchanged revisions', async t => {
+  const p = await page(t, { language: 'en' });
+  const reads = () => p.calls.filter(call => call.path === '/api/agent/history' && call.request.method === 'GET').length;
+  await p.poll(); assert.equal(reads(), 0);
+  await openHistory(p); assert.equal(reads(), 1);
+  assert.match(p.byId('agent-history-empty').textContent, /No commands yet/);
+  assert.equal(p.byId('agent-history-clear').disabled, true);
+  await p.poll(); await p.poll(); assert.equal(reads(), 1);
+  p.updateHistory([historyEntry()]); await p.poll(0); await p.poll(0); assert.equal(reads(), 2);
+  p.updateHistory([historyEntry({ phase: 'executing' })]); await p.poll(500); await p.poll(500);
+  assert.equal(reads(), 2, 'history requests stay at least two seconds apart while visible');
+  await p.poll(1000); assert.equal(reads(), 3);
+  p.window.BabelWorkspace.navigate('routing');
+  p.updateHistory([historyEntry({ id: 2 })]); await p.poll(30000); assert.equal(reads(), 3);
+  p.window.BabelWorkspace.navigate('commands'); await settle(() => reads() === 4);
+  await settle(() => p.doc.querySelector('[data-history-id="2"]'));
+  Object.defineProperty(p.doc, 'hidden', { configurable: true, get: () => true });
+  p.updateHistory([historyEntry({ id: 3 })]); await p.poll(30000); assert.equal(reads(), 4);
+  Object.defineProperty(p.doc, 'hidden', { configurable: true, get: () => false });
+  p.doc.dispatchEvent(new p.window.Event('visibilitychange'));
+  await settle(() => reads() === 5);
+  await settle(() => p.doc.querySelector('[data-history-id="3"]'));
+});
+
+test('clearing history is an authenticated independent action and failures preserve previous commands', async t => {
+  const p = await page(t, { language: 'en', history: { revision: 1, capacity: 100, entries: [historyEntry()] } });
+  await openHistory(p);
+  p.set('agent-wake_name', 'Unsaved name');
+  p.failHistory('History temporarily unavailable');
+  p.byId('agent-history-clear').click();
+  await settle(() => !p.byId('agent-history-notice').hidden);
+  assert.match(p.byId('agent-history-error').textContent, /Could not clear/);
+  assert.equal(p.doc.querySelectorAll('.command-history-entry').length, 1);
+  assert.equal(p.byId('agent-error').hidden, true);
+  assert.equal(p.byId('agent-fields').disabled, false);
+  p.failHistory(null); p.byId('agent-history-clear').click();
+  await settle(() => p.byId('agent-history-list').hidden);
+  assert.equal(p.byId('agent-history-clear').disabled, true);
+  assert.equal(p.byId('agent-history-notice').hidden, true);
+  assert.equal(p.byId('agent-wake_name').value, 'Unsaved name');
+  assert.equal(p.byId('agent-save').disabled, false);
+  assert.equal(p.calls.some(call => ['/api/config', '/api/start', '/api/stop', '/api/agent/cancel'].includes(call.path)), false);
+  assert.equal(p.calls.filter(call => call.path === '/api/agent/history' && call.request.method === 'DELETE').length, 2);
+  assert.equal(p.history().entries.length, 0);
+  assert.equal(p.window.localStorage.length, 0);
+});
+
+test('history fetch failures are local to the history panel and recover on retry', async t => {
+  const p = await page(t, { language: 'en', historyFailure: 'Temporary history outage' });
+  p.window.BabelWorkspace.navigate('commands');
+  await settle(() => !p.byId('agent-history-notice').hidden);
+  assert.match(p.byId('agent-history-error').textContent, /Could not load.*Temporary history outage/);
+  assert.equal(p.byId('agent-history-empty').hidden, true);
+  assert.equal(p.byId('agent-summary').dataset.stage, 'listening');
+  assert.equal(p.byId('agent-error').hidden, true);
+  p.set('agent-wake_name', 'Preserved draft');
+  p.failHistory(null); p.byId('agent-history-retry').click();
+  await settle(() => p.byId('agent-history-notice').hidden);
+  assert.equal(p.byId('agent-history-empty').hidden, false);
+  assert.equal(p.byId('agent-wake_name').value, 'Preserved draft');
+});
+
+
+test('a history request completing after clear cannot resurrect cleared commands', async t => {
+  const p = await page(t, { language: 'en', history: { revision: 1, capacity: 100, entries: [historyEntry()] } });
+  await openHistory(p);
+  p.deferHistory(); p.updateHistory([historyEntry({ id: 2 }), historyEntry()]);
+  await p.poll();
+  const pending = p.poll();
+  await settle(() => p.calls.filter(call => call.path === '/api/agent/history' && call.request.method === 'GET').length === 2);
+  p.byId('agent-history-clear').click();
+  await settle(() => p.byId('agent-history-list').hidden);
+  p.releaseHistory(); await pending;
+  assert.equal(p.doc.querySelectorAll('.command-history-entry').length, 0);
+  assert.equal(p.byId('agent-history-list').hidden, true);
+  assert.match(p.byId('agent-history-empty').textContent, /No commands yet/);
+  assert.equal(p.byId('agent-history-clear').disabled, true);
+});
+
+
+test('changing interface language refetches localized history errors even when the history revision is unchanged', async t => {
+  const p = await page(t, { language: 'en', history: { revision: 1, capacity: 100, entries: [historyEntry({ phase: 'failed', tools: [], result: null, error: 'No tool selected' })] } });
+  await openHistory(p);
+  const row = p.doc.querySelector('.command-history-entry'); row.open = true;
+  p.set('agent-wake_name', 'Draft stays');
+  p.updateHistory([historyEntry({ phase: 'failed', tools: [], result: null, error: 'Nenhuma ferramenta selecionada' })], false);
+  await p.window.BabelI18n.setLanguage('pt');
+  await settle(() => row.querySelector('.command-history-error').textContent === 'Nenhuma ferramenta selecionada');
+  assert.equal(row.open, true);
+  assert.equal(row.querySelector('.command-history-phase').textContent, 'Falhou');
+  assert.equal(p.byId('agent-wake_name').value, 'Draft stays');
+  assert.equal(p.history().revision, 1);
+});
+
+
+test('automatic history recovery refreshes localized errors even when the revision is unchanged', async t => {
+  const p = await page(t, { language: 'en', history: { revision: 1, capacity: 100, entries: [historyEntry({ phase: 'failed', tools: [], result: null, error: 'No tool selected' })] } });
+  await openHistory(p);
+  const row = p.doc.querySelector('.command-history-entry'); row.open = true;
+  p.set('agent-wake_name', 'Draft during outage');
+  p.failHistory('Temporary history outage');
+  await p.window.BabelI18n.setLanguage('pt');
+  await settle(() => !p.byId('agent-history-notice').hidden);
+  p.failHistory(null);
+  p.updateHistory([historyEntry({ phase: 'failed', tools: [], result: null, error: 'Nenhuma ferramenta selecionada' })], false);
+  await p.poll(2500);
+  assert.equal(p.byId('agent-history-notice').hidden, true);
+  assert.equal(row.querySelector('.command-history-error').textContent, 'Nenhuma ferramenta selecionada');
+  assert.equal(row.open, true);
+  assert.equal(p.byId('agent-wake_name').value, 'Draft during outage');
+  assert.equal(p.history().revision, 1);
+});
+
+test('a locale change during a pending history request refreshes again without polling hidden pages', async t => {
+  const p = await page(t, { language: 'en', history: { revision: 1, capacity: 100, entries: [historyEntry({ phase: 'failed', tools: [], result: null, error: 'No tool selected' })] } });
+  await openHistory(p);
+  const reads = () => p.calls.filter(call => call.path === '/api/agent/history').length;
+  const row = p.doc.querySelector('.command-history-entry'); row.open = true;
+  p.deferHistory(); p.window.BabelWorkspace.navigate('commands');
+  await settle(() => reads() === 2);
+  p.updateHistory([historyEntry({ phase: 'failed', tools: [], result: null, error: 'Nenhuma ferramenta selecionada' })], false);
+  await p.window.BabelI18n.setLanguage('pt');
+  assert.equal(reads(), 2, 'the new locale waits for the current request instead of overlapping it');
+  p.releaseHistory();
+  await settle(() => row.querySelector('.command-history-error').textContent === 'Nenhuma ferramenta selecionada');
+  assert.equal(reads(), 3);
+  assert.equal(row.open, true);
+  p.deferHistory(); p.window.BabelWorkspace.navigate('commands');
+  await settle(() => reads() === 4);
+  await p.window.BabelI18n.setLanguage('en');
+  p.window.BabelWorkspace.navigate('routing');
+  p.releaseHistory(); await new Promise(resolve => setImmediate(resolve));
+  await p.poll(30000);
+  assert.equal(reads(), 4, 'a queued refresh does not fetch in a hidden workspace');
 });

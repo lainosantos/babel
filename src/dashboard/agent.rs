@@ -5,6 +5,7 @@ pub(super) fn routes() -> Router<DashboardState> {
     Router::new()
         .route("/agent", get(config).put(save))
         .route("/agent/status", get(status))
+        .route("/agent/history", get(history).delete(clear_history))
         .route("/agent/cancel", post(cancel))
         .route("/agent/integrations/test", post(test))
         .route("/agent/integrations/status", get(auth_status))
@@ -48,6 +49,27 @@ async fn status(State(state): State<DashboardState>) -> Json<serde_json::Value> 
 async fn cancel(State(state): State<DashboardState>) -> Response {
     state.controller.cancel_command();
     operation_result(Ok(()))
+}
+async fn history(
+    State(state): State<DashboardState>,
+) -> Json<crate::commands::CommandHistorySnapshot> {
+    let mut history = state.controller.command_history();
+    for entry in &mut history.entries {
+        if let Some(error) = &mut entry.error {
+            *error = localized(&*error);
+        }
+        for tool in &mut entry.tools {
+            if let Some(error) = &mut tool.error {
+                *error = localized(&*error);
+            }
+        }
+    }
+    Json(history)
+}
+async fn clear_history(
+    State(state): State<DashboardState>,
+) -> Json<crate::commands::CommandHistorySnapshot> {
+    Json(state.controller.clear_command_history())
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -188,6 +210,7 @@ async fn clear_credential(
 mod tests {
     use super::*;
     use axum::body::{Body, to_bytes};
+    use serde_json::Value;
     use tower::ServiceExt;
 
     fn request(method: &str, path: &str, body: serde_json::Value) -> Request {
@@ -213,6 +236,53 @@ mod tests {
         )
     }
     #[tokio::test]
+    async fn command_history_is_private_volatile_and_clearing_does_not_change_settings() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let (app, controller) = fixture(path.clone());
+        let original = controller.agent_snapshot().await;
+        let response = app
+            .clone()
+            .oneshot(request("GET", "/api/agent/history", json!(null)))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
+        let snapshot: Value =
+            serde_json::from_slice(&to_bytes(response.into_body(), 8192).await.unwrap()).unwrap();
+        assert_eq!(snapshot["capacity"], 100);
+        assert_eq!(snapshot["entries"], json!([]));
+        let mut foreign = request("DELETE", "/api/agent/history", json!(null));
+        foreign
+            .headers_mut()
+            .insert(header::ORIGIN, "https://unrelated.invalid".parse().unwrap());
+        assert_eq!(
+            app.clone().oneshot(foreign).await.unwrap().status(),
+            StatusCode::FORBIDDEN
+        );
+        let response = app
+            .clone()
+            .oneshot(request("DELETE", "/api/agent/history", json!(null)))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let cleared: Value =
+            serde_json::from_slice(&to_bytes(response.into_body(), 8192).await.unwrap()).unwrap();
+        assert_eq!(
+            cleared["revision"].as_u64().unwrap(),
+            snapshot["revision"].as_u64().unwrap() + 1
+        );
+        assert_eq!(cleared["entries"], json!([]));
+        let current = controller.agent_snapshot().await;
+        assert_eq!(
+            serde_json::to_value(original.0).unwrap(),
+            serde_json::to_value(current.0).unwrap()
+        );
+        assert_eq!(original.1, current.1);
+        assert!(!path.exists());
+        assert!(!controller.agent_status().await.0.microphone_active);
+    }
+    #[tokio::test]
     async fn all_agent_operations_require_bearer_but_callback_only_requires_valid_oauth_state() {
         let dir = tempfile::tempdir().unwrap();
         let (app, _) = fixture(dir.path().join("config.toml"));
@@ -220,6 +290,8 @@ mod tests {
             ("GET", "/api/agent"),
             ("PUT", "/api/agent"),
             ("GET", "/api/agent/status"),
+            ("GET", "/api/agent/history"),
+            ("DELETE", "/api/agent/history"),
             ("POST", "/api/agent/cancel"),
             ("POST", "/api/agent/integrations/test"),
             ("GET", "/api/agent/integrations/status"),

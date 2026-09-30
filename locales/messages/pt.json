@@ -657,5 +657,8 @@
   "runtime.could_not_start_the_tray": "Não foi possível iniciar a bandeja",
   "runtime.dashboard_server_interrupted": "Servidor do painel interrompido",
   "runtime.transcription_interrupted_error": "Transcrição interrompida: {{error}}",
-  "config.transcription_model_length": "A configuração do modelo de transcrição excede o limite para {{value}}"
+  "config.transcription_model_length": "A configuração do modelo de transcrição excede o limite para {{value}}",
+  "command.history_replaced": "Um novo nome de ativação substituiu o comando pendente",
+  "command.history_changed": "Comando cancelado porque o roteamento do microfone ou as configurações do agente mudaram",
+  "command.history_stopped": "O Babel foi encerrado enquanto havia um comando pendente"
 }

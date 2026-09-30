@@ -33,8 +33,9 @@ it uses the light version.
 | Failure | The command was refused, canceled, timed out, or a stage failed. | Disappears after nine seconds. Check details under Commands. |
 
 The native panel contains **only generic state messages**. It does not receive
-recognized speech, arguments, tool names, or results. Those details remain on
-the Commands page. The page indicator uses the same states and preserves results
+recognized speech, arguments, tool names, or results. The Commands page shows
+recognized commands, selected tools, and bounded result/error summaries. The
+page indicator uses the same states and preserves results
 from fast commands, even when they finish between two screen updates. Reopening
 settings does not replay old results. Installation or availability problems that
 precede activation remain diagnostic information on the page, without simulating
@@ -76,6 +77,39 @@ Babel's other executables. Without it, system notification feedback is available
 but the custom panel is not. The feedback queue is bounded and independent of
 capture, inference, and tools; a slow desktop neither blocks audio nor accumulates
 a sequence of old notices.
+
+## Recent command history
+
+The **Commands** page keeps the most recent **100 command entries**, newest first.
+This history exists only in Babel's process memory. **Clear history** removes
+its entries; closing Babel also clears it. Reopening settings while Babel is
+running can show the retained entries, without replaying notifications or tools.
+No history file is created.
+
+An entry begins when Babel recognizes an addressed wake name. It shows the
+recognized command when available, the overall outcome, and the selected MCP
+integration and tool for each call. Tool states distinguish **Selected**,
+**Executing**, **Succeeded**, and **Failed**. Selection alone does not mean a
+call was dispatched: confidence and argument validation can still reject the
+plan, and a failed call prevents later calls from running. Result and error
+summaries have bounded lengths.
+
+Needle confidence appears when the model supplied a valid finite number from
+**0 to 1**, including values below the configured execution threshold. An unknown
+value means no valid confidence is available, for example because processing
+failed before reaching Needle. It is not displayed as zero. Confidence is the
+model's reported value, not proof that the requested action is correct.
+Recognition and planning durations appear when measured; missing timings remain
+unknown. They help distinguish speech-recognition delay from tool selection and
+execution, without promising a fixed response time.
+
+Ordinary background speech and service startup failures do not create fabricated
+command entries. Readiness failures remain in the existing service notice on the
+Commands page. Babel does not add audio, tool arguments or authentication
+settings to these entries, and creates no history files. Entries contain the
+recognized text and bounded summaries of tool responses. The separate
+recent-audio buffer and optional session recording/transcription retain their
+own settings and lifecycle.
 
 ## Listening and processing
 
@@ -483,8 +517,8 @@ Tools and their results are data. Tool results do not become instructions for ne
 - There is no acoustic echo filter or voice authentication. Audio played near the microphone may be captured by it, although Babel never sends its output route directly to the agent.
 - Schemas help constrain arguments, but no model guarantees correct intent. Check Needle's quality with your tools and languages. Custom weights without calibrated confidence are refused by the current policy.
 - The catalog accepts up to 128 tools and requests up to 256 KiB. Needle has internal retrieval for large catalogs; clear descriptions and smaller catalogs make correct choices easier.
-- The agent discards queued audio older than 500 ms and old segments, retains only one segment awaiting ASR, limits JSON responses to 256 KiB, and never blocks the audio route waiting for AI.
-- Enabling the agent does not enable transcript or recording storage. Temporary recognition text stays in memory; only the current command and result appear in status. The adapter does not log text/arguments.
+- The agent discards queued audio older than 500 ms and old segments, retains only one segment awaiting ASR, limits JSON responses to 256 KiB, and never blocks the audio route waiting for AI. A complete utterance already being recognized is not discarded merely because newer audio overflows a queue. An actual gap between a wake name and its following command still invalidates that activation.
+- Enabling the agent does not enable transcript or recording storage. Recognized addressed commands and bounded summaries stay only in the in-memory history described above. Ordinary background recognition is not added to that history. The adapter does not log text or arguments.
 - Closing the dashboard does not stop Babel or its agent. Normal exit stops routing, listening, and managed helpers. Servers configured through explicit endpoints remain externally managed.
 
 ## Development verification

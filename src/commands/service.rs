@@ -18,7 +18,7 @@ use tokio_util::sync::CancellationToken;
 
 use super::{
     AgentConfig, CommandErrorScope, CommandFeedback, CommandPhase, CommandStatus, CommandTools,
-    feedback::FeedbackPublisher, inference::Inference,
+    feedback::FeedbackPublisher, history::CommandHistory, inference::Inference,
 };
 use crate::audio::{PcmFrame, resample::Resampler};
 
@@ -26,9 +26,17 @@ const AUDIO_QUEUE: usize = 32;
 const AUDIO_MAX_AGE: Duration = Duration::from_millis(500);
 const SEGMENT_MAX_AGE: Duration = Duration::from_secs(2);
 
+struct CapturedAudio {
+    frame: PcmFrame,
+    // Capture the boundary when this frame enters the queue. Later overload
+    // must not invalidate an earlier, already complete utterance.
+    drop_epoch: u64,
+}
+
 struct Shared {
     config: RwLock<AgentConfig>,
     status: Mutex<CommandStatus>,
+    history: Mutex<CommandHistory>,
     feedback: FeedbackPublisher,
     tools: Arc<dyn CommandTools>,
     active: AtomicBool,
@@ -49,8 +57,8 @@ struct Shared {
 /// audio workers, even if the caller itself is on the audio runtime.
 pub struct CommandService {
     shared: Arc<Shared>,
-    audio_tx: mpsc::Sender<PcmFrame>,
-    audio_rx: Mutex<Option<mpsc::Receiver<PcmFrame>>>,
+    audio_tx: mpsc::Sender<CapturedAudio>,
+    audio_rx: Mutex<Option<mpsc::Receiver<CapturedAudio>>>,
     task: Mutex<Option<JoinHandle<()>>>,
 }
 
@@ -70,6 +78,7 @@ impl CommandService {
         Ok(Arc::new(Self {
             shared: Arc::new(Shared {
                 status: Mutex::new(CommandStatus::initial(&config)),
+                history: Mutex::new(CommandHistory::default()),
                 feedback: FeedbackPublisher::new(),
                 enabled: AtomicBool::new(config.enabled),
                 config: RwLock::new(config),
@@ -134,10 +143,13 @@ impl CommandService {
         }
         match self.audio_tx.try_reserve() {
             Ok(permit) => {
-                permit.send(PcmFrame {
-                    samples: frame.samples.clone(),
-                    sample_rate: frame.sample_rate,
-                    captured_at: frame.captured_at,
+                permit.send(CapturedAudio {
+                    frame: PcmFrame {
+                        samples: frame.samples.clone(),
+                        sample_rate: frame.sample_rate,
+                        captured_at: frame.captured_at,
+                    },
+                    drop_epoch: self.shared.dropped.load(Ordering::Acquire),
                 });
                 true
             }
@@ -184,7 +196,7 @@ impl CommandService {
             status.error = None;
             status.error_scope = None;
             status.sequence = status.sequence.wrapping_add(1);
-            self.shared.feedback.status_changed(&status);
+            self.shared.publish_status(&status);
         }
     }
 
@@ -204,7 +216,7 @@ impl CommandService {
             status.sequence = old_sequence.wrapping_add(1);
             status.activation_id = activation;
             status.microphone_active = self.shared.active.load(Ordering::Relaxed);
-            self.shared.feedback.status_changed(&status);
+            self.shared.publish_status(&status);
         }
         self.shared.changed();
         Ok(())
@@ -226,7 +238,7 @@ impl CommandService {
             Some("command cancelled; a dispatched tool may already have completed".into());
         status.error_scope = Some(CommandErrorScope::Command);
         status.sequence = status.sequence.wrapping_add(1);
-        self.shared.feedback.status_changed(&status);
+        self.shared.publish_status(&status);
         self.shared.changed();
     }
 
@@ -237,7 +249,29 @@ impl CommandService {
         // Preserve a consistent status/feedback pair if a command transitions
         // while the dashboard is reading the snapshot.
         status.feedback = self.feedback_snapshot();
+        status.history_revision = self
+            .shared
+            .history
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .revision();
         status
+    }
+
+    pub fn history(&self) -> super::CommandHistorySnapshot {
+        self.shared
+            .history
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .snapshot()
+    }
+
+    pub fn clear_history(&self) -> super::CommandHistorySnapshot {
+        self.shared
+            .history
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clear()
     }
 
     pub fn subscribe_feedback(&self) -> broadcast::Receiver<CommandFeedback> {
@@ -249,6 +283,11 @@ impl CommandService {
     }
 
     pub async fn shutdown(&self) {
+        self.shared
+            .history
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .interrupt("Babel stopped while a command was pending");
         self.shared.shutdown.cancel();
         self.shared.started.store(false, Ordering::Release);
         let task = self.task.lock().unwrap_or_else(|e| e.into_inner()).take();
@@ -269,7 +308,7 @@ impl CommandService {
         status.whisper_endpoint = None;
         status.needle_endpoint = None;
         status.sequence = status.sequence.wrapping_add(1);
-        self.shared.feedback.status_changed(&status);
+        self.shared.publish_status(&status);
     }
 }
 
@@ -280,7 +319,27 @@ impl Drop for CommandService {
 }
 
 impl Shared {
+    fn publish_status(&self, status: &CommandStatus) {
+        self.history
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .update(status);
+        self.feedback.status_changed(status);
+    }
+
+    fn recognition(&self, milliseconds: u64) {
+        let status = self.status.lock().unwrap_or_else(|e| e.into_inner());
+        self.history
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .recognition(status.activation_id, milliseconds);
+    }
+
     fn changed(&self) {
+        self.history
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .interrupt("Command cancelled because microphone routing or agent settings changed");
         self.revision.fetch_add(1, Ordering::AcqRel);
         self.current_cancel
             .lock()
@@ -294,9 +353,13 @@ impl Shared {
         status.error = error;
         status.error_scope = (phase == CommandPhase::Failed).then_some(CommandErrorScope::Command);
         status.sequence = status.sequence.wrapping_add(1);
-        self.feedback.status_changed(&status);
+        self.publish_status(&status);
     }
     fn service_error(&self, error: String) {
+        self.history
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .interrupt(&error);
         let mut status = self.status.lock().unwrap_or_else(|e| e.into_inner());
         status.phase = CommandPhase::Failed;
         status.error = Some(error);
@@ -305,7 +368,7 @@ impl Shared {
         status.tool = None;
         status.result = None;
         status.sequence = status.sequence.wrapping_add(1);
-        self.feedback.status_changed(&status);
+        self.publish_status(&status);
     }
     fn activate(&self, command: Option<String>) {
         let mut status = self.status.lock().unwrap_or_else(|e| e.into_inner());
@@ -317,11 +380,11 @@ impl Shared {
         status.result = None;
         status.tool = None;
         status.sequence = status.sequence.wrapping_add(1);
-        self.feedback.status_changed(&status);
+        self.publish_status(&status);
     }
 }
 
-async fn supervise(shared: Arc<Shared>, mut audio: mpsc::Receiver<PcmFrame>) {
+async fn supervise(shared: Arc<Shared>, mut audio: mpsc::Receiver<CapturedAudio>) {
     let mut updates = shared.updates.subscribe();
     let mut services = super::local_services::ManagedServices::new(shared.services_root.clone());
     let mut idle = IdleServices::default();
@@ -415,7 +478,7 @@ async fn wait_for_idle(deadline: Option<tokio::time::Instant>) {
 async fn run_epoch(
     shared: &Shared,
     config: &AgentConfig,
-    audio: &mut mpsc::Receiver<PcmFrame>,
+    audio: &mut mpsc::Receiver<CapturedAudio>,
     cancel: &CancellationToken,
     revision: u64,
     services: &mut super::local_services::ManagedServices,
@@ -446,7 +509,7 @@ struct Segment {
 async fn collect_audio(
     shared: &Shared,
     config: &AgentConfig,
-    audio: &mut mpsc::Receiver<PcmFrame>,
+    audio: &mut mpsc::Receiver<CapturedAudio>,
     segments: mpsc::Sender<Segment>,
 ) -> Result<()> {
     let mut segmenter = Segmenter::new(config);
@@ -455,20 +518,25 @@ async fn collect_audio(
     let epoch_start = Instant::now();
     let mut last_frame = None;
     let mut drop_epoch = shared.dropped.load(Ordering::Acquire);
-    while let Some(frame) = audio.recv().await {
+    let mut continuity_epoch: u64 = 0;
+    while let Some(captured) = audio.recv().await {
+        let frame = captured.frame;
         if frame.captured_at < epoch_start
             || frame.captured_at.elapsed() > AUDIO_MAX_AGE
             || shared.busy.load(Ordering::Relaxed)
         {
             segmenter = Segmenter::new(config);
+            resampler = Resampler::new(frame.sample_rate, 16_000);
+            continuity_epoch = continuity_epoch.wrapping_add(1);
             shared.dropped.fetch_add(1, Ordering::Relaxed);
             continue;
         }
-        let current_drops = shared.dropped.load(Ordering::Acquire);
+        let current_drops = captured.drop_epoch;
         if current_drops != drop_epoch {
             drop_epoch = current_drops;
             segmenter = Segmenter::new(config);
             resampler = Resampler::new(frame.sample_rate, 16_000);
+            continuity_epoch = continuity_epoch.wrapping_add(1);
         }
         if rate != frame.sample_rate
             || last_frame.is_some_and(|last: Instant| {
@@ -478,6 +546,7 @@ async fn collect_audio(
             rate = frame.sample_rate;
             resampler = Resampler::new(rate, 16_000);
             segmenter = Segmenter::new(config);
+            continuity_epoch = continuity_epoch.wrapping_add(1);
         }
         last_frame = Some(frame.captured_at);
         let input: Vec<f32> = frame
@@ -497,10 +566,14 @@ async fn collect_audio(
                     samples,
                     finished: Instant::now(),
                     truncated,
-                    drop_epoch,
+                    drop_epoch: continuity_epoch,
                 })
                 .is_err()
         {
+            // Frames already admitted before this failure still carry the old
+            // capture epoch. Mark the lost utterance immediately so an armed
+            // wake cannot accept a later segment across that gap.
+            continuity_epoch = continuity_epoch.wrapping_add(1);
             shared.dropped.fetch_add(1, Ordering::Relaxed);
         }
     }
@@ -569,6 +642,7 @@ async fn process(
         if activated.is_some() {
             shared.phase(CommandPhase::Transcribing, None);
         }
+        let recognition_started = Instant::now();
         let text = match inference.transcribe(&segment.samples).await {
             Ok(text) => text,
             Err(error) => {
@@ -581,21 +655,15 @@ async fn process(
                     // background readiness failure into a new command failure.
                     shared.service_error(error.to_string());
                 }
-                tokio::time::sleep(Duration::from_secs(2)).await;
+                // A new attempt requires a new completed utterance. Sleeping
+                // here only ages the bounded queue and loses prompt retries.
                 continue;
             }
         };
-        if shared.dropped.load(Ordering::Acquire) != segment.drop_epoch {
-            if activated.take().is_some() {
-                shared.phase(
-                    CommandPhase::Failed,
-                    Some("microphone audio was interrupted; repeat the command".into()),
-                );
-            } else {
-                shared.phase(CommandPhase::Listening, None);
-            }
-            continue;
-        }
+        let recognition_ms = recognition_started
+            .elapsed()
+            .as_millis()
+            .min(u64::MAX.into()) as u64;
         if asr_failed {
             shared.phase(CommandPhase::Listening, None);
             asr_failed = false;
@@ -606,6 +674,7 @@ async fn process(
         let command = if let Some(command) = addressed_command(&text, &config.wake_name) {
             shared.activate((!command.is_empty()).then(|| command.clone()));
             if command.is_empty() {
+                shared.recognition(recognition_ms);
                 activated_drop_epoch = segment.drop_epoch;
                 activated = Some(
                     tokio::time::Instant::now()
@@ -620,6 +689,16 @@ async fn process(
             continue;
         };
         activated = None;
+        shared.recognition(recognition_ms);
+        {
+            let mut status = shared.status.lock().unwrap_or_else(|e| e.into_inner());
+            status.command = Some(command.clone());
+            shared
+                .history
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .update(&status);
+        }
         if is_cancel(&command) {
             shared.phase(CommandPhase::Failed, Some("command cancelled".into()));
             continue;
@@ -652,7 +731,28 @@ async fn execute(
     let tools = tokio::time::timeout(budget, shared.tools.list_tools())
         .await
         .map_err(|_| anyhow::anyhow!("MCP tool discovery timed out"))??;
-    let calls = inference.plan(command, &tools).await?;
+    let activation = shared
+        .status
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .activation_id;
+    let decision_started = Instant::now();
+    let decision = inference.plan(command, &tools).await;
+    let decision_ms = decision_started.elapsed().as_millis().min(u64::MAX.into()) as u64;
+    {
+        let mut history = shared.history.lock().unwrap_or_else(|e| e.into_inner());
+        match &decision {
+            Ok(decision) => history.decision(
+                activation,
+                decision.confidence,
+                &decision.selected_tools,
+                decision_ms,
+            ),
+            Err(_) => history.decision(activation, None, &[], decision_ms),
+        }
+    }
+    let decision = decision?;
+    let calls = decision.calls?;
     for call in &calls {
         tokio::time::timeout(
             budget,
@@ -662,7 +762,7 @@ async fn execute(
         .map_err(|_| anyhow::anyhow!("MCP tool validation timed out"))??;
     }
     let mut results = Vec::new();
-    for call in calls {
+    for (index, call) in calls.into_iter().enumerate() {
         anyhow::ensure!(
             !cancel.is_cancelled() && shared.revision.load(Ordering::Acquire) == revision,
             "command cancelled before tool dispatch"
@@ -672,6 +772,11 @@ async fn execute(
             status.tool = Some(call.name.clone());
         }
         shared.phase(CommandPhase::Executing, None);
+        shared
+            .history
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .tool_started(activation, index);
         let result = tokio::time::timeout(
             budget,
             shared.tools.call_tool(&call.id, call.arguments, cancel),
@@ -681,8 +786,28 @@ async fn execute(
             anyhow::anyhow!(
                 "MCP tool timed out; it may already have completed and will not be retried"
             )
-        })??;
-        results.push(format!("{}: {}", call.name, summarize(&result)));
+        })
+        .and_then(|result| result);
+        match &result {
+            Ok(result) => shared
+                .history
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .tool_finished(activation, index, Ok(&summarize(result))),
+            Err(error) => shared
+                .history
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .tool_finished(activation, index, Err(&error.to_string())),
+        }
+        results.push(format!("{}: {}", call.name, summarize(&result?)));
+        let mut status = shared.status.lock().unwrap_or_else(|e| e.into_inner());
+        status.result = Some(results.join("\n").chars().take(4096).collect());
+        shared
+            .history
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .update(&status);
     }
     {
         let mut status = shared.status.lock().unwrap_or_else(|e| e.into_inner());
@@ -859,6 +984,91 @@ impl Segmenter {
 #[cfg(test)]
 mod idle_tests {
     use super::*;
+
+    struct UnusedTools;
+
+    #[async_trait::async_trait]
+    impl CommandTools for UnusedTools {
+        async fn list_tools(&self) -> Result<Vec<super::super::CommandTool>> {
+            unreachable!("collector test does not invoke tools")
+        }
+
+        async fn validate_call(&self, _: &str, _: &Value) -> Result<()> {
+            unreachable!("collector test does not invoke tools")
+        }
+
+        async fn call_tool(&self, _: &str, _: Value, _: &CancellationToken) -> Result<Value> {
+            unreachable!("collector test does not invoke tools")
+        }
+    }
+
+    #[tokio::test]
+    async fn full_segment_queue_breaks_continuity_for_already_admitted_audio() {
+        let config = AgentConfig {
+            silence_ms: 200,
+            max_utterance_ms: 1000,
+            ..Default::default()
+        };
+        let service = CommandService::new(config.clone(), Arc::new(UnusedTools)).unwrap();
+        let mut audio = service.audio_rx.lock().unwrap().take().unwrap();
+        let (segments, mut received) = mpsc::channel(1);
+        let collector = collect_audio(&service.shared, &config, &mut audio, segments);
+        tokio::pin!(collector);
+        let exercise = async {
+            // These frames all carry the same admission epoch. The first
+            // utterance fills the segment queue; the second cannot be retained.
+            for level in [3000, 0, 3000, 0] {
+                service
+                    .audio_tx
+                    .send(CapturedAudio {
+                        frame: PcmFrame {
+                            samples: vec![level; if level == 0 { 3200 } else { 1600 }],
+                            sample_rate: 16000,
+                            captured_at: Instant::now(),
+                        },
+                        drop_epoch: 0,
+                    })
+                    .await
+                    .unwrap();
+            }
+            tokio::time::timeout(Duration::from_secs(3), async {
+                while service.shared.dropped.load(Ordering::Acquire) == 0 {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .unwrap();
+            let before_loss = received.recv().await.unwrap();
+            // Simulate frames already admitted before the previous segment was
+            // dropped. Freeing the segment queue must not erase that boundary.
+            for level in [3000, 0] {
+                service
+                    .audio_tx
+                    .send(CapturedAudio {
+                        frame: PcmFrame {
+                            samples: vec![level; if level == 0 { 3200 } else { 1600 }],
+                            sample_rate: 16000,
+                            captured_at: Instant::now(),
+                        },
+                        drop_epoch: 0,
+                    })
+                    .await
+                    .unwrap();
+            }
+            let after_loss = tokio::time::timeout(Duration::from_secs(3), received.recv())
+                .await
+                .unwrap()
+                .unwrap();
+            assert_ne!(before_loss.drop_epoch, after_loss.drop_epoch);
+            assert_eq!(service.shared.dropped.load(Ordering::Acquire), 1);
+        };
+        // Poll collection first so its epoch starts before synthetic capture.
+        tokio::select! {
+            biased;
+            result = &mut collector => panic!("collector stopped unexpectedly: {result:?}"),
+            _ = exercise => {}
+        }
+    }
 
     #[tokio::test(start_paused = true)]
     async fn microphone_return_cancels_unload_and_inactive_updates_do_not_extend_the_grace() {

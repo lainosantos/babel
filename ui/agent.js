@@ -6,6 +6,7 @@
   const i18n = window.BabelI18n;
   const t = (key, values) => i18n.t(key, values);
   const state = { config: null, revision: null, draft: null, dirty: false, busy: false, conflict: false, status: null, dismissed: null, polling: false, pollCount: 0, authenticated: true, auth: new Map(), tools: new Map(), renderedStatus: null, connectionError: null, feedback: null, feedbackSequence: null, feedbackInitialized: false, feedbackTimer: null, feedbackHover: false };
+  const history = { snapshot: null, revision: null, loaded: false, loading: false, clearing: false, refreshPending: false, nextPollAt: 0, generation: 0, error: null, rows: new Map() };
   const activePhases = new Set(['activated', 'transcribing', 'deciding', 'executing', 'processing']);
   const visiblePhases = new Set([...activePhases, 'succeeded', 'failed']);
   const basicFields = [
@@ -78,6 +79,7 @@
     for (const button of document.querySelectorAll('[data-mcp-network]')) button.disabled = state.dirty || state.busy || !state.authenticated || state.conflict;
     for (const input of document.querySelectorAll('[data-agent-credential]')) input.disabled = !state.config || state.busy || !state.authenticated;
     byId('agent-cancel').disabled = state.busy || !state.authenticated;
+    historyControls();
   }
   function createField(container, [key, labelKey, type, attributes = {}], getter, setter, prefix = 'agent') {
     const label = element('label', type === 'checkbox' ? 'checkbox-label' : '');
@@ -427,6 +429,136 @@
     updateFeedback(status, serviceFailure);
     if (state.feedback) renderFeedback(state.feedback);
   }
+  function historyControls() {
+    byId('agent-history-clear').disabled = !history.snapshot?.entries.length || history.clearing || !state.authenticated;
+    byId('agent-history-retry').disabled = history.loading || history.clearing || !state.authenticated;
+    byId('agent-history-list').setAttribute('aria-busy', String(history.clearing));
+  }
+  function historyError(key, error) {
+    history.error = error ? { key, error: error.message } : null;
+    byId('agent-history-notice').hidden = !error;
+    if (error && !history.loaded) byId('agent-history-empty').hidden = true;
+    byId('agent-history-error').textContent = error ? t(key, { error: error.message }) : '';
+  }
+  function historyPhase(phase) {
+    if (phase === 'succeeded') return t('agent.history_success');
+    if (phase === 'failed') return t('agent.history_failure');
+    const key = `agent.phase_${phase}`;
+    return t(key) === key ? phase : t(key);
+  }
+  function historyTextBlock(container, value, error = false) {
+    if (!value) return;
+    const block = element('div');
+    if (!error) block.append(localized('p', 'agent.result', 'command-history-label'));
+    block.append(element(error ? 'p' : 'pre', error ? 'command-history-error' : '', value));
+    container.append(block);
+  }
+  function historyRow(entry, row) {
+    if (!row) {
+      const item = element('li');
+      const details = element('details', 'command-history-entry'); details.dataset.historyId = String(entry.id);
+      const summary = element('summary', 'command-history-summary');
+      const time = element('time', 'command-history-time');
+      const main = element('span', 'command-history-main');
+      const command = element('span', 'command-history-command');
+      const tools = element('span', 'command-history-tools'); main.append(command, tools);
+      const meta = element('span', 'command-history-meta');
+      const phase = element('span', 'command-history-phase');
+      const confidence = element('span', 'command-history-confidence'); meta.append(phase, confidence);
+      summary.append(time, main, meta);
+      const body = element('div', 'command-history-body');
+      details.append(summary, body); item.append(details);
+      row = { item, details, time, command, tools, phase, confidence, body, signature: null };
+    }
+    const signature = JSON.stringify([i18n.language, entry]);
+    if (signature === row.signature) return row;
+    row.signature = signature;
+    row.details.dataset.phase = entry.phase;
+    const date = new Date(entry.started_at_ms);
+    const validDate = Number.isFinite(date.getTime());
+    row.time.textContent = validDate ? i18n.date(date, { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false }) : '—';
+    row.time.dateTime = validDate ? date.toISOString() : '';
+    row.time.title = validDate ? i18n.date(date, { dateStyle: 'medium', timeStyle: 'medium' }) : '';
+    row.command.textContent = entry.command || t('agent.history_pending');
+    const tools = Array.isArray(entry.tools) ? entry.tools : [];
+    row.tools.textContent = tools.length ? tools.map(tool => `${tool.integration} / ${tool.tool}`).join(', ') : t('agent.history_no_tool');
+    row.phase.textContent = historyPhase(entry.phase);
+    row.confidence.textContent = Number.isFinite(entry.confidence) ? t('agent.history_confidence', { value: i18n.number(entry.confidence, { minimumFractionDigits: 2, maximumFractionDigits: 2 }) }) : t('agent.history_confidence_pending');
+    row.body.replaceChildren();
+    if (entry.command) row.body.append(element('p', 'command-history-full-command', entry.command));
+    const timing = element('p', 'command-history-timing');
+    for (const [key, value] of [['agent.history_recognition', entry.recognition_ms], ['agent.history_decision', entry.decision_ms]]) {
+      if (Number.isFinite(value)) timing.append(element('span', '', t(key, { value: i18n.number(value) })));
+    }
+    if (timing.childElementCount) row.body.append(timing);
+    for (const tool of tools) {
+      const section = element('section', 'command-history-tool');
+      section.append(element('h4', '', `${tool.integration} / ${tool.tool}`));
+      const key = `agent.history_tool_${tool.phase}`;
+      if (tool.phase) section.append(element('p', 'command-history-tool-status', t(key) === key ? tool.phase : t(key)));
+      historyTextBlock(section, tool.result);
+      historyTextBlock(section, tool.error, true);
+      row.body.append(section);
+    }
+    if (entry.result && !tools.some(tool => tool.result === entry.result)) historyTextBlock(row.body, entry.result);
+    if (entry.error && !tools.some(tool => tool.error === entry.error)) historyTextBlock(row.body, entry.error, true);
+    return row;
+  }
+  function renderHistory(snapshot, force = false) {
+    if (!snapshot || !Array.isArray(snapshot.entries) || !Number.isInteger(snapshot.capacity) || snapshot.capacity < 1 || snapshot.revision == null) throw new Error(t('agent.history_invalid'));
+    if (!force && history.loaded && String(snapshot.revision) === history.revision) return;
+    history.snapshot = snapshot; history.loaded = true; history.revision = String(snapshot.revision);
+    const list = byId('agent-history-list');
+    const scrollTop = list.scrollTop, scrollHeight = list.scrollHeight;
+    const ids = new Set(snapshot.entries.map(entry => String(entry.id)));
+    for (const [id, row] of history.rows) if (!ids.has(id)) { row.item.remove(); history.rows.delete(id); }
+    // Keep each details element and summary intact so polling preserves expansion and focus.
+    let previous = null;
+    for (const entry of snapshot.entries) {
+      const id = String(entry.id);
+      const row = historyRow(entry, history.rows.get(id)); history.rows.set(id, row);
+      const next = previous ? previous.nextElementSibling : list.firstElementChild;
+      if (next !== row.item) list.insertBefore(row.item, next);
+      previous = row.item;
+    }
+    if (scrollTop > 0) list.scrollTop = scrollTop + list.scrollHeight - scrollHeight;
+    byId('agent-history-retention').textContent = t('agent.history_retention', { capacity: i18n.number(snapshot.capacity) });
+    delete byId('agent-history-retention').dataset.i18n;
+    const empty = byId('agent-history-empty'); delete empty.dataset.i18n;
+    empty.textContent = t('agent.history_empty'); empty.hidden = snapshot.entries.length > 0;
+    list.hidden = snapshot.entries.length === 0;
+    historyControls();
+  }
+  function historyVisible() {
+    return !document.hidden && !byId('workspace-commands').hidden;
+  }
+  async function pollHistory(force = false) {
+    if (!state.config || !state.authenticated || history.clearing || !historyVisible()) return;
+    if (history.loading) { if (force) history.refreshPending = true; return; }
+    if (!force && Date.now() < history.nextPollAt) return;
+    if (!force && history.loaded && !history.error && state.status?.history_revision != null && String(state.status.history_revision) === history.revision) return;
+    history.loading = true; history.nextPollAt = Date.now() + 2000; historyControls();
+    const generation = history.generation;
+    try {
+      const snapshot = await request('/agent/history', { timeout: 8000 });
+      if (generation !== history.generation) return;
+      renderHistory(snapshot, force || Boolean(history.error)); historyError(null, null);
+    } catch (error) {
+      if (generation === history.generation) historyError('agent.history_unavailable', error);
+    } finally {
+      history.loading = false; historyControls();
+      if (history.refreshPending) { history.refreshPending = false; pollHistory(true); }
+    }
+  }
+  async function clearHistory() {
+    if (history.clearing || !state.authenticated) return;
+    history.clearing = true; history.generation++; historyControls();
+    try {
+      renderHistory(await request('/agent/history', { method: 'DELETE', timeout: 8000 }));
+      historyError(null, null); history.nextPollAt = Date.now() + 2000;
+    } catch (error) { historyError('agent.history_clear_failed', error); }
+    finally { history.clearing = false; historyControls(); }
+  }
   async function syncAuth() {
     const statuses = await request('/agent/integrations/status');
     for (const item of statuses) {
@@ -458,6 +590,10 @@
     } catch (error) { state.connectionError = error.message; state.renderedStatus = null; delete byId('agent-summary').dataset.i18n; byId('agent-summary').textContent = t('agent.unavailable'); byId('agent-summary').dataset.stage = 'unavailable'; hideFeedback(); message('error', error.message); }
     finally { state.polling = false; }
   }
+  byId('agent-history-clear').addEventListener('click', clearHistory);
+  byId('agent-history-retry').addEventListener('click', () => pollHistory(true));
+  window.addEventListener('babel:workspacechange', event => { if (event.detail?.view === 'commands') pollHistory(true); });
+  document.addEventListener('visibilitychange', () => { if (!document.hidden) pollHistory(true); });
   byId('agent-enabled').addEventListener('change', event => {
     state.draft.enabled = event.target.checked; markDirty();
   });
@@ -490,14 +626,17 @@
   byId('agent-cancel').addEventListener('click', () => action(async () => { await request('/agent/cancel', { method: 'POST', body: {} }); await poll(); }));
   window.addEventListener('babel:languagechange', () => {
     controls(); if (state.status) renderStatus(state.status);
+    if (history.snapshot) renderHistory(history.snapshot, true);
+    pollHistory(true);
+    if (history.error) byId('agent-history-error').textContent = t(history.error.key, { error: history.error.error });
     for (const link of byId('voice-agent').querySelectorAll('a[href^="/help/"]')) { link.hreflang = 'en'; link.title = t('help.documentation'); }
   });
   async function initialize() {
     try {
       await i18n.load('en');
       const snapshot = await request('/agent', { snapshot: true }); apply(snapshot.data, snapshot.revision);
-      i18n.apply(byId('voice-agent')); await poll(); await syncAuth();
+      i18n.apply(byId('voice-agent')); await Promise.all([poll(), pollHistory(true)]); await syncAuth();
     } catch (error) { message('error', error.message); delete byId('agent-summary').dataset.i18n; byId('agent-summary').textContent = t('agent.unavailable'); }
   }
-  initialize(); setInterval(poll, 1000);
+  initialize(); setInterval(() => Promise.all([poll(), pollHistory()]), 1000);
 })();

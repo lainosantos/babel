@@ -97,6 +97,7 @@ impl CommandTools for AgentTools {
                 );
                 tools.push(CommandTool {
                     id,
+                    integration: integration.name.clone(),
                     name: format!("{} / {}", integration.name, tool.name),
                     description: tool.description,
                     input_schema: tool.input_schema,

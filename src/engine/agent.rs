@@ -1,6 +1,6 @@
 use super::*;
 use crate::{
-    commands::{AgentConfig, CommandStatus},
+    commands::{AgentConfig, CommandHistorySnapshot, CommandStatus},
     mcp_client::{McpClient, McpIntegration},
 };
 
@@ -15,6 +15,12 @@ impl Controller {
     }
     pub fn cancel_command(&self) {
         self.commands.cancel();
+    }
+    pub fn command_history(&self) -> CommandHistorySnapshot {
+        self.commands.history()
+    }
+    pub fn clear_command_history(&self) -> CommandHistorySnapshot {
+        self.commands.clear_history()
     }
     pub fn mcp(&self) -> &McpClient {
         &self.mcp

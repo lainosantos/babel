@@ -379,6 +379,48 @@ footer { display: flex; justify-content: space-between; gap: 20px; padding: 28px
 .agent-credentials > label { max-width: 530px; }
 .agent-settings > .profile-help { padding-bottom: 0; }
 /* Command feedback stays compact; the brand carries the only motion. */
+/* Command history is a compact activity list, independent of settings drafts. */
+.agent-history { margin: 28px 0; padding: 24px 0; border-block: 1px solid var(--line); }
+.agent-history-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 20px; }
+.agent-history-heading p { max-width: 72ch; margin-top: 7px; color: var(--muted); font-size: 11px; line-height: 1.7; }
+.agent-history-heading > .button { flex-shrink: 0; min-height: 32px; padding: 5px 0 5px 12px; font-size: 11px; }
+.agent-history-empty { margin-top: 20px; padding: 17px 0 0; color: var(--muted); font-size: 12px; }
+.agent-history-notice { display: flex; align-items: center; gap: 16px; margin-top: 14px; color: var(--danger); font-size: 12px; }
+.agent-history-notice p { flex: 1; overflow-wrap: anywhere; }
+.agent-history-notice .button { min-height: 30px; padding: 3px 0; font-size: 11px; }
+.agent-history-list { max-height: 430px; margin: 17px 0 0; padding: 0 6px 0 0; overflow: auto; scrollbar-gutter: stable; list-style: none; }
+.agent-history-list > li + li { border-top: 1px solid var(--line); }
+.command-history-summary { display: grid; grid-template-columns: 68px minmax(0, 1fr) minmax(110px, auto) 12px; align-items: start; gap: 13px; padding: 16px 1px; list-style: none; cursor: pointer; }
+.command-history-summary::-webkit-details-marker { display: none; }
+.command-history-summary::after { content: ''; width: 6px; height: 6px; margin-top: 7px; border-right: 1.5px solid var(--muted); border-bottom: 1.5px solid var(--muted); transform: rotate(45deg); }
+.command-history-entry[open] > .command-history-summary::after { margin-top: 10px; transform: rotate(225deg); }
+.command-history-time { padding-top: 2px; color: var(--muted); font-size: 11px; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.command-history-main { min-width: 0; }
+.command-history-command { display: -webkit-box; overflow: hidden; -webkit-box-orient: vertical; -webkit-line-clamp: 2; color: var(--text); font-size: 12px; font-weight: 600; line-height: 1.7; overflow-wrap: anywhere; }
+.command-history-tools { display: block; margin-top: 5px; color: var(--muted); font-size: 11px; line-height: 1.7; overflow-wrap: anywhere; }
+.command-history-meta { display: grid; justify-items: end; gap: 6px; }
+.command-history-phase { max-width: 30ch; padding: 2px 6px; border-radius: 4px; color: #3455a0; background: var(--accent-soft); font-size: 10px; line-height: 1.65; text-align: right; }
+.command-history-entry[data-phase="succeeded"] .command-history-phase { color: #176c60; background: #edf7f3; }
+.command-history-entry[data-phase="failed"] .command-history-phase { color: #a03c49; background: #fff0f2; }
+.command-history-confidence { color: var(--muted); font-size: 10px; line-height: 1.65; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.command-history-body { display: grid; gap: 15px; padding: 0 26px 19px 81px; font-size: 12px; }
+.command-history-full-command { overflow-wrap: anywhere; line-height: 1.8; }
+.command-history-tool { padding-top: 13px; border-top: 1px solid var(--line); }
+.command-history-tool h4 { margin: 0 0 7px; font-size: 12px; font-weight: 650; overflow-wrap: anywhere; }
+.command-history-body pre { max-height: 220px; margin: 7px 0 0; padding: 11px; overflow: auto; border-radius: 6px; background: var(--raised); font: inherit; font-size: 11px; line-height: 1.8; white-space: pre-wrap; overflow-wrap: anywhere; }
+.command-history-label, .command-history-tool-status { color: var(--muted); font-size: 11px; line-height: 1.7; }
+.command-history-error { color: var(--danger); white-space: pre-wrap; overflow-wrap: anywhere; line-height: 1.8; }
+.command-history-timing { display: flex; flex-wrap: wrap; gap: 6px 18px; color: var(--muted); font-size: 11px; font-variant-numeric: tabular-nums; }
+@media (max-width: 680px) {
+  .agent-history-heading { gap: 12px; }
+  .command-history-summary { grid-template-columns: minmax(0, 1fr) minmax(90px, auto) 12px; gap: 7px 10px; }
+  .command-history-time { grid-column: 1; grid-row: 1; }
+  .command-history-main { grid-column: 1; grid-row: 2; }
+  .command-history-meta { grid-column: 2; grid-row: 1 / 3; }
+  .command-history-summary::after { grid-column: 3; grid-row: 1 / 3; }
+  .command-history-body { padding-left: 0; padding-right: 22px; }
+}
+
 .agent-activity { --feedback-color: #345cf4; position: fixed; z-index: 30; right: 24px; bottom: calc(var(--session-dock-height) + 18px); width: min(360px, calc(100vw - 36px)); max-height: min(520px, calc(100dvh - var(--session-dock-height) - 48px)); padding: 18px; overflow: auto; border: 1px solid #d5deec; border-radius: 16px; background: #fff; box-shadow: 0 8px 32px #19335218; }
 .agent-activity[data-stage="succeeded"] { --feedback-color: #147d80; }
 .agent-activity[data-stage="failed"] { --feedback-color: #b35e55; }

@@ -11,7 +11,7 @@ use futures_util::StreamExt;
 use reqwest::{Client, RequestBuilder, Url, multipart};
 use serde_json::{Value, json};
 
-use super::{AgentConfig, CommandTool};
+use super::{AgentConfig, CommandTool, CommandToolSelection};
 
 const MAX_JSON: usize = 256 * 1024;
 const MAX_TEXT: usize = 8_192;
@@ -45,6 +45,14 @@ pub(super) struct PlannedCall {
     pub id: String,
     pub name: String,
     pub arguments: Value,
+}
+
+/// Diagnostic evidence is separate from executable calls. A rejected plan may
+/// still have a valid confidence and catalog-matched choices worth displaying.
+pub(super) struct PlanDecision {
+    pub confidence: Option<f64>,
+    pub selected_tools: Vec<CommandToolSelection>,
+    pub calls: Result<Vec<PlannedCall>>,
 }
 
 impl Inference {
@@ -200,7 +208,7 @@ impl Inference {
         Ok(text.trim().into())
     }
 
-    pub async fn plan(&self, command: &str, tools: &[CommandTool]) -> Result<Vec<PlannedCall>> {
+    pub async fn plan(&self, command: &str, tools: &[CommandTool]) -> Result<PlanDecision> {
         ensure!(
             !command.is_empty() && command.len() <= MAX_TEXT,
             "invalid command text length"
@@ -250,12 +258,43 @@ impl Inference {
             "Needle 3",
         )
         .await?;
-        parse_plan(
+        Ok(observe_plan(
             &result,
             &aliases,
             self.config.min_confidence,
             self.config.max_calls,
-        )
+        ))
+    }
+}
+
+fn observe_plan(
+    result: &Value,
+    tools: &BTreeMap<String, &CommandTool>,
+    confidence_floor: f64,
+    max_calls: usize,
+) -> PlanDecision {
+    let confidence = result["confidence"]
+        .as_f64()
+        .filter(|value| value.is_finite() && (0.0..=1.0).contains(value));
+    let selected_tools = result["function_calls"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .take(8)
+        .filter_map(|call| tools.get(call["name"].as_str()?))
+        .map(|tool| CommandToolSelection {
+            integration: tool.integration.clone(),
+            tool: tool
+                .name
+                .strip_prefix(&format!("{} / ", tool.integration))
+                .unwrap_or(&tool.name)
+                .into(),
+        })
+        .collect();
+    PlanDecision {
+        confidence,
+        selected_tools,
+        calls: parse_plan(result, tools, confidence_floor, max_calls),
     }
 }
 

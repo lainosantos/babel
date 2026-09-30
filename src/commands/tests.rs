@@ -120,6 +120,7 @@ fn vad_discards_silence_and_never_executes_truncated_speech() {
 
 fn tool() -> CommandTool {
     CommandTool {
+        integration: "Home".into(),
         id: "home/set_lights".into(),
         name: "set_lights".into(),
         description: "Turn room lights on".into(),
@@ -177,11 +178,19 @@ struct MockTools {
     validations: AtomicUsize,
     reject: AtomicUsize,
     hang: AtomicUsize,
+    empty: AtomicUsize,
+    pause: AtomicUsize,
+    release: tokio::sync::Notify,
+    result: Mutex<Option<Value>>,
 }
 #[async_trait]
 impl CommandTools for MockTools {
     async fn list_tools(&self) -> Result<Vec<CommandTool>> {
-        Ok(vec![tool()])
+        Ok(if self.empty.load(Ordering::SeqCst) > 0 {
+            Vec::new()
+        } else {
+            vec![tool()]
+        })
     }
     async fn validate_call(&self, id: &str, arguments: &Value) -> Result<()> {
         assert_eq!(id, "home/set_lights");
@@ -205,7 +214,18 @@ impl CommandTools for MockTools {
             cancel.cancelled().await;
             bail!("cancelled mock tool");
         }
-        Ok(json!({"lights":"on"}))
+        if self.pause.swap(0, Ordering::SeqCst) > 0 {
+            tokio::select! {
+                _ = self.release.notified() => {}
+                _ = cancel.cancelled() => bail!("cancelled paused tool"),
+            }
+        }
+        Ok(self
+            .result
+            .lock()
+            .unwrap()
+            .clone()
+            .unwrap_or_else(|| json!({"lights":"on"})))
     }
 }
 #[derive(Clone)]
@@ -215,6 +235,8 @@ struct MockInference {
     planner: Arc<AtomicUsize>,
     invalid: Arc<AtomicUsize>,
     asr_failure: Arc<AtomicUsize>,
+    asr_pause: Arc<AtomicUsize>,
+    asr_release: Arc<tokio::sync::Notify>,
 }
 async fn whisper_health() -> impl IntoResponse {
     ([(SERVER, "whisper.cpp")], Json(json!({"status":"ok"})))
@@ -239,6 +261,9 @@ async fn whisper(State(state): State<MockInference>, body: axum::body::Bytes) ->
     assert!(data.contains("name=\"translate\"\r\n\r\nfalse"));
     assert!(data.contains("RIFF"));
     state.asr.fetch_add(1, Ordering::SeqCst);
+    if state.asr_pause.swap(0, Ordering::SeqCst) > 0 {
+        state.asr_release.notified().await;
+    }
     let failure = state.asr_failure.load(Ordering::SeqCst);
     if failure == 2 || failure == 3 {
         if failure == 3 {
@@ -293,6 +318,8 @@ impl Fixture {
             planner: Arc::new(AtomicUsize::new(0)),
             invalid: Arc::new(AtomicUsize::new(0)),
             asr_failure: Arc::new(AtomicUsize::new(0)),
+            asr_pause: Arc::new(AtomicUsize::new(0)),
+            asr_release: Arc::new(tokio::sync::Notify::new()),
         };
         let router = Router::new()
             .route("/health", get(mock_whisper_health))
@@ -344,6 +371,27 @@ impl Fixture {
         })
         .await
         .unwrap_or_else(|_| panic!("status {:?}, expected {phase:?}", self.service.status()));
+    }
+    async fn wait_activation(&self, activation_id: u64, phase: CommandPhase) {
+        tokio::time::timeout(Duration::from_secs(3), async {
+            loop {
+                let status = self.service.status();
+                if status.activation_id == activation_id
+                    && status.phase == phase
+                    && self.service.wants_audio()
+                {
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .unwrap_or_else(|_| {
+            panic!(
+                "status {:?}, expected activation {activation_id} {phase:?}",
+                self.service.status()
+            )
+        });
     }
     async fn close(self) {
         self.service.shutdown().await;
@@ -485,6 +533,246 @@ async fn schema_error_and_low_confidence_fail_without_tool_execution() {
     tokio::time::sleep(Duration::from_millis(100)).await;
     assert_eq!(f.tools.calls.load(Ordering::SeqCst), 0);
     assert_eq!(f.inference.planner.load(Ordering::SeqCst), 2);
+    f.close().await;
+}
+
+#[tokio::test]
+async fn failed_commands_rearm_and_publish_a_fresh_overlay_for_each_wake() {
+    let f = Fixture::new(&[
+        "Babel turn on the kitchen lights",
+        "Babel turn on the kitchen lights",
+        "Babel turn on the kitchen lights",
+    ])
+    .await;
+    let mut feedback = f.service.subscribe_feedback();
+    f.tools.empty.store(1, Ordering::SeqCst);
+    f.speech().await;
+    f.wait_activation(1, CommandPhase::Failed).await;
+    assert_eq!(f.inference.planner.load(Ordering::SeqCst), 0);
+    assert_eq!(f.tools.calls.load(Ordering::SeqCst), 0);
+
+    f.tools.empty.store(0, Ordering::SeqCst);
+    f.tools.reject.store(1, Ordering::SeqCst);
+    f.speech().await;
+    f.wait_activation(2, CommandPhase::Failed).await;
+    assert_eq!(f.tools.calls.load(Ordering::SeqCst), 0);
+
+    f.tools.reject.store(0, Ordering::SeqCst);
+    f.speech().await;
+    f.wait_activation(3, CommandPhase::Succeeded).await;
+    assert_eq!(f.tools.calls.load(Ordering::SeqCst), 1);
+    assert_eq!(f.inference.planner.load(Ordering::SeqCst), 2);
+    let mut events = Vec::new();
+    while let Ok(event) = feedback.try_recv() {
+        events.push((event.activation_id, event.phase));
+    }
+    assert_eq!(
+        events,
+        [
+            (1, CommandFeedbackPhase::Activated),
+            (1, CommandFeedbackPhase::Processing),
+            (1, CommandFeedbackPhase::Failed),
+            (2, CommandFeedbackPhase::Activated),
+            (2, CommandFeedbackPhase::Processing),
+            (2, CommandFeedbackPhase::Failed),
+            (3, CommandFeedbackPhase::Activated),
+            (3, CommandFeedbackPhase::Processing),
+            (3, CommandFeedbackPhase::Succeeded),
+        ]
+    );
+    f.close().await;
+}
+
+#[tokio::test]
+async fn command_history_retains_rejected_decisions_and_results_but_not_ordinary_speech() {
+    use super::history::ToolPhase;
+
+    let f = Fixture::new(&[
+        "This ordinary conversation mentions Babel without addressing it",
+        "Babel turn on the kitchen lights",
+        "Babel turn on the kitchen lights",
+        "Babel turn on the kitchen lights",
+        "Babel turn on the kitchen lights",
+    ])
+    .await;
+    f.speech().await;
+    tokio::time::timeout(Duration::from_secs(3), async {
+        while f.inference.asr.load(Ordering::SeqCst) == 0 {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .unwrap();
+    assert!(f.service.history().entries.is_empty());
+
+    f.inference.invalid.store(1, Ordering::SeqCst);
+    f.speech().await;
+    f.wait_activation(1, CommandPhase::Failed).await;
+    let rejected = f.service.history();
+    assert_eq!(rejected.entries.len(), 1);
+    let entry = &rejected.entries[0];
+    assert_eq!(entry.id, 1);
+    assert_eq!(entry.confidence, Some(0.3));
+    assert!(entry.error.as_ref().unwrap().contains("confidence"));
+    assert_eq!(entry.tools[0].phase, ToolPhase::Selected);
+    assert_eq!(f.tools.calls.load(Ordering::SeqCst), 0);
+
+    f.inference.invalid.store(0, Ordering::SeqCst);
+    f.tools.reject.store(1, Ordering::SeqCst);
+    f.speech().await;
+    f.wait_activation(2, CommandPhase::Failed).await;
+    let invalid = f.service.history();
+    assert!(invalid.revision > rejected.revision);
+    assert_eq!(invalid.entries[0].confidence, Some(0.99));
+    assert_eq!(invalid.entries[0].tools[0].phase, ToolPhase::Selected);
+    assert!(
+        invalid.entries[0]
+            .error
+            .as_ref()
+            .unwrap()
+            .contains("schema mismatch")
+    );
+    assert_eq!(f.tools.calls.load(Ordering::SeqCst), 0);
+
+    f.tools.reject.store(0, Ordering::SeqCst);
+    *f.tools.result.lock().unwrap() = Some(Value::String("🦀".repeat(10_000)));
+    f.speech().await;
+    f.wait_activation(3, CommandPhase::Succeeded).await;
+    let completed = f.service.history();
+    assert_eq!(completed.capacity, 100);
+    assert!(completed.revision > invalid.revision);
+    assert_eq!(
+        completed
+            .entries
+            .iter()
+            .map(|entry| entry.id)
+            .collect::<Vec<_>>(),
+        [3, 2, 1]
+    );
+    for entry in &completed.entries {
+        assert_eq!(entry.command.as_deref(), Some("turn on the kitchen lights"));
+        assert!(entry.recognition_ms.is_some());
+        assert!(entry.decision_ms.is_some());
+        assert_eq!(entry.tools.len(), 1);
+        assert_eq!(entry.tools[0].selection.integration, "Home");
+        assert_eq!(entry.tools[0].selection.tool, "set_lights");
+    }
+    let succeeded = &completed.entries[0];
+    assert_eq!(succeeded.confidence, Some(0.99));
+    assert_eq!(succeeded.tools[0].phase, ToolPhase::Succeeded);
+    assert!(
+        succeeded.tools[0]
+            .result
+            .as_ref()
+            .is_some_and(|value| !value.is_empty() && value.len() <= 2048)
+    );
+    assert!(
+        succeeded
+            .result
+            .as_ref()
+            .is_some_and(|value| !value.is_empty() && value.len() <= 4096)
+    );
+    assert!(succeeded.error.is_none() && succeeded.tools[0].error.is_none());
+    let serialized = serde_json::to_value(&completed).unwrap();
+    assert!(
+        serialized["entries"][0]["tools"][0]
+            .get("arguments")
+            .is_none()
+    );
+    assert_eq!(serialized["entries"][0]["tools"][0]["integration"], "Home");
+
+    let status_before_clear = f.service.status();
+    let cleared = f.service.clear_history();
+    assert!(cleared.entries.is_empty());
+    assert!(cleared.revision > completed.revision);
+    let status_after_clear = f.service.status();
+    assert_eq!(status_after_clear.sequence, status_before_clear.sequence);
+    assert_eq!(status_after_clear.phase, status_before_clear.phase);
+    assert_eq!(status_after_clear.wake_name, status_before_clear.wake_name);
+    assert!(status_after_clear.microphone_active && f.service.wants_audio());
+    f.speech().await;
+    f.wait_activation(4, CommandPhase::Succeeded).await;
+    let new_history = f.service.history();
+    assert_eq!(new_history.entries.len(), 1);
+    assert_eq!(new_history.entries[0].id, 4);
+    assert_eq!(f.tools.calls.load(Ordering::SeqCst), 2);
+    f.close().await;
+}
+
+#[tokio::test]
+async fn clearing_history_during_tool_execution_does_not_cancel_or_restore_the_entry() {
+    let f = Fixture::new(&[
+        "Babel turn on the kitchen lights",
+        "Babel turn on the kitchen lights",
+    ])
+    .await;
+    f.tools.pause.store(1, Ordering::SeqCst);
+    f.speech().await;
+    f.wait(CommandPhase::Executing).await;
+    assert_eq!(f.service.history().entries.len(), 1);
+    let before_clear = f.service.status();
+    let cleared = f.service.clear_history();
+    assert!(cleared.entries.is_empty());
+    assert_eq!(f.service.status().sequence, before_clear.sequence);
+    assert_eq!(f.service.status().phase, CommandPhase::Executing);
+    f.tools.release.notify_one();
+    f.wait_activation(1, CommandPhase::Succeeded).await;
+    let after_completion = f.service.history();
+    assert!(after_completion.entries.is_empty());
+    assert_eq!(after_completion.revision, cleared.revision);
+    assert_eq!(f.tools.calls.load(Ordering::SeqCst), 1);
+
+    f.speech().await;
+    f.wait_activation(2, CommandPhase::Succeeded).await;
+    let fresh = f.service.history();
+    assert_eq!(fresh.entries.len(), 1);
+    assert_eq!(fresh.entries[0].id, 2);
+    assert_eq!(f.tools.calls.load(Ordering::SeqCst), 2);
+    f.close().await;
+}
+
+#[tokio::test]
+async fn later_overload_does_not_invalidate_an_already_complete_wake_utterance() {
+    let f = Fixture::new(&["Babel turn on the kitchen lights"]).await;
+    f.inference.asr_pause.store(1, Ordering::SeqCst);
+    f.speech().await;
+    tokio::time::timeout(Duration::from_secs(3), async {
+        while f.inference.asr.load(Ordering::SeqCst) == 0 {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .unwrap();
+    // One later utterance fills the bounded segment queue; the next is dropped.
+    // Neither loss occurred inside the complete utterance Whisper is processing.
+    f.speech().await;
+    f.speech().await;
+    tokio::time::timeout(Duration::from_secs(3), async {
+        while f.service.status().dropped_frames == 0 {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .unwrap();
+    f.inference.asr_release.notify_one();
+    f.wait_activation(1, CommandPhase::Succeeded).await;
+    assert_eq!(f.tools.calls.load(Ordering::SeqCst), 1);
+    assert_eq!(f.inference.asr.load(Ordering::SeqCst), 1);
+    f.close().await;
+}
+
+#[tokio::test]
+async fn asr_failure_accepts_a_fresh_wake_without_losing_the_retry_to_backoff() {
+    let f = Fixture::new(&["Babel turn on the kitchen lights"]).await;
+    f.inference.asr_failure.store(2, Ordering::SeqCst);
+    f.speech().await;
+    f.wait(CommandPhase::Failed).await;
+    assert_eq!(f.service.status().activation_id, 0);
+    f.inference.asr_failure.store(0, Ordering::SeqCst);
+    f.speech().await;
+    f.wait_activation(1, CommandPhase::Succeeded).await;
+    assert_eq!(f.inference.asr.load(Ordering::SeqCst), 2);
+    assert_eq!(f.tools.calls.load(Ordering::SeqCst), 1);
     f.close().await;
 }
 
@@ -847,7 +1135,13 @@ async fn localhost_inference_services_keep_their_separate_ports() {
         "Babel weather"
     );
     assert_eq!(
-        inference.plan("lights on", &[tool()]).await.unwrap()[0].arguments["room"],
+        inference
+            .plan("lights on", &[tool()])
+            .await
+            .unwrap()
+            .calls
+            .unwrap()[0]
+            .arguments["room"],
         "kitchen"
     );
     asr_server.abort();

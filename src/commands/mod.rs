@@ -3,12 +3,14 @@
 //! never opens a device and never consumes translated/output audio.
 mod config;
 mod feedback;
+mod history;
 mod inference;
 mod local_services;
 mod service;
 
 pub use config::AgentConfig;
 pub use feedback::{CommandFeedback, CommandFeedbackPhase};
+pub use history::{CommandHistoryEntry, CommandHistorySnapshot, CommandToolSelection};
 pub use service::CommandService;
 
 use anyhow::Result;
@@ -20,6 +22,8 @@ use serde_json::Value;
 pub struct CommandTool {
     /// Stable identity including the integration, never a model-generated name.
     pub id: String,
+    #[serde(default)]
+    pub integration: String,
     pub name: String,
     pub description: String,
     pub input_schema: Value,
@@ -68,6 +72,8 @@ pub struct CommandStatus {
     pub microphone_active: bool,
     pub sequence: u64,
     pub activation_id: u64,
+    #[serde(default)]
+    pub history_revision: u64,
     pub command: Option<String>,
     pub tool: Option<String>,
     pub result: Option<String>,
@@ -97,6 +103,7 @@ impl CommandStatus {
             microphone_active: false,
             sequence: 0,
             activation_id: 0,
+            history_revision: 0,
             command: None,
             tool: None,
             result: None,
