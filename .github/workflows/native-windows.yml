@@ -1,0 +1,93 @@
+name: Build Windows runtime and installer
+on:
+  workflow_call:
+    inputs:
+      runner:
+        description: Native inference runtime runner
+        required: true
+        type: string
+      runtime-name:
+        description: Native inference runtime artifact suffix
+        required: true
+        type: string
+      architecture:
+        description: Windows installer architecture
+        required: true
+        type: string
+      target:
+        description: Rust target for the application and installer
+        required: true
+        type: string
+permissions:
+  contents: read
+jobs:
+  runtime:
+    uses: ./.github/workflows/native-runtime.yml
+    with:
+      os: ${{ inputs.runner }}
+      name: ${{ inputs.runtime-name }}
+  package:
+    needs: runtime
+    runs-on: windows-2022
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ inputs.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: installers-${{ inputs.architecture }}-static-crt
+          cache-on-failure: true
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: microsoft/setup-msbuild@v2
+      - name: Restore pinned official WDK and SDK for the hosted runner
+        shell: pwsh
+        run: ./.github/scripts/setup-wdk.ps1 -Architecture '${{ inputs.architecture }}'
+      - name: Build and verify complete WaveRT driver package
+        shell: pwsh
+        run: ./native/windows/build.ps1 -Architecture '${{ inputs.architecture }}'
+      - name: Build application with static VC runtime
+        env:
+          RUSTFLAGS: '-C target-feature=+crt-static'
+        run: cargo build --locked --release --bins --target ${{ inputs.target }}
+      - name: Check x64 release CLI without installing or loading a driver
+        if: inputs.architecture == 'x64'
+        run: python scripts/test_cli_smoke.py --babel target/${{ inputs.target }}/release/babel.exe --output-dir artifacts/cli-smoke
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: babel-local-runtime-windows-${{ inputs.architecture == 'x64' && 'x86_64' || 'aarch64' }}
+          merge-multiple: true
+          path: artifacts/runtime-archives
+      - name: Extract and verify bundled inference runtimes
+        run: python scripts/build_local_runtime.py --extract-artifacts artifacts/runtime-archives --output artifacts/local-runtime
+      - name: Build EXE installer and verify complete portable ZIP
+        run: python packaging/windows/build.py --runtime-dir artifacts/local-runtime --architecture ${{ inputs.architecture }} --bin-dir target/${{ inputs.target }}/release --driver-dir native/windows/dist/${{ inputs.architecture }} --output artifacts/installers
+      - name: Check app and helper runtime dependencies
+        shell: pwsh
+        run: ./.github/scripts/check-windows-runtime.ps1 -BinaryDirectory target/${{ inputs.target }}/release -DriverDirectory native/windows/dist/${{ inputs.architecture }}
+      - name: Verify x64 installer payload and uninstall on the disposable runner
+        if: inputs.architecture == 'x64'
+        shell: pwsh
+        run: ./.github/scripts/test-windows-package.ps1
+      - name: Publish development installer (unsigned kernel driver)
+        uses: actions/upload-artifact@v4
+        with:
+          name: babel-installers-windows-${{ inputs.architecture }}-development
+          path: artifacts/installers/
+          if-no-files-found: error
+          retention-days: 30
+      - name: Preserve WDK diagnostics on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: wdk-diagnostics-${{ inputs.architecture }}
+          path: |
+            native/windows/build/**/*.binlog
+            native/windows/build/**/*.log
+            ${{ runner.temp }}/babel-installer-smoke.log
+            ${{ runner.temp }}/babel-uninstaller-smoke.log
+          if-no-files-found: warn
+          retention-days: 14

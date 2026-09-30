@@ -97,6 +97,8 @@ Test models use a cache keyed by the hash of `src/local_runtime/models.json`
 and are not included in installers. Each platform's packager waits only for its
 own runtimes and portable checks; release publication still requires all platforms
 to succeed.
+Windows x64 and ARM64 each run their own runtime-to-installer pipeline, so a
+failure or delay in one architecture does not block packaging the other.
 
 Intermediate artifacts are named `babel-local-runtime-<system>-<architecture>`.
 Each packager receives only its system's payloads and verifies architecture,

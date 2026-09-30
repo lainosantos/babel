@@ -40,21 +40,6 @@ jobs:
     with:
       os: ${{ matrix.os }}
       name: ${{ matrix.name }}
-  runtime-windows:
-    if: ${{ !inputs.platform || inputs.platform == 'all' || inputs.platform == 'windows' }}
-    needs: portable
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - os: windows-2022
-            name: windows-x86_64
-          - os: windows-11-arm
-            name: windows-aarch64
-    uses: ./.github/workflows/native-runtime.yml
-    with:
-      os: ${{ matrix.os }}
-      name: ${{ matrix.name }}
   linux:
     needs: [portable, runtime-linux]
     runs-on: ubuntu-22.04
@@ -142,75 +127,23 @@ jobs:
           if-no-files-found: error
           retention-days: 30
   windows:
-    needs: [portable, runtime-windows]
+    if: ${{ !inputs.platform || inputs.platform == 'all' || inputs.platform == 'windows' }}
+    needs: portable
     strategy:
       fail-fast: false
       matrix:
         include:
           - architecture: x64
             target: x86_64-pc-windows-msvc
+            runner: windows-2022
+            runtime-name: windows-x86_64
           - architecture: ARM64
             target: aarch64-pc-windows-msvc
-    runs-on: windows-2022
-    timeout-minutes: 60
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: ${{ matrix.target }}
-      - uses: Swatinem/rust-cache@v2
-        with:
-          key: installers-${{ matrix.architecture }}-static-crt
-          cache-on-failure: true
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.12'
-      - uses: microsoft/setup-msbuild@v2
-      - name: Restore pinned official WDK and SDK for the hosted runner
-        shell: pwsh
-        run: ./.github/scripts/setup-wdk.ps1 -Architecture '${{ matrix.architecture }}'
-      - name: Build and verify complete WaveRT driver package
-        shell: pwsh
-        run: ./native/windows/build.ps1 -Architecture '${{ matrix.architecture }}'
-      - name: Build application with static VC runtime
-        env:
-          RUSTFLAGS: '-C target-feature=+crt-static'
-        run: cargo build --locked --release --bins --target ${{ matrix.target }}
-      - name: Check x64 release CLI without installing or loading a driver
-        if: matrix.architecture == 'x64'
-        run: python scripts/test_cli_smoke.py --babel target/${{ matrix.target }}/release/babel.exe --output-dir artifacts/cli-smoke
-      - uses: actions/download-artifact@v4
-        with:
-          pattern: babel-local-runtime-windows-${{ matrix.architecture == 'x64' && 'x86_64' || 'aarch64' }}
-          merge-multiple: true
-          path: artifacts/runtime-archives
-      - name: Extract and verify bundled inference runtimes
-        run: python scripts/build_local_runtime.py --extract-artifacts artifacts/runtime-archives --output artifacts/local-runtime
-      - name: Build EXE installer and verify complete portable ZIP
-        run: python packaging/windows/build.py --runtime-dir artifacts/local-runtime --architecture ${{ matrix.architecture }} --bin-dir target/${{ matrix.target }}/release --driver-dir native/windows/dist/${{ matrix.architecture }} --output artifacts/installers
-      - name: Check app and helper runtime dependencies
-        shell: pwsh
-        run: ./.github/scripts/check-windows-runtime.ps1 -BinaryDirectory target/${{ matrix.target }}/release -DriverDirectory native/windows/dist/${{ matrix.architecture }}
-      - name: Verify x64 installer payload and uninstall on the disposable runner
-        if: matrix.architecture == 'x64'
-        shell: pwsh
-        run: ./.github/scripts/test-windows-package.ps1
-      - name: Publish development installer (unsigned kernel driver)
-        uses: actions/upload-artifact@v4
-        with:
-          name: babel-installers-windows-${{ matrix.architecture }}-development
-          path: artifacts/installers/
-          if-no-files-found: error
-          retention-days: 30
-      - name: Preserve WDK diagnostics on failure
-        if: failure()
-        uses: actions/upload-artifact@v4
-        with:
-          name: wdk-diagnostics-${{ matrix.architecture }}
-          path: |
-            native/windows/build/**/*.binlog
-            native/windows/build/**/*.log
-            ${{ runner.temp }}/babel-installer-smoke.log
-            ${{ runner.temp }}/babel-uninstaller-smoke.log
-          if-no-files-found: warn
-          retention-days: 14
+            runner: windows-11-arm
+            runtime-name: windows-aarch64
+    uses: ./.github/workflows/native-windows.yml
+    with:
+      runner: ${{ matrix.runner }}
+      runtime-name: ${{ matrix.runtime-name }}
+      architecture: ${{ matrix.architecture }}
+      target: ${{ matrix.target }}
