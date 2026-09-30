@@ -18,6 +18,9 @@ replace the tagged-release path. See [contribution and release policy](../CONTRI
 For manual validation, select `all`, `linux`, `macos` or `windows` in the workflow's
 `platform` input; tagged releases always build all platforms and require every
 artifact before publication.
+The optional `windows-architecture` selector limits manual Windows builds to
+`x64` or `ARM64`; its default is `all`, it does not affect Linux or macOS, and
+tagged releases always build both Windows architectures.
 
 Publication waits for every required platform artifact and records all files
 in `release-manifest.json` and `SHA256SUMS.txt`. A partial draft can be resumed

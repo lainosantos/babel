@@ -13,6 +13,15 @@ on:
           - linux
           - macos
           - windows
+      windows-architecture:
+        description: Windows architecture to build for manual validation
+        required: false
+        default: all
+        type: choice
+        options:
+          - all
+          - x64
+          - ARM64
 permissions:
   contents: read
 jobs:
@@ -132,18 +141,10 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - architecture: x64
-            target: x86_64-pc-windows-msvc
-            runner: windows-2022
-            runtime-name: windows-x86_64
-          - architecture: ARM64
-            target: aarch64-pc-windows-msvc
-            runner: windows-11-arm
-            runtime-name: windows-aarch64
+        architecture: ${{ fromJSON(inputs.windows-architecture == 'x64' && '["x64"]' || inputs.windows-architecture == 'ARM64' && '["ARM64"]' || '["x64", "ARM64"]') }}
     uses: ./.github/workflows/native-windows.yml
     with:
-      runner: ${{ matrix.runner }}
-      runtime-name: ${{ matrix.runtime-name }}
+      runner: ${{ matrix.architecture == 'x64' && 'windows-2022' || 'windows-11-arm' }}
+      runtime-name: ${{ matrix.architecture == 'x64' && 'windows-x86_64' || 'windows-aarch64' }}
       architecture: ${{ matrix.architecture }}
-      target: ${{ matrix.target }}
+      target: ${{ matrix.architecture == 'x64' && 'x86_64-pc-windows-msvc' || 'aarch64-pc-windows-msvc' }}
