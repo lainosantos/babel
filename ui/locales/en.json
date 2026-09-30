@@ -675,5 +675,10 @@
   "agent.local_threads": "Recognition CPU threads",
   "agent.local_threads_hint": "Applies to managed Whisper. Default: up to 2 threads. Needle manages its own processing threads.",
   "agent.idle_unload_secs_hint": "Default: 60 seconds. Whisper is released after microphone routing stops. Needle releases its model after the last command, while its lightweight service stays available.",
-  "agent.whisper_model_hint": "Managed Whisper only. The model must be installed in the local services folder. Existing Base installations remain usable until compact Base is installed."
+  "agent.whisper_model_hint": "Managed Whisper only. The model must be installed in the local services folder. Existing Base installations remain usable until compact Base is installed.",
+  "session.features": "Session features",
+  "session.translation": "Translation",
+  "session.features_both": "Both directions",
+  "session.features_microphone": "Microphone only",
+  "session.features_speaker": "Incoming audio only"
 }

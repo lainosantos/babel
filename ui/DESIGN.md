@@ -48,6 +48,15 @@ storage option. Transcript and recording folders may be relative to this base
 or absolute. Destination previews come from the Babel host, not browser path
 calculations, and never create directories.
 
+The session dock also exposes compact Translation, Recording and Transcription
+switches, using the same switch style as their pages. These shortcuts mirror the
+canonical form fields and save through the existing session-start flow; they do
+not introduce separate settings. Translation preserves the current direction
+selection when switched off and back on in the current draft. Its small scope
+label shows which directions will be used. External configuration reloads remain
+authoritative. All three shortcuts are read-only during a session or startup,
+and recent history remains a separate, explicit opt-in.
+
 ## Review against the brief
 
 The functional separation makes always-on routing distinct from optional

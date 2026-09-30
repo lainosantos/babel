@@ -675,5 +675,10 @@
   "agent.local_threads": "Threads de CPU para reconhecimento",
   "agent.local_threads_hint": "Aplica-se ao Whisper gerenciado. Padrão: até 2 threads. O Needle gerencia suas próprias threads de processamento.",
   "agent.idle_unload_secs_hint": "Padrão: 60 segundos. O Whisper é liberado após o roteamento do microfone parar. O Needle libera seu modelo após o último comando, mantendo seu serviço leve disponível.",
-  "agent.whisper_model_hint": "Somente para Whisper gerenciado. O modelo precisa estar instalado na pasta dos serviços locais. Instalações Base existentes continuam utilizáveis até instalar o Base compacto."
+  "agent.whisper_model_hint": "Somente para Whisper gerenciado. O modelo precisa estar instalado na pasta dos serviços locais. Instalações Base existentes continuam utilizáveis até instalar o Base compacto.",
+  "session.features": "Recursos da sessão",
+  "session.translation": "Tradução",
+  "session.features_both": "Ambas as direções",
+  "session.features_microphone": "Só o microfone",
+  "session.features_speaker": "Só o áudio recebido"
 }

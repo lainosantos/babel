@@ -239,6 +239,135 @@ test('shared file settings keep the same draft preview after visiting both file 
   assert.equal(p.byId('recording-resolved-directory').textContent, '/archive/My sessions/original-audio');
 });
 
+test('session feature switches mirror existing drafts and preserve the selected translation directions', async t => {
+  const p = await page(t, { language: 'en' });
+  const quick = feature => p.byId(`session-${feature}-enabled`);
+  for (const feature of ['translation', 'recording', 'transcription']) {
+    assert.equal(quick(feature).hasAttribute('data-field'), false, 'mirrors must not overwrite original configuration fields');
+  }
+  assert.equal(quick('translation').checked, true);
+  assert.equal(quick('recording').checked, false);
+  assert.equal(quick('transcription').checked, false);
+  assert.equal(p.byId('session-translation-scope').textContent, 'Both directions');
+  p.set('session-translation-enabled', false);
+  assert.equal(p.byId('microphone-enabled').checked, false);
+  assert.equal(p.byId('speaker-enabled').checked, false);
+  p.set('session-translation-enabled', true);
+  assert.equal(p.byId('microphone-enabled').checked, true);
+  assert.equal(p.byId('speaker-enabled').checked, true, 'a master toggle must not remember an intermediate route state');
+  p.set('speaker-enabled', false);
+  assert.equal(quick('translation').checked, true);
+  assert.equal(p.byId('session-translation-scope').textContent, 'Microphone only');
+  const provider = p.byId('microphone-provider').value;
+  const language = p.byId('microphone-target_language').value;
+  p.set('session-translation-enabled', false);
+  p.set('session-translation-enabled', true);
+  assert.equal(p.byId('microphone-enabled').checked, true);
+  assert.equal(p.byId('speaker-enabled').checked, false);
+  assert.equal(p.byId('microphone-provider').value, provider);
+  assert.equal(p.byId('microphone-target_language').value, language);
+  p.set('recording-enabled', true);
+  p.set('transcription-enabled', true);
+  assert.equal(quick('recording').checked, true);
+  assert.equal(quick('transcription').checked, true);
+  assert.equal(p.calls.some(call => call.options.method === 'PUT' || call.path === '/api/start'), false);
+});
+
+test('session translation switch follows external settings and uses both directions when no previous selection exists', async t => {
+  const p = await page(t, { language: 'en' });
+  p.externalChange(config => { config.microphone.enabled = false; config.speaker.enabled = true; });
+  await p.poll();
+  assert.equal(p.byId('session-translation-enabled').checked, true);
+  assert.equal(p.byId('session-translation-scope').textContent, 'Incoming audio only');
+  p.set('session-translation-enabled', false);
+  p.set('session-translation-enabled', true);
+  assert.equal(p.byId('microphone-enabled').checked, false);
+  assert.equal(p.byId('speaker-enabled').checked, true);
+  p.byId('reload-config').click();
+  await settle(() => p.byId('save').disabled && !p.byId('session-translation-enabled').disabled);
+  p.externalChange(config => { config.microphone.enabled = false; config.speaker.enabled = false; config.recording.enabled = true; });
+  await p.poll();
+  assert.equal(p.byId('session-translation-enabled').checked, false);
+  assert.equal(p.byId('session-recording-enabled').checked, true);
+  p.set('session-translation-enabled', true);
+  assert.equal(p.byId('microphone-enabled').checked, true);
+  assert.equal(p.byId('speaker-enabled').checked, true);
+  assert.equal(p.byId('session-translation-scope').textContent, 'Both directions');
+});
+
+test('session switches save independent recording or transcription choices before starting with the new revision', async t => {
+  for (const feature of ['recording', 'transcription']) {
+    const p = await page(t, { language: 'en' });
+    const other = feature === 'recording' ? 'transcription' : 'recording';
+    p.set('session-translation-enabled', false);
+    p.set('session-' + feature + '-enabled', true);
+    p.set(feature + '-microphone', false);
+    p.set('session-' + feature + '-enabled', false);
+    p.set('session-' + feature + '-enabled', true);
+    assert.equal(p.byId(feature + '-enabled').checked, true);
+    assert.equal(p.byId(feature + '-microphone').checked, false, 'quick switches retain the selected sources');
+    assert.equal(p.byId(feature + '-speaker').checked, true);
+    assert.equal(p.byId(other + '-enabled').checked, false);
+    assert.equal(p.calls.some(call => call.options.method === 'PUT' || call.path === '/api/start'), false);
+    p.byId('start').click();
+    await settle(() => !p.byId('stop').hidden);
+    const writes = p.calls.filter(call => call.options.method === 'PUT' || call.path === '/api/start');
+    assert.deepEqual(writes.map(call => call.path), ['/api/config', '/api/start']);
+    assert.equal(writes[0].options.headers['If-Match'], '"0"');
+    assert.equal(writes[1].options.headers['If-Match'], '"1"');
+    assert.equal(p.config().microphone.enabled, false);
+    assert.equal(p.config().speaker.enabled, false);
+    assert.equal(p.config()[feature].enabled, true);
+    assert.equal(p.config()[other].enabled, false);
+    assert.equal(p.config()[feature].microphone, false);
+    assert.equal(writes[1].body.history_seconds, 0, 'quick feature selection never opts into history');
+  }
+});
+
+test('session switches prevent an empty session and update history eligibility without selecting history', async t => {
+  const p = await page(t, { language: 'en' });
+  p.set('session-translation-enabled', false);
+  assert.equal(p.byId('start').disabled, true);
+  p.byId('start').click();
+  assert.equal(p.calls.some(call => call.path === '/api/start'), false);
+  for (const feature of ['recording', 'transcription']) {
+    p.set(`session-${feature}-enabled`, true);
+    assert.equal(p.byId('start').disabled, false);
+    assert.equal(p.byId('history-include').disabled, false);
+    assert.equal(p.byId('history-include').checked, false);
+    p.set(`session-${feature}-enabled`, false);
+    assert.equal(p.byId('start').disabled, true);
+    assert.equal(p.byId('history-include').disabled, true);
+    assert.equal(p.byId('history-include').checked, false);
+  }
+});
+
+test('session switches are locked while starting, running or resolving a configuration conflict', async t => {
+  let releaseStart;
+  const pendingStart = new Promise(resolve => { releaseStart = resolve; });
+  t.after(() => releaseStart());
+  const p = await page(t, { startRequest: () => pendingStart });
+  const switches = ['translation', 'recording', 'transcription'].map(feature => p.byId(`session-${feature}-enabled`));
+  p.byId('start').click();
+  await settle(() => p.calls.some(call => call.path === '/api/start'));
+  assert.equal(p.byId('cancel-start').hidden, false);
+  for (const control of switches) assert.equal(control.disabled, true, 'starting locks feature selection');
+  releaseStart();
+  await settle(() => !p.byId('stop').hidden);
+  for (const control of switches) assert.equal(control.disabled, true, 'running locks feature selection');
+  p.byId('stop').click();
+  await settle(() => p.byId('stop').hidden && switches.every(control => !control.disabled));
+  p.set('session-recording-enabled', true);
+  p.externalChange(config => { config.speaker.target_language = 'fr-FR'; });
+  await p.poll();
+  assert.equal(p.byId('config-conflict').hidden, false);
+  for (const control of switches) assert.equal(control.disabled, true, 'a conflict requires reloading before editing quick choices');
+  assert.equal(p.byId('start').disabled, true);
+  p.byId('reload-config').click();
+  await settle(() => p.byId('config-conflict').hidden && switches.every(control => !control.disabled));
+  assert.equal(p.byId('session-recording-enabled').checked, false, 'reloading discards the conflicting draft');
+});
+
 test('each route has its own provider; dedicated modes remove unsupported settings and retain every profile', async t => {
   const p = await page(t);
   assert.equal(p.window.location.hash, '');

@@ -8,6 +8,7 @@
   const i18n = window.BabelI18n;
   const t = (key, values) => i18n.t(key, values);
   const filePathPreview = { revision: 0, timer: null, controller: null, phase: 'idle', paths: null, error: '' };
+  let translationSelection = [...routeNames];
   let token = new URLSearchParams(location.hash.slice(1)).get('token');
   try {
     if (token) sessionStorage.setItem('babel-token', token);
@@ -269,6 +270,8 @@
       if (container && Object.hasOwn(container, element.dataset.field)) writeValue(element, container[element.dataset.field]);
       if (element.dataset.deviceDirection) delete element.dataset.initialized;
     });
+    translationSelection = routeNames.filter(route => config[route]?.enabled);
+    if (!translationSelection.length) translationSelection = [...routeNames];
     syncLocalModes();
     if (!byId('history-include').checked) byId('history-request-minutes').value = String(Math.min(600, config.history.duration_secs) / 60);
     renderDevices();
@@ -638,10 +641,23 @@
     if (byId('history-session-status').textContent !== sessionHistoryLabel) byId('history-session-status').textContent = sessionHistoryLabel;
   }
 
+  function updateSessionFeatures(disabled) {
+    const selected = routeNames.filter(route => byId(`${route}-enabled`).checked);
+    if (selected.length) translationSelection = selected;
+    byId('session-translation-enabled').checked = selected.length > 0;
+    const scope = translationSelection.length === 2 ? 'both' : translationSelection[0];
+    byId('session-translation-scope').textContent = t(`session.features_${scope}`);
+    for (const feature of ['recording', 'transcription']) {
+      byId(`session-${feature}-enabled`).checked = byId(`${feature}-enabled`).checked;
+    }
+    for (const control of document.querySelectorAll('[data-session-feature]')) control.disabled = disabled;
+  }
+
   function updateControls() {
     const running = Boolean(state.status?.running);
     const processingSelected = routeNames.some(route => byId(`${route}-enabled`).checked) || byId('transcription-enabled').checked || byId('recording-enabled').checked;
     const unavailable = state.busy || state.syncing || !state.authenticated || !state.config || !state.status;
+    updateSessionFeatures(running || unavailable || state.starting || state.configConflict);
     updateHistoryControls(unavailable, running);
     byId('interface-language').disabled = state.busy || state.syncing || !state.authenticated;
     byId('settings').disabled = running || unavailable;
@@ -762,6 +778,22 @@
   }
 
   form.addEventListener('submit', (event) => event.preventDefault());
+  document.querySelectorAll('[data-session-feature]').forEach(control => control.addEventListener('input', () => {
+    // These are shortcuts to the canonical fields, not extra serialized settings.
+    if (control.disabled) { updateControls(); return; }
+    const feature = control.dataset.sessionFeature;
+    if (feature === 'translation') {
+      const selected = routeNames.filter(route => byId(`${route}-enabled`).checked);
+      if (selected.length) translationSelection = selected;
+      // Set both before publishing the edit, preserving a single-direction draft.
+      for (const route of routeNames) byId(`${route}-enabled`).checked = control.checked && translationSelection.includes(route);
+      byId('microphone-enabled').dispatchEvent(new Event('input', { bubbles: true }));
+    } else {
+      const field = byId(`${feature}-enabled`);
+      field.checked = control.checked;
+      field.dispatchEvent(new Event('input', { bubbles: true }));
+    }
+  }));
   form.addEventListener('input', (event) => {
     if (!event.target.matches('[data-field]')) return;
     state.dirty = true;

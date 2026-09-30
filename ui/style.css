@@ -21,7 +21,7 @@
   --warm: #966318;
   --danger: #bd3947;
   --sidebar-width: 218px;
-  --session-dock-height: 104px;
+  --session-dock-height: 160px;
   font-family: Manrope, 'Segoe UI', system-ui, sans-serif;
   font-size: 14px;
   font-weight: 450;
@@ -108,7 +108,12 @@ code { font-size: .92em; }
 .text-button { color: #8c5260; background: transparent; font-size: 11px; text-decoration: underline; text-underline-offset: 3px; }
 .text-button:hover:not(:disabled) { color: var(--danger); }
 .transport { display: flex; align-items: center; gap: 10px; flex-shrink: 0; }
-.session-dock { position: fixed; inset: auto 0 0 var(--sidebar-width); z-index: 10; display: grid; grid-template-columns: minmax(180px, 265px) minmax(120px, 1fr) auto; align-items: center; gap: 28px; min-height: 104px; padding: 17px 36px; border-top: 1px solid #d4ddeb; background: #fff; box-shadow: 0 -5px 20px #19335204; }
+.session-dock { position: fixed; inset: auto 0 0 var(--sidebar-width); z-index: 10; display: grid; grid-template-columns: minmax(180px, 265px) minmax(120px, 1fr) auto; align-items: center; gap: 12px 28px; min-height: 148px; padding: 14px 36px 17px; border-top: 1px solid #d4ddeb; background: #fff; box-shadow: 0 -5px 20px #19335204; }
+.session-features { grid-column: 1 / -1; grid-row: 1; display: flex; flex-wrap: wrap; align-items: center; gap: 10px 32px; padding-bottom: 12px; border-bottom: 1px solid var(--line); }
+.session-features .session-feature { gap: 10px; margin: 0; min-height: 32px; }
+.session-feature-label { font-size: 12px; font-weight: 550; line-height: 1.45; }
+.session-feature-label small { display: block; margin-top: 1px; line-height: 1.4; color: var(--muted); font-size: 10px; font-weight: 450; }
+.session-feature:has(input:disabled) { cursor: default; }
 .session-dock .session-name-field > span:first-child { margin-bottom: 5px; font-size: 11px; }
 .session-name-field input { min-height: 38px; font-size: 12px; }
 .optional-label { color: var(--muted); font-size: 10px; font-weight: 450; }
@@ -436,7 +441,7 @@ dialog::backdrop { background: #152c4866; }
   .channel { padding-right: 21px; padding-left: 21px; }
   .channel-header h2 { font-size: 18px; }
   .channel-symbol { width: 38px; height: 38px; }
-  .session-dock { grid-template-columns: minmax(140px, 210px) minmax(100px, 1fr) auto; gap: 20px; padding-right: 26px; padding-left: 26px; }
+  .session-dock { grid-template-columns: minmax(140px, 210px) minmax(100px, 1fr) auto; gap: 12px 20px; padding-right: 26px; padding-left: 26px; }
   .session-dock .transport { gap: 8px; }
   .session-dock .transport .button { padding-right: 12px; padding-left: 12px; }
   .transcription-grid { grid-template-columns: 1fr; gap: 4px; }
@@ -456,12 +461,12 @@ dialog::backdrop { background: #152c4866; }
   .device-fields { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 18px; }
   .channel .route-provider { max-width: 100%; }
   .session-dock { grid-template-columns: minmax(160px, 1fr) auto; gap: 10px 24px; }
-  .session-dock-status { grid-column: 1 / -1; grid-row: 2; }
-  .session-dock-name { grid-column: 1; grid-row: 1; }
-  .session-dock-actions { grid-column: 2; grid-row: 1; align-self: end; }
+  .session-dock-status { grid-column: 1 / -1; grid-row: 3; }
+  .session-dock-name { grid-column: 1; grid-row: 2; }
+  .session-dock-actions { grid-column: 2; grid-row: 2; align-self: end; }
   .session-hint { font-size: 10px; }
   .session-dock .transport { align-self: end; }
-  :root { --session-dock-height: 132px; }
+  :root { --session-dock-height: 188px; }
   .provider-grid { grid-template-columns: minmax(0, 1fr) minmax(0, 1.5fr); }
   .provider-grid > label:last-child { grid-column: 1; }
   .quality-section { grid-template-columns: 1fr; gap: 10px; }
@@ -575,14 +580,17 @@ dialog::backdrop { background: #152c4866; }
   .route-voice-grid .voice-style { grid-column: auto; }
   .session-dock { grid-template-columns: minmax(0, 1fr); gap: 9px; padding: 12px 20px 14px; }
   .session-dock .session-name-field { display: grid; grid-template-columns: auto minmax(0, 1fr); align-items: center; gap: 12px; }
-  .session-dock-name { grid-column: 1; grid-row: 1; }
-  .session-dock-actions { grid-column: 1; grid-row: 2; justify-self: stretch; }
+  .session-dock-name { grid-column: 1; grid-row: 2; }
+  .session-dock-actions { grid-column: 1; grid-row: 3; justify-self: stretch; }
   .session-dock .session-name-field > span:first-child { margin-bottom: 0; }
   .session-dock .session-name-field input { min-height: 34px; padding: 7px 10px; }
   .session-dock .transport { grid-row: 2; grid-column: 1; width: 100%; }
   .session-dock .transport .button { flex: 1; }
-  .session-dock-status { grid-row: 3; }
-  :root { --session-dock-height: 170px; }
+  .session-dock-status { grid-row: 4; }
+  .session-features { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); align-items: start; gap: 10px; padding-bottom: 10px; }
+  .session-features .session-feature { flex-direction: column; align-items: flex-start; gap: 6px; }
+  .session-feature-label { font-size: 11px; }
+  :root { --session-dock-height: 246px; }
   .session-hint { font-size: 9px; }
   #session-identity { font-size: 9px; }
   .transcription-routes { grid-template-columns: 1fr; gap: 0; }
