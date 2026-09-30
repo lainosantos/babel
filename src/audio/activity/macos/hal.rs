@@ -7,8 +7,8 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result, ensure};
 use coreaudio_hal::{
     AudioObject, MissingQualifier, PROCESS_INPUT_DEVICES, PROCESS_IS_RUNNING_INPUT,
-    PROCESS_IS_RUNNING_OUTPUT, PROCESS_OUTPUT_DEVICES, PROCESS_PID, SYSTEM_DEFAULT_INPUT,
-    SYSTEM_TRANSLATE_UID_TO_DEVICE, System,
+    PROCESS_IS_RUNNING_OUTPUT, PROCESS_OUTPUT_DEVICES, PROCESS_PID, SYSTEM_TRANSLATE_UID_TO_DEVICE,
+    System, property::SYSTEM_DEFAULT_INPUT,
 };
 use cpal::traits::DeviceTrait;
 use tokio::sync::{mpsc, watch};
