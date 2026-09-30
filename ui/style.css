@@ -73,7 +73,6 @@ code { font-size: .92em; }
 .sidebar-bottom .local-label { margin-bottom: 8px; }
 .sidebar-help { display: flex; align-items: center; gap: 8px; margin-top: 18px; color: #66758a; font-size: 10px; text-decoration: none; }
 .sidebar-help svg { width: 16px; height: 16px; }
-.platform-summary { color: var(--muted); font-size: 11px; line-height: 1.7; }
 .app-main { min-width: 0; margin-left: var(--sidebar-width); padding-bottom: calc(var(--session-dock-height) + 24px); }
 .app-topbar { display: flex; align-items: center; justify-content: space-between; gap: 28px; padding: 31px 36px 24px; }
 .view-heading { min-width: 0; }

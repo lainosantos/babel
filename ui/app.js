@@ -436,10 +436,6 @@
   function renderPlatform() {
     const os = platformOs();
     const names = { linux: 'Linux', macos: 'macOS', windows: 'Windows' };
-    const backends = { pulseaudio: 'PulseAudio / PipeWire-pulse', coreaudio: 'CoreAudio', wasapi: 'WASAPI' };
-    if (!state.platform) platformText('platform-summary', state.platformError ? 'platform.unavailable' : 'platform.detecting');
-    else if (os === 'unknown') platformText('platform-summary', 'platform.unknown');
-    else platformText('platform-summary', 'platform.summary', { name: names[os], backend: backends[state.platform.audio_backend] || t('platform.unsupported_backend') });
     platformText('platform-device-setup', `platform.${os}_setup`);
     platformText('platform-device-details', `platform.${os}_details`);
     platformText('platform-device-permissions', `platform.${os}_permissions`);

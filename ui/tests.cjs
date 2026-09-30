@@ -1018,7 +1018,7 @@ test('catalogs cover static and dynamic keys and preserve interpolation paramete
 
 test('Linux device management follows the host API even when the browser identifies as Windows', async t => {
   const p = await page(t, { platform: 'linux', userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)' });
-  assert.match(p.byId('platform-summary').textContent, /Linux.*PulseAudio \/ PipeWire/);
+  assert.equal(p.byId('platform-summary'), null);
   assert.equal(p.byId('install-devices').hidden, false);
   assert.equal(p.byId('install-devices').disabled, false);
   assert.equal(p.byId('uninstall-devices').hidden, false);
@@ -1039,7 +1039,7 @@ test('Linux device management follows the host API even when the browser identif
 
 test('macOS shows Babel driver setup, permissions and LaunchAgent instead of Linux device actions', async t => {
   const p = await page(t, { platform: 'macos', userAgent: 'Mozilla/5.0 (X11; Linux x86_64)' });
-  assert.match(p.byId('platform-summary').textContent, /macOS.*CoreAudio/);
+  assert.equal(p.byId('platform-summary'), null);
   assert.equal(p.byId('install-devices').hidden, true); assert.equal(p.byId('install-devices').disabled, true);
   assert.equal(p.byId('uninstall-devices').hidden, true); assert.equal(p.byId('uninstall-devices').disabled, true);
   assert.equal(p.byId('device-external-guide').hidden, false);
@@ -1056,7 +1056,7 @@ test('macOS shows Babel driver setup, permissions and LaunchAgent instead of Lin
 
 test('Windows displays cable directions, microphone privacy and per-user startup without changing drafts', async t => {
   const p = await page(t, { platform: 'windows', userAgent: 'Mozilla/5.0 (Macintosh; Intel Mac OS X)' });
-  assert.match(p.byId('platform-summary').textContent, /Windows.*WASAPI/);
+  assert.equal(p.byId('platform-summary'), null);
   assert.match(p.byId('platform-device-setup').textContent, /Babel Microphone.*Babel Speaker/);
   assert.match(p.byId('platform-device-details').textContent, /Babel Microphone Feed.*Babel Speaker Monitor/);
   assert.match(p.byId('platform-device-permissions').textContent, /aplicativos desktop.*Windows/);
@@ -1067,13 +1067,13 @@ test('Windows displays cable directions, microphone privacy and per-user startup
   p.set('speaker-target_language', 'ja-JP');
   p.byId('autostart-enabled').click();
   await chooseInterface(p, 'en');
-  assert.match(p.byId('platform-summary').textContent, /Babel on Windows/);
+  assert.equal(p.byId('platform-summary'), null);
   assert.match(p.byId('platform-device-permissions').textContent, /desktop apps in Windows/);
   assert.match(p.byId('platform-autostart').textContent, /Run registry/);
   assert.equal(p.byId('speaker-target_language').value, 'ja-JP');
   assert.equal(p.byId('autostart-enabled').checked, true);
   p.window.BabelI18n.apply();
-  assert.match(p.byId('platform-summary').textContent, /Babel on Windows/);
+  assert.equal(p.byId('platform-summary'), null);
   assert.match(p.byId('platform-device-setup').textContent, /Babel Microphone/);
   p.byId('refresh-devices').click();
   await settle(() => p.byId('notice').textContent === 'Device list refreshed.');
@@ -1084,7 +1084,7 @@ test('Windows displays cable directions, microphone privacy and per-user startup
 
 test('unknown or unavailable host metadata never assumes Linux and refresh recovers without losing edits', async t => {
   const unknown = await page(t, { platform: 'unknown' });
-  assert.match(unknown.byId('platform-summary').textContent, /não suportado/);
+  assert.equal(unknown.byId('platform-summary'), null);
   assert.equal(unknown.byId('install-devices').hidden, true);
   assert.equal(unknown.byId('uninstall-devices').disabled, true);
   assert.equal(unknown.byId('autostart-enabled').disabled, true);
@@ -1093,17 +1093,17 @@ test('unknown or unavailable host metadata never assumes Linux and refresh recov
   assert.equal(unknown.byId('refresh-devices').disabled, false);
   assert.equal(unknown.byId('platform-native-guide'), null);
   const p = await page(t, { platform: 'linux', platformFailure: true });
-  assert.match(p.byId('platform-summary').textContent, /indisponível/);
+  assert.equal(p.byId('platform-summary'), null);
   assert.equal(p.byId('platform-error').hidden, false);
   assert.equal(p.byId('install-devices').hidden, true);
   assert.equal(p.byId('install-devices').disabled, true);
   p.set('speaker-target_language', 'es-ES');
   await chooseInterface(p, 'en');
-  assert.match(p.byId('platform-summary').textContent, /unavailable/);
+  assert.equal(p.byId('platform-summary'), null);
   assert.equal(p.byId('install-devices').disabled, true);
   p.platformFailure(false); p.byId('refresh-devices').click();
   await settle(() => p.byId('install-devices').hidden === false && !p.byId('install-devices').disabled);
-  assert.match(p.byId('platform-summary').textContent, /Linux/);
+  assert.equal(p.byId('platform-summary'), null);
   assert.equal(p.byId('platform-error').hidden, true);
   assert.equal(p.byId('speaker-target_language').value, 'es-ES');
   assert.equal(p.calls.some(call => call.path.startsWith('/api/virtual/')), false);
