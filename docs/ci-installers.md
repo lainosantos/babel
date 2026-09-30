@@ -56,9 +56,9 @@ or passed hardware validation.
 
 ## Included inference engines
 
-Before installers, the `local-runtime` job builds whisper.cpp, llama.cpp and
-Piper from archives pinned by commit, size and SHA-256 in
-`scripts/local_runtime.lock.json`. Its matrix has five targets:
+Before installers, the reusable `native-runtime.yml` workflow builds whisper.cpp,
+llama.cpp and Piper from archives pinned by commit, size and SHA-256 in
+`scripts/local_runtime.lock.json`, across five targets grouped by platform:
 
 | Payload | Native runner |
 |---|---|
@@ -90,8 +90,9 @@ Metal device probing because the hosted runner may lack a usable GPU; the
 distributed libraries still include Metal acceleration and embedded shaders.
 This smoke does not validate GPU execution on physical Macs.
 Test models use a cache keyed by the hash of `src/local_runtime/models.json`
-and are not included in installers. All these jobs must pass before package
-builds proceed.
+and are not included in installers. Each platform's packager waits only for its
+own runtimes and portable checks; release publication still requires all platforms
+to succeed.
 
 Intermediate artifacts are named `babel-local-runtime-<system>-<architecture>`.
 Each packager receives only its system's payloads and verifies architecture,

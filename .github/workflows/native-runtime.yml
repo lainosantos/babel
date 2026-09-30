@@ -1,0 +1,45 @@
+name: Build native inference runtime
+on:
+  workflow_call:
+    inputs:
+      os:
+        description: GitHub runner for the native runtime build
+        required: true
+        type: string
+      name:
+        description: Runtime platform and architecture artifact suffix
+        required: true
+        type: string
+permissions:
+  contents: read
+jobs:
+  build:
+    runs-on: ${{ inputs.os }}
+    timeout-minutes: 70
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install build-only CMake
+        # VS 2026 on the ARM image needs the generator added in CMake 4.2.
+        run: python -m pip install cmake==${{ inputs.os == 'windows-11-arm' && '4.2.3' || '3.31.10' }}
+      - name: Build pinned native inference engines without installed AI services
+        run: python scripts/build_local_runtime.py --output artifacts/local-runtime --jobs 3
+      - uses: actions/cache@v4
+        with:
+          path: .tools/inference-test-models
+          key: inference-smoke-models-${{ hashFiles('src/local_runtime/models.json') }}
+      - name: Verify dynamic listeners and actual local inference with synthetic audio
+        env:
+          # Hosted macOS workers do not guarantee an available GPU. The pinned
+          # GGML runtime skips Metal device creation at zero; shipped libraries
+          # retain Metal and the installed application does not set this value.
+          GGML_METAL_DEVICES: ${{ startsWith(inputs.os, 'macos-') && '0' || '' }}
+        run: python scripts/test_bundled_inference.py --runtime-dir artifacts/local-runtime/${{ inputs.name }} --model-cache .tools/inference-test-models
+      - uses: actions/upload-artifact@v4
+        with:
+          name: babel-local-runtime-${{ inputs.name }}
+          path: artifacts/local-runtime/${{ inputs.name }}.tar.gz
+          if-no-files-found: error
+          retention-days: 30
