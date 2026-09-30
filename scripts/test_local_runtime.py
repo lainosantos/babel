@@ -1,7 +1,7 @@
 """Native runtime packaging contracts; no model, microphone or service is used."""
 import io
 import json
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 import struct
 import subprocess
 import sys
@@ -34,6 +34,30 @@ def fixture(root, system="linux", arch="x86_64"):
 
 
 class RuntimeTests(unittest.TestCase):
+    def test_piper_windows_paths_remain_valid_in_generated_cmake_install_scripts(self):
+        source = PureWindowsPath(r"C:\a\Babel ação\source")
+        onnx = source / "onnx"
+        with mock.patch.object(build, "source_tree", return_value=(onnx, None)), mock.patch.object(build, "cmake", side_effect=RuntimeError("stop before compiling")) as configure:
+            with self.assertRaisesRegex(RuntimeError, "stop before compiling"):
+                build.stage_piper(source / "piper", source / "espeak", {}, source / "cache", source / "work", source / "payload", "windows", "aarch64", 2)
+        arguments = configure.call_args.args[2]
+        paths = {item.split("=", 1)[0][2:]: item.split("=", 1)[1] for item in arguments[:3]}
+        self.assertEqual(paths["ONNXRUNTIME_DIR"], "C:/a/Babel ação/source/onnx")
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            probe = root / "installer.cmake"
+            # This is the same interpolation that generates upstream install
+            # scripts. Backslashes would become CMake escapes when it is parsed.
+            generator = root / "generate.cmake"
+            generator.write_text(r'''cmake_minimum_required(VERSION 3.20)
+file(WRITE "${OUTPUT}" "cmake_minimum_required(VERSION 3.20)\n")
+foreach(name ONNXRUNTIME_DIR BABEL_ESPEAK_SOURCE CMAKE_INSTALL_PREFIX)
+ file(APPEND "${OUTPUT}" "set(${name} \"${${name}}\")\n")
+endforeach()
+''')
+            subprocess.run(["cmake", *arguments[:3], f"-DOUTPUT={probe.as_posix()}", "-P", str(generator)], check=True, capture_output=True)
+            subprocess.run(["cmake", "-P", str(probe)], check=True, capture_output=True)
+
     def test_windows_cmake_explicitly_selects_a_generator_supporting_architecture(self):
         for architecture, platform in [("aarch64", "ARM64"), ("x86_64", "x64")]:
             with self.subTest(architecture=architecture), mock.patch.object(build.sys, "platform", "win32"), mock.patch.object(build, "host", return_value=("windows", architecture)), mock.patch.object(build, "windows_cmake_generator", return_value="Visual Studio 17 2022"), mock.patch.object(build, "run") as run:

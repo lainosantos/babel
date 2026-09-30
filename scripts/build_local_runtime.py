@@ -176,7 +176,7 @@ def cmake(source, build, extra, jobs, targets):
             common += ["-T", "ClangCL"]
         # Existing native engines use narrow argv/filesystem paths. Windows
         # 10 1903+ UTF-8 activation preserves non-ASCII user/model directories.
-        common += [f'-DCMAKE_EXE_LINKER_FLAGS=/MANIFEST:EMBED /MANIFESTINPUT:"{ROOT / "scripts/windows_utf8.manifest"}"']
+        common += [f'-DCMAKE_EXE_LINKER_FLAGS=/MANIFEST:EMBED /MANIFESTINPUT:"{(ROOT / "scripts/windows_utf8.manifest").as_posix()}"']
     elif sys.platform == "darwin":
         common += ["-DCMAKE_OSX_DEPLOYMENT_TARGET=14.2", "-DCMAKE_INSTALL_RPATH=@loader_path;@loader_path/../lib"]
     else:
@@ -221,7 +221,9 @@ def stage_piper(source, espeak, pins, cache, work, destination, system, arch, jo
         raise ValueError("ONNX Runtime archive is not pinned for this architecture")
     onnx, _ = source_tree("onnx-" + platform_name, pins, cache, work)
     build, install = work / "build/piper", work / "install/piper"
-    cmake(source / "libpiper", build, [f"-DONNXRUNTIME_DIR={onnx}", f"-DBABEL_ESPEAK_SOURCE={espeak}", f"-DCMAKE_INSTALL_PREFIX={install}", "-DPIPER_BUILD_TESTS=OFF", "-DENABLE_CLANG_TIDY=OFF", "-DCMAKE_INSTALL_LIBDIR=lib", "-DCMAKE_INSTALL_DATAROOTDIR=share"], jobs, ["piper_exe"])
+    # CMake interpolates these values into install scripts; native Windows
+    # backslashes can become invalid escapes such as \a in C:\a\....
+    cmake(source / "libpiper", build, [f"-DONNXRUNTIME_DIR={onnx.as_posix()}", f"-DBABEL_ESPEAK_SOURCE={espeak.as_posix()}", f"-DCMAKE_INSTALL_PREFIX={install.as_posix()}", "-DPIPER_BUILD_TESTS=OFF", "-DENABLE_CLANG_TIDY=OFF", "-DCMAKE_INSTALL_LIBDIR=lib", "-DCMAKE_INSTALL_DATAROOTDIR=share"], jobs, ["piper_exe"])
     run("cmake", "--install", build, "--config", "Release")
     executable = "piper_exe" + (".exe" if system == "windows" else "")
     copy_regular(install / "bin" / executable, destination / "piper/bin" / executable, True)
