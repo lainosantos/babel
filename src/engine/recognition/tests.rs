@@ -273,6 +273,56 @@ async fn merged_file_keeps_both_original_sources_and_eof_finals() {
     );
 }
 
+#[tokio::test(start_paused = true)]
+async fn stop_waits_for_a_full_transcript_queue_without_losing_the_original_final() {
+    let (text, mut records) = mpsc::channel(1);
+    text.send(TranscriptRecord::Section("Writer backlog".into()))
+        .await
+        .unwrap();
+    let origin = Instant::now();
+    let metrics = Arc::new(RouteMetrics::default());
+    let (sink, mut task) = launch(
+        Arc::new(Recognizer {
+            first: 42,
+            finalize_at_eof: true,
+            received: Arc::new(AtomicU64::new(0)),
+            setup: None,
+        }),
+        TranscriptSink {
+            retained: None,
+            sender: text,
+            origin: TranscriptOrigin::Microphone,
+        },
+        metrics.clone(),
+        origin,
+    );
+    assert!(sink.submit(frame(origin, 100, 1600, 42), &metrics));
+    drop(sink);
+    assert!(
+        tokio::time::timeout(Duration::from_secs(45), &mut task)
+            .await
+            .is_err()
+    );
+    assert!(matches!(
+        records.recv().await,
+        Some(TranscriptRecord::Section(_))
+    ));
+    assert!(matches!(records.recv().await,
+        Some(TranscriptRecord::Routed { record, .. })
+        if matches!(*record, TranscriptRecord::Text { ref text, .. }
+            if text == "Original source 42.")));
+    assert!(matches!(records.recv().await,
+        Some(TranscriptRecord::Routed { record, .. })
+        if matches!(*record, TranscriptRecord::TurnComplete)));
+    tokio::time::timeout(Duration::from_secs(1), task)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert!(metrics.snapshot().processing_error.is_none());
+    assert!(records.recv().await.is_none());
+}
+
 #[tokio::test]
 async fn stalled_microphone_after_silence_does_not_block_overlapping_output_originals() {
     struct StalledMicrophone {
@@ -565,35 +615,56 @@ async fn original_recovery_preserves_pcm_alignment_across_capture_gaps_without_r
 }
 
 #[tokio::test(start_paused = true)]
-async fn gemini_recovery_has_a_longer_bounded_drain_than_other_recognizers() {
-    struct UnresponsiveRecognizer(&'static str);
+async fn stop_drains_every_accepted_original_after_the_previous_finalization_deadlines() {
+    struct SlowRecognizer {
+        id: &'static str,
+        received: Arc<AtomicU64>,
+    }
 
     #[async_trait]
-    impl SpeechProvider for UnresponsiveRecognizer {
+    impl SpeechProvider for SlowRecognizer {
         fn id(&self) -> &'static str {
-            self.0
+            self.id
         }
 
         async fn run(
             &self,
             _config: SessionConfig,
-            _audio: mpsc::Receiver<Vec<i16>>,
-            _events: mpsc::Sender<ProviderEvent>,
-            _cancel: CancellationToken,
+            mut audio: mpsc::Receiver<Vec<i16>>,
+            events: mpsc::Sender<ProviderEvent>,
+            cancel: CancellationToken,
         ) -> Result<()> {
-            std::future::pending().await
+            events.send(ProviderEvent::Connected).await?;
+            while let Some(samples) = audio.recv().await {
+                tokio::time::sleep(Duration::from_secs(10)).await;
+                ensure!(!cancel.is_cancelled(), "Accepted original was cancelled");
+                self.received
+                    .fetch_add(samples.len() as u64, Ordering::Relaxed);
+            }
+            tokio::time::sleep(Duration::from_secs(10)).await;
+            ensure!(!cancel.is_cancelled(), "Final recognition was cancelled");
+            events
+                .send(ProviderEvent::Transcript {
+                    input: true,
+                    text: "Every accepted original completed.".into(),
+                    metadata: TranscriptMetadata::default(),
+                })
+                .await?;
+            events.send(ProviderEvent::TurnComplete).await?;
+            Ok(())
         }
     }
 
-    for (provider, deadline) in [
-        ("gemini", GEMINI_FINALIZE_TIMEOUT),
-        ("synthetic-original-stt", FINALIZE_TIMEOUT),
-    ] {
-        let (text, _records) = mpsc::channel(1);
+    for id in ["gemini", "synthetic-original-stt"] {
+        let (text, mut records) = mpsc::channel(4);
         let metrics = Arc::new(RouteMetrics::default());
         let origin = Instant::now();
+        let received = Arc::new(AtomicU64::new(0));
         let (sink, task) = launch(
-            Arc::new(UnresponsiveRecognizer(provider)),
+            Arc::new(SlowRecognizer {
+                id,
+                received: received.clone(),
+            }),
             TranscriptSink {
                 retained: None,
                 sender: text,
@@ -602,16 +673,26 @@ async fn gemini_recovery_has_a_longer_bounded_drain_than_other_recognizers() {
             metrics.clone(),
             origin,
         );
-        sink.submit(frame(origin, 100, 1600, 11), &metrics);
+        for second in 1..=4 {
+            assert!(sink.submit(frame(origin, second * 1000, 16000, 11), &metrics));
+        }
         drop(sink);
         let started = tokio::time::Instant::now();
-        let error = tokio::time::timeout(deadline + Duration::from_secs(1), task)
+        tokio::time::timeout(Duration::from_secs(60), task)
             .await
-            .expect("Closed input always has a finite finalization deadline")
+            .expect("The complete accepted backlog reaches EOF")
             .unwrap()
-            .unwrap_err();
-        assert!(error.to_string().contains("transcript may be incomplete"));
-        assert_eq!(started.elapsed(), deadline);
+            .unwrap();
+        assert!(started.elapsed() >= Duration::from_secs(50));
+        assert_eq!(received.load(Ordering::Relaxed), 64000);
+        assert!(matches!(records.recv().await,
+            Some(TranscriptRecord::Routed { record, .. })
+            if matches!(*record, TranscriptRecord::Text { ref text, .. }
+                if text == "Every accepted original completed.")));
+        assert!(matches!(records.recv().await,
+            Some(TranscriptRecord::Routed { record, .. })
+            if matches!(*record, TranscriptRecord::TurnComplete)));
+        assert!(records.recv().await.is_none());
     }
 }
 
@@ -648,17 +729,160 @@ async fn startup_originals_are_sample_bounded_without_blocking_capture() {
     assert_eq!(sink.budget.available_permits(), QUEUED_SAMPLES);
 }
 
+#[tokio::test]
+async fn retained_original_backlog_larger_than_the_input_queue_reaches_recognition_after_stop() {
+    let entered = Arc::new(Notify::new());
+    let release = Arc::new(Notify::new());
+    let received = Arc::new(AtomicU64::new(0));
+    let arrived = entered.clone();
+    let proceed = release.clone();
+    let counted = received.clone();
+    let app = axum::Router::new().route(
+        "/inference",
+        axum::routing::post(move |body: axum::body::Bytes| {
+            let arrived = arrived.clone();
+            let proceed = proceed.clone();
+            let counted = counted.clone();
+            async move {
+                let start = body.windows(4).position(|bytes| bytes == b"RIFF").unwrap();
+                let mut wav = hound::WavReader::new(std::io::Cursor::new(&body[start..])).unwrap();
+                let samples: Vec<_> = wav.samples::<i16>().map(|sample| sample.unwrap()).collect();
+                assert!(samples.iter().all(|sample| *sample == 5000));
+                if counted.fetch_add(samples.len() as u64, Ordering::Relaxed) == 0 {
+                    arrived.notify_one();
+                    proceed.notified().await;
+                }
+                axum::Json(serde_json::json!({"text": "Retained original segment."}))
+            }
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let endpoint = format!("http://{}/inference", listener.local_addr().unwrap());
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let directory = tempfile::tempdir().unwrap();
+    let store = crate::retention::SessionRetention::create_in(directory.path(), "queued-originals")
+        .await
+        .unwrap();
+    let origin = Instant::now();
+    let originals =
+        retained::RetainedSession::new(store, origin, &tokio::runtime::Handle::current());
+    for second in 1..=40 {
+        originals
+            .capture(
+                &frame(origin, second * 1000, 16000, 5000),
+                TranscriptOrigin::Microphone,
+            )
+            .unwrap();
+    }
+    let mut config = AppConfig::default();
+    config.transcription.microphone_recognition.provider = "whisper".into();
+    config.transcription.providers.whisper.endpoint = endpoint;
+    config.transcription.providers.whisper.segment_ms = 5000;
+    let metrics = Arc::new(RouteMetrics::default());
+    let (text, mut records) = mpsc::channel(32);
+    let task = tokio::spawn(start_retained(
+        config,
+        TranscriptSink {
+            retained: Some(originals.clone()),
+            sender: text,
+            origin: TranscriptOrigin::Microphone,
+        },
+        metrics.clone(),
+        origin,
+        originals.clone(),
+    ));
+    tokio::time::timeout(Duration::from_secs(5), entered.notified())
+        .await
+        .unwrap();
+    originals.close_capture();
+    assert!(!task.is_finished());
+    release.notify_one();
+    tokio::time::timeout(Duration::from_secs(10), task)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert_eq!(received.load(Ordering::Relaxed), 40 * 16000);
+    let mut final_segments = 0;
+    while let Some(record) = records.recv().await {
+        if matches!(record, TranscriptRecord::Routed { record, .. }
+            if matches!(*record, TranscriptRecord::Text { .. }))
+        {
+            final_segments += 1;
+        }
+    }
+    assert!(final_segments > 0);
+    assert!(metrics.snapshot().processing_error.is_none());
+    assert_eq!(
+        metrics
+            .audio
+            .processing_dropped_frames
+            .load(Ordering::Relaxed),
+        0
+    );
+    assert_eq!(originals.status().frames, 40);
+    server.abort();
+}
+
+#[tokio::test]
+async fn recognizer_creation_failure_marks_retained_originals_for_recovery() {
+    let directory = tempfile::tempdir().unwrap();
+    let store =
+        crate::retention::SessionRetention::create_in(directory.path(), "failed-recognizer")
+            .await
+            .unwrap();
+    let origin = Instant::now();
+    let originals =
+        retained::RetainedSession::new(store, origin, &tokio::runtime::Handle::current());
+    originals
+        .capture(
+            &frame(origin, 100, 1600, 5000),
+            TranscriptOrigin::Microphone,
+        )
+        .unwrap();
+    originals.close_capture();
+    let mut config = AppConfig::default();
+    config.transcription.microphone_recognition.provider = "unsupported-fixture-provider".into();
+    let (text, mut records) = mpsc::channel(1);
+    let result = start_retained(
+        config,
+        TranscriptSink {
+            retained: Some(originals.clone()),
+            sender: text,
+            origin: TranscriptOrigin::Microphone,
+        },
+        Arc::new(RouteMetrics::default()),
+        origin,
+        originals.clone(),
+    )
+    .await;
+    assert!(result.is_err());
+    assert_eq!(originals.status().frames, 1);
+    assert!(
+        originals
+            .status()
+            .error
+            .unwrap()
+            .contains("Original transcription requires recovery")
+    );
+    assert!(matches!(records.recv().await,
+        Some(TranscriptRecord::Routed { record, .. })
+        if matches!(*record, TranscriptRecord::Gap)));
+}
+
 #[tokio::test(start_paused = true)]
-async fn stop_bounds_unacknowledged_setup_with_a_full_startup_queue() {
+async fn stop_preserves_a_full_startup_queue_until_setup_completes() {
     let origin = Instant::now();
     let metrics = Arc::new(RouteMetrics::default());
-    let (text, _records) = mpsc::channel(1);
+    let (text, mut records) = mpsc::channel(4);
+    let setup = Arc::new(Notify::new());
+    let received = Arc::new(AtomicU64::new(0));
     let (sink, task) = launch(
         Arc::new(Recognizer {
             first: 1,
             finalize_at_eof: true,
-            received: Arc::new(AtomicU64::new(0)),
-            setup: Some(Arc::new(Notify::new())),
+            received: received.clone(),
+            setup: Some(setup.clone()),
         }),
         TranscriptSink {
             retained: None,
@@ -676,12 +900,24 @@ async fn stop_bounds_unacknowledged_setup_with_a_full_startup_queue() {
     }
     assert_eq!(sink.losses.load(Ordering::Relaxed), 0);
     drop(sink);
-    let before = tokio::time::Instant::now();
-    let error = tokio::time::timeout(FINALIZE_TIMEOUT + Duration::from_secs(1), task)
+    tokio::time::advance(Duration::from_secs(45)).await;
+    assert!(
+        !task.is_finished(),
+        "Stop must not expire accepted originals during setup"
+    );
+    setup.notify_one();
+    tokio::time::timeout(Duration::from_secs(5), task)
         .await
-        .expect("Closed capture bounds setup even when its queue is full")
+        .expect("Setup completion drains the full original queue")
         .unwrap()
-        .unwrap_err();
-    assert!(error.to_string().contains("transcript may be incomplete"));
-    assert!(before.elapsed() >= FINALIZE_TIMEOUT);
+        .unwrap();
+    assert_eq!(received.load(Ordering::Relaxed), QUEUED_FRAMES as u64);
+    assert!(matches!(records.recv().await,
+        Some(TranscriptRecord::Routed { record, .. })
+        if matches!(*record, TranscriptRecord::Text { ref text, .. }
+            if text == "Original source 1.")));
+    assert!(matches!(records.recv().await,
+        Some(TranscriptRecord::Routed { record, .. })
+        if matches!(*record, TranscriptRecord::TurnComplete)));
+    assert!(records.recv().await.is_none());
 }

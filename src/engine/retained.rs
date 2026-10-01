@@ -1,5 +1,5 @@
-//! Session-owned originals survive provider/file-worker failure. Spill writes
-//! are encrypted with the store's RAM-only key and run outside audio routing.
+//! Session-owned originals stream from RAM while an encrypted append journal is
+//! committed in parallel. Slow readers use disk; routing never performs I/O.
 use crate::{
     audio::PcmFrame,
     recording::{AudioRecord, RecordingLane},
@@ -25,6 +25,7 @@ const FRAME_OVERHEAD: usize = 128;
 const INDEX_OVERHEAD: usize = 96;
 const FRAME_HEADER: usize = 28;
 const METADATA: &[u8] = b"BABEL-ORIGINAL-PCM16-V1";
+const JOURNAL_INTERVAL: Duration = Duration::from_millis(250);
 
 #[derive(Clone, Copy)]
 struct Limits {
@@ -56,17 +57,22 @@ impl Original {
 struct Batch {
     id: RecordId,
     frames: u64,
+    last_sequence: u64,
 }
 #[derive(Default)]
 struct Lane {
     pending: VecDeque<Arc<Original>>,
     stored: Vec<Batch>,
+    recent: VecDeque<Arc<Original>>,
+    recent_samples: usize,
+    evicted_through: Option<u64>,
     last_capture: Option<Instant>,
 }
 #[derive(Default)]
 struct State {
     lanes: [Lane; 2],
     memory_bytes: usize,
+    staging_bytes: usize,
     frames: u64,
     encrypted_frames: u64,
     encrypted_bytes: u64,
@@ -177,7 +183,7 @@ impl RetainedSession {
                 .is_none_or(|previous| frame.captured_at >= previous),
             "Original retention capture clock moved backwards"
         );
-        if state.memory_bytes.saturating_add(required) > self.inner.limits.hard {
+        if state.staging_bytes.saturating_add(required) > self.inner.limits.hard {
             state.error = Some("Original retention memory limit reached; accepted audio remains preserved, but capture must stop until encrypted storage recovers".into());
             self.inner.wake.notify_one();
             self.inner.changed();
@@ -195,12 +201,14 @@ impl RetainedSession {
         state.lanes[lane].last_capture = Some(frame.captured_at);
         state.lanes[lane].pending.push_back(original);
         state.memory_bytes += required;
+        state.staging_bytes += required;
         state.frames += 1;
-        let spill = state.memory_bytes > self.inner.limits.soft;
+        let spill = state.staging_bytes > self.inner.limits.soft;
         drop(state);
         if spill {
             self.inner.wake.notify_one();
         }
+        self.inner.changed();
         Ok(sequence)
     }
 
@@ -236,6 +244,20 @@ impl RetainedSession {
             .unwrap_or_else(|e| e.into_inner())
             .capture_closed = true;
         self.inner.wake.notify_one();
+        self.inner.changed();
+    }
+
+    /// Independent processing cursor. Slow consumers read the encrypted backlog
+    /// without blocking capture, dropping frames, or pinning all PCM in RAM.
+    pub(super) fn reader(self: &Arc<Self>, origin: TranscriptOrigin) -> Reader {
+        self.inner.replays.fetch_add(1, Ordering::Relaxed);
+        Reader {
+            retained: self.clone(),
+            lane: lane_index(origin),
+            next_sequence: 0,
+            decoded: VecDeque::new(),
+            changes: self.inner.updates.subscribe(),
+        }
     }
 
     /// Downstream failures never release originals. Keep the reason visible even
@@ -374,6 +396,7 @@ impl RetainedSession {
         let mut state = self.inner.state.lock().unwrap_or_else(|e| e.into_inner());
         state.lanes = Default::default();
         state.memory_bytes = 0;
+        state.staging_bytes = 0;
         state.frames = 0;
         state.encrypted_frames = 0;
         state.encrypted_bytes = 0;
@@ -406,7 +429,7 @@ async fn spill(inner: Arc<Inner>) {
             if state.lanes.iter().all(|lane| lane.pending.is_empty()) {
                 state.force = false;
             }
-            if !state.force && state.memory_bytes <= inner.limits.soft {
+            if !state.force && !state.capture_closed && state.staging_bytes <= inner.limits.soft {
                 None
             } else {
                 let lane = (0..2)
@@ -432,14 +455,19 @@ async fn spill(inner: Arc<Inner>) {
             }
         };
         let Some((lane, frames)) = batch else {
-            inner.wake.notified().await;
+            tokio::select! {
+                _ = inner.wake.notified() => {},
+                _ = tokio::time::sleep(JOURNAL_INTERVAL) => {
+                    inner.state.lock().unwrap_or_else(|e| e.into_inner()).force = true;
+                }
+            }
             continue;
         };
         let result = async {
             let payload = encode(&frames, inner.origin)?;
             let mut metadata = METADATA.to_vec();
             metadata.push(lane as u8);
-            inner.store.store(&metadata, &payload).await
+            inner.store.append(&metadata, &payload).await
         }
         .await;
         match result {
@@ -448,11 +476,25 @@ async fn spill(inner: Arc<Inner>) {
                 for frame in &frames {
                     let retained = state.lanes[lane].pending.pop_front().unwrap();
                     debug_assert_eq!(retained.sequence, frame.sequence);
-                    state.memory_bytes -= retained.memory_bytes();
+                    state.staging_bytes -= retained.memory_bytes();
+                    state.lanes[lane].recent_samples += retained.samples.len();
+                    state.lanes[lane].recent.push_back(retained);
+                }
+                // A one-second hot cache prevents consumers close to real time
+                // from racing every journal commit into a decrypt/read cycle.
+                // Only already encrypted frames may leave this cache.
+                while state.lanes[lane].recent_samples
+                    > (SAMPLE_RATE as usize).min(inner.limits.soft / 4)
+                {
+                    let evicted = state.lanes[lane].recent.pop_front().unwrap();
+                    state.lanes[lane].recent_samples -= evicted.samples.len();
+                    state.lanes[lane].evicted_through = Some(evicted.sequence);
+                    state.memory_bytes -= evicted.memory_bytes();
                 }
                 state.lanes[lane].stored.push(Batch {
                     id,
                     frames: frames.len() as u64,
+                    last_sequence: frames.last().unwrap().sequence,
                 });
                 state.memory_bytes += INDEX_OVERHEAD;
                 state.encrypted_frames += frames.len() as u64;
@@ -568,6 +610,106 @@ struct ReplayLane {
     memory: VecDeque<Arc<Original>>,
     decoded: VecDeque<Arc<Original>>,
 }
+
+pub(super) struct Reader {
+    retained: Arc<RetainedSession>,
+    lane: usize,
+    next_sequence: u64,
+    decoded: VecDeque<Arc<Original>>,
+    changes: watch::Receiver<u64>,
+}
+impl Reader {
+    pub(super) async fn next(&mut self) -> Result<Option<AudioRecord>> {
+        loop {
+            if let Some(frame) = self.decoded.pop_front() {
+                if frame.sequence < self.next_sequence {
+                    continue;
+                }
+                self.next_sequence = frame.sequence + 1;
+                return Ok(Some(AudioRecord {
+                    lane: if self.lane == 0 {
+                        RecordingLane::Microphone
+                    } else {
+                        RecordingLane::Speaker
+                    },
+                    samples: frame.samples.to_vec(),
+                    captured_at: frame.captured_at,
+                }));
+            }
+            self.changes.borrow_and_update();
+            let (batch, memory, ended) = {
+                let state = self
+                    .retained
+                    .inner
+                    .state
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner());
+                ensure!(
+                    !state.closed,
+                    "Original retention closed before processing completed"
+                );
+                let lane = &state.lanes[self.lane];
+                let position = lane
+                    .stored
+                    .partition_point(|batch| batch.last_sequence < self.next_sequence);
+                let mut batch = lane.stored.get(position).cloned();
+                let recent = if lane
+                    .evicted_through
+                    .is_none_or(|sequence| sequence < self.next_sequence)
+                {
+                    let position = lane
+                        .recent
+                        .partition_point(|frame| frame.sequence < self.next_sequence);
+                    lane.recent.get(position).cloned()
+                } else {
+                    None
+                };
+                let position = lane
+                    .pending
+                    .partition_point(|frame| frame.sequence < self.next_sequence);
+                let memory = recent.or_else(|| {
+                    if batch.is_none() {
+                        lane.pending.get(position).cloned()
+                    } else {
+                        None
+                    }
+                });
+                if memory.is_some() {
+                    batch = None;
+                }
+                let uncommitted = lane
+                    .pending
+                    .back()
+                    .is_some_and(|frame| frame.sequence >= self.next_sequence);
+                (batch, memory, state.capture_closed && !uncommitted)
+            };
+            if let Some(batch) = batch {
+                let data = self.retained.inner.store.load(batch.id).await?;
+                ensure!(
+                    data.metadata.len() == METADATA.len() + 1
+                        && data.metadata[..METADATA.len()] == *METADATA
+                        && data.metadata[METADATA.len()] == self.lane as u8,
+                    "Retained original metadata is invalid"
+                );
+                self.decoded = decode(&data.bytes, self.retained.inner.origin, batch.frames)?;
+            } else if let Some(frame) = memory {
+                self.decoded.push_back(frame);
+            } else if ended {
+                return Ok(None);
+            } else {
+                self.changes
+                    .changed()
+                    .await
+                    .context("Original retention updates closed")?;
+            }
+        }
+    }
+}
+impl Drop for Reader {
+    fn drop(&mut self) {
+        self.retained.inner.replays.fetch_sub(1, Ordering::Release);
+    }
+}
 pub(super) struct Replay {
     store: Arc<SessionRetention>,
     origin: Instant,
@@ -657,6 +799,73 @@ mod tests {
             records.push(frame);
         }
         records
+    }
+
+    #[tokio::test]
+    async fn independent_slow_readers_finish_every_frame_across_encrypted_spill_and_eof() {
+        let (_directory, retained, origin) = session(Limits {
+            soft: 1024,
+            hard: 64 * 1024,
+            batch: 256,
+        })
+        .await;
+        let mut live = retained.reader(TranscriptOrigin::Microphone);
+        let mut delayed = retained.reader(TranscriptOrigin::Microphone);
+        let mut output = retained.reader(TranscriptOrigin::Speaker);
+        for index in 0..80 {
+            retained
+                .capture(
+                    &frame(index, origin + Duration::from_millis(index as u64)),
+                    TranscriptOrigin::Microphone,
+                )
+                .unwrap();
+            retained
+                .capture(
+                    &frame(-index, origin + Duration::from_millis(index as u64)),
+                    TranscriptOrigin::Speaker,
+                )
+                .unwrap();
+            assert_eq!(live.next().await.unwrap().unwrap().samples, vec![index; 16]);
+        }
+        retained.close_capture();
+        retained.flush().await.unwrap();
+        assert!(retained.status().encrypted_frames > 0);
+        for index in 0..80 {
+            assert_eq!(
+                delayed.next().await.unwrap().unwrap().samples,
+                vec![index; 16]
+            );
+            assert_eq!(
+                output.next().await.unwrap().unwrap().samples,
+                vec![-index; 16]
+            );
+        }
+        assert!(live.next().await.unwrap().is_none());
+        assert!(delayed.next().await.unwrap().is_none());
+        assert!(output.next().await.unwrap().is_none());
+        assert!(
+            retained.complete().await.is_err(),
+            "Reader ownership prevents premature key erasure"
+        );
+        drop((live, delayed, output));
+        retained.complete().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn recent_original_is_available_before_any_journal_commit() {
+        let (_directory, retained, origin) = session(Limits::default()).await;
+        let mut reader = retained.reader(TranscriptOrigin::Microphone);
+        retained
+            .capture(&frame(321, origin), TranscriptOrigin::Microphone)
+            .unwrap();
+        assert_eq!(retained.status().encrypted_frames, 0);
+        let received = tokio::time::timeout(Duration::ZERO, reader.next())
+            .await
+            .expect("Recent inference input never waits for disk")
+            .unwrap()
+            .unwrap();
+        assert_eq!(received.samples, vec![321; 16]);
+        assert_eq!(retained.status().encrypted_frames, 0);
     }
 
     #[tokio::test]

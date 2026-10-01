@@ -1,16 +1,15 @@
 //! Bounded local cascade: energy VAD → whisper.cpp → local LLM → Piper.
 //! This translates short segments; it is not a continuous speech-to-speech model.
-use std::{collections::VecDeque, io::Cursor, net::IpAddr, sync::Mutex, time::Duration};
+use std::{collections::VecDeque, io::Cursor, net::IpAddr, time::Duration};
 
 use anyhow::{Result, bail, ensure};
 use async_trait::async_trait;
 use futures_util::StreamExt;
 use reqwest::{Client, RequestBuilder, Url, multipart};
 use serde_json::{Value, json};
-use tokio::{
-    sync::{Notify, mpsc},
-    time::{Instant, timeout},
-};
+#[cfg(test)]
+use tokio::time::timeout;
+use tokio::{sync::mpsc, time::Instant};
 use tokio_util::sync::CancellationToken;
 
 use super::{ProviderEvent, SessionConfig, SpeechProvider, TranscriptMetadata};
@@ -21,10 +20,6 @@ const OUTPUT_RATE: usize = 24_000;
 const MAX_JSON_BYTES: usize = 256 * 1024;
 const MAX_WAV_BYTES: usize = 6 * 1024 * 1024;
 const MAX_TEXT_BYTES: usize = 16_384;
-const EVENT_TIMEOUT: Duration = Duration::from_secs(2);
-const LIVE_SEGMENT_CAPACITY: usize = 2;
-const OVERLOAD_WARNING_INTERVAL: Duration = Duration::from_secs(5);
-const OVERLOAD_WARNING: &str = "Local inference skipped outdated audio to keep up with live speech; choose a faster model or reduce active routes";
 
 pub struct LocalProvider {
     config: LocalProviderConfig,
@@ -122,7 +117,7 @@ impl LocalProvider {
     async fn process(
         &self,
         config: &SessionConfig,
-        mut segments: SegmentSource<'_>,
+        mut segments: mpsc::Receiver<Segment>,
         rendered: mpsc::Sender<Vec<i16>>,
         events: &mpsc::Sender<ProviderEvent>,
         finite: bool,
@@ -132,7 +127,7 @@ impl LocalProvider {
         } else {
             Some(crate::credentials::get(&self.whisper_api_key_env)?)
         };
-        while let Some(segment) = segments.recv(events).await {
+        while let Some(segment) = segments.recv().await {
             let wav = encode_wav(&segment.samples)?;
             let language = whisper_language(&config.source_language);
             let form = multipart::Form::new()
@@ -259,9 +254,9 @@ impl LocalProvider {
             let samples = tokio::task::spawn_blocking(move || decode_wav(&wav, max_duration_ms))
                 .await
                 .map_err(|_| anyhow::anyhow!("local WAV conversion worker failed"))??;
-            // The renderer preserves speech order. While it catches up, the
-            // independent live segmenter retains only recent input instead of
-            // closing the provider or accumulating unbounded audio.
+            // The renderer preserves speech order. While it catches up,
+            // translation backpressures its bounded inference queue and keeps
+            // pending originals in the session-owned retained source.
             rendered
                 .send(samples)
                 .await
@@ -311,37 +306,24 @@ impl SpeechProvider for LocalProvider {
             self.transcription_only || self.native_synthesis || config.output_transcription,
             "local translation without native audio requires output transcription"
         );
-        let segments = LiveSegments::new(&self.config);
         let (rendered_tx, rendered_rx) = mpsc::channel(2);
         tokio::select! {
             biased;
             _=cancel.cancelled()=>return Ok(()),
             result=emit(&events,ProviderEvent::Connected)=>result?,
         }
-        if self.transcription_only {
-            return tokio::select! {
-                biased;
-                _ = cancel.cancelled() => Ok(()),
-                result = async {
-                    tokio::try_join!(
-                        segment_audio(audio, &segments, &events, &self.config, true),
-                        self.process(&config, SegmentSource::Live(&segments), rendered_tx, &events, true),
-                    )?;
-                    // A final overload warning must not disappear behind the
-                    // live warning rate limit when the session is stopped.
-                    if segments.take_pending_warning() {
-                        emit(&events, ProviderEvent::Warning { message: OVERLOAD_WARNING.into() }).await?;
-                    }
-                    Ok(())
-                } => result,
-            };
-        }
+        let (segments_tx, segments_rx) = mpsc::channel(2);
         tokio::select! {
             biased;
-            _=cancel.cancelled()=>Ok(()),
-            result=segment_audio(audio,&segments,&events,&self.config,false)=>result,
-            result=self.process(&config,SegmentSource::Live(&segments),rendered_tx,&events,false)=>result,
-            result=render_audio(rendered_rx,&events)=>result,
+            _ = cancel.cancelled() => Ok(()),
+            result = async {
+                tokio::try_join!(
+                    segment_translation(audio, segments_tx, &self.config),
+                    self.process(&config, segments_rx, rendered_tx, &events, true),
+                    render_audio(rendered_rx, &events),
+                )?;
+                Ok(())
+            } => result,
         }
     }
 
@@ -366,7 +348,7 @@ impl SpeechProvider for LocalProvider {
                 emit(&events, ProviderEvent::Connected).await?;
                 tokio::try_join!(
                     segment_history(audio, segments_tx, &self.config),
-                    self.process(&config, SegmentSource::History(segments_rx), rendered_tx, &events, true),
+                    self.process(&config, segments_rx, rendered_tx, &events, true),
                 )?;
                 Ok(())
             } => result,
@@ -537,128 +519,6 @@ pub(super) struct Segment {
     pub end_sample: u64,
 }
 
-struct QueuedSegment {
-    segment: Segment,
-    queued_at: Instant,
-}
-
-#[derive(Default)]
-struct LiveSegmentState {
-    queued: VecDeque<QueuedSegment>,
-    warning_pending: bool,
-    last_warning: Option<Instant>,
-    closed: bool,
-}
-
-/// Only the live provider uses this lossy queue. Recording and history retain
-/// their independent originals. No lock here is used by an audio callback.
-struct LiveSegments {
-    state: Mutex<LiveSegmentState>,
-    ready: Notify,
-    max_age: Duration,
-}
-
-impl LiveSegments {
-    fn new(config: &LocalProviderConfig) -> Self {
-        Self {
-            state: Mutex::new(LiveSegmentState {
-                queued: VecDeque::with_capacity(LIVE_SEGMENT_CAPACITY),
-                ..Default::default()
-            }),
-            ready: Notify::new(),
-            max_age: Duration::from_millis(u64::from(config.segment_ms) * 2),
-        }
-    }
-
-    fn push(&self, segment: Segment, events: &mpsc::Sender<ProviderEvent>) {
-        {
-            let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
-            if state.queued.len() == LIVE_SEGMENT_CAPACITY {
-                state.queued.pop_front();
-                state.warning_pending = true;
-            }
-            state.queued.push_back(QueuedSegment {
-                segment,
-                queued_at: Instant::now(),
-            });
-        }
-        self.warn(events);
-        self.ready.notify_one();
-    }
-
-    fn close(&self) {
-        self.state.lock().unwrap_or_else(|e| e.into_inner()).closed = true;
-        self.ready.notify_one();
-    }
-
-    fn take_pending_warning(&self) -> bool {
-        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
-        std::mem::take(&mut state.warning_pending)
-    }
-
-    async fn recv(&self, events: &mpsc::Sender<ProviderEvent>) -> Option<Segment> {
-        loop {
-            // This queue has one consumer; notify_one retains a permit when
-            // the producer runs between the empty check and this await.
-            let ready = self.ready.notified();
-            let (segment, closed) = {
-                let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
-                let mut next = None;
-                while let Some(queued) = state.queued.pop_front() {
-                    // Once input has ended, drain already accepted speech;
-                    // there is no newer live audio to prefer over this tail.
-                    if !state.closed && queued.queued_at.elapsed() > self.max_age {
-                        state.warning_pending = true;
-                    } else {
-                        next = Some(queued.segment);
-                        break;
-                    }
-                }
-                (next, state.closed)
-            };
-            self.warn(events);
-            if let Some(segment) = segment {
-                return Some(segment);
-            }
-            if closed {
-                return None;
-            }
-            ready.await;
-        }
-    }
-
-    fn warn(&self, events: &mpsc::Sender<ProviderEvent>) {
-        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
-        if state.warning_pending
-            && state
-                .last_warning
-                .is_none_or(|last| last.elapsed() >= OVERLOAD_WARNING_INTERVAL)
-            && events
-                .try_send(ProviderEvent::Warning {
-                    message: OVERLOAD_WARNING.into(),
-                })
-                .is_ok()
-        {
-            state.last_warning = Some(Instant::now());
-            state.warning_pending = false;
-        }
-    }
-}
-
-enum SegmentSource<'a> {
-    Live(&'a LiveSegments),
-    History(mpsc::Receiver<Segment>),
-}
-
-impl SegmentSource<'_> {
-    async fn recv(&mut self, events: &mpsc::Sender<ProviderEvent>) -> Option<Segment> {
-        match self {
-            Self::Live(segments) => segments.recv(events).await,
-            Self::History(segments) => segments.recv().await,
-        }
-    }
-}
-
 struct Segmenter {
     maximum: usize,
     silence: usize,
@@ -728,12 +588,21 @@ impl Segmenter {
         }
     }
 }
-async fn segment_audio(
+/// Transcription and translation backpressure the retained input producer.
+/// EOF flushes the partial segment and closes the inference queue without
+/// discarding accepted speech when inference falls behind.
+async fn segment_translation(
     mut audio: mpsc::Receiver<Vec<i16>>,
-    segments: &LiveSegments,
-    events: &mpsc::Sender<ProviderEvent>,
+    segments: mpsc::Sender<Segment>,
     config: &LocalProviderConfig,
-    transcription_only: bool,
+) -> Result<()> {
+    segment_translation_borrowed(&mut audio, segments, config).await
+}
+
+pub(super) async fn segment_translation_borrowed(
+    audio: &mut mpsc::Receiver<Vec<i16>>,
+    segments: mpsc::Sender<Segment>,
+    config: &LocalProviderConfig,
 ) -> Result<()> {
     let mut segmenter = Segmenter::new(config);
     let silence = Duration::from_millis(u64::from(config.silence_ms));
@@ -742,8 +611,9 @@ async fn segment_audio(
     loop {
         let samples = tokio::select! {
             samples = audio.recv() => samples,
-            _ = &mut idle, if transcription_only && !segmenter.active.is_empty() => {
-                segments.push(segmenter.finish(), events);
+            _ = &mut idle, if !segmenter.active.is_empty() => {
+                segments.send(segmenter.finish()).await
+                    .map_err(|_| anyhow::anyhow!("local inference consumer closed"))?;
                 continue;
             }
         };
@@ -758,21 +628,23 @@ async fn segment_audio(
             idle.as_mut().reset(Instant::now() + silence);
         }
         for segment in segmenter.push(&samples) {
-            segments.push(segment, events);
+            segments
+                .send(segment)
+                .await
+                .map_err(|_| anyhow::anyhow!("local inference consumer closed"))?;
         }
     }
-    if transcription_only {
-        if !segmenter.active.is_empty() {
-            segments.push(segmenter.finish(), events);
-        }
-        segments.close();
-        return Ok(());
+    if !segmenter.active.is_empty() {
+        segments
+            .send(segmenter.finish())
+            .await
+            .map_err(|_| anyhow::anyhow!("local inference consumer closed"))?;
     }
-    bail!("audio source closed unexpectedly")
+    Ok(())
 }
 
-/// History has a finite producer: wait for inference capacity instead of the
-/// live path's overload failure, then flush the final unfinished utterance.
+/// Historical input has no live idle boundary. Preserve every accepted
+/// segment and flush the final unfinished utterance at EOF.
 pub(super) async fn segment_history(
     mut audio: mpsc::Receiver<Vec<i16>>,
     segments: mpsc::Sender<Segment>,
@@ -843,12 +715,12 @@ async fn render_audio(
         }
         emit(events, ProviderEvent::TurnComplete).await?;
     }
-    bail!("local speech renderer closed unexpectedly")
+    Ok(())
 }
 async fn emit(events: &mpsc::Sender<ProviderEvent>, event: ProviderEvent) -> Result<()> {
-    timeout(EVENT_TIMEOUT, events.send(event))
+    events
+        .send(event)
         .await
-        .map_err(|_| anyhow::anyhow!("local output consumer is too slow"))?
         .map_err(|_| anyhow::anyhow!("local output consumer closed"))
 }
 
@@ -861,7 +733,7 @@ mod tests {
         http::{StatusCode, header},
         routing::post,
     };
-    use tokio::net::TcpListener;
+    use tokio::{net::TcpListener, sync::Notify};
 
     fn session() -> SessionConfig {
         SessionConfig {
@@ -909,71 +781,54 @@ mod tests {
         assert_eq!(segments[1].end_sample, 16000);
     }
 
-    #[tokio::test]
-    async fn saturated_live_segments_keep_newest_audio_and_rate_limit_warnings() {
-        let segments = LiveSegments::new(&options());
-        let mut segmenter = Segmenter::new(&options());
-        let (events, mut received) = mpsc::channel(8);
-        for _ in 0..20 {
-            for segment in segmenter.push(&vec![3000; 8000]) {
-                segments.push(segment, &events);
-            }
-        }
-        assert_eq!(segments.state.lock().unwrap().queued.len(), 2);
-        assert_eq!(
-            segments.recv(&events).await.unwrap().start_sample,
-            18 * 8000
-        );
-        assert_eq!(
-            segments.recv(&events).await.unwrap().start_sample,
-            19 * 8000
-        );
-        assert!(matches!(
-            received.try_recv(),
-            Ok(ProviderEvent::Warning { .. })
-        ));
-        assert!(received.try_recv().is_err());
-    }
-
     #[tokio::test(start_paused = true)]
-    async fn live_segments_expire_during_silence_and_resume_with_fresh_audio() {
-        let segments = LiveSegments::new(&options());
-        let mut segmenter = Segmenter::new(&options());
-        let (events, mut received) = mpsc::channel(1);
-        segments.push(segmenter.push(&vec![3000; 8000]).remove(0), &events);
-        tokio::time::advance(segments.max_age + Duration::from_millis(1)).await;
-        let next = segments.recv(&events);
-        tokio::pin!(next);
-        assert!(futures_util::poll!(next.as_mut()).is_pending());
-        assert!(matches!(
-            received.try_recv(),
-            Ok(ProviderEvent::Warning { .. })
-        ));
-        segments.push(segmenter.push(&vec![3000; 8000]).remove(0), &events);
-        assert_eq!(next.await.unwrap().start_sample, 8000);
-    }
+    async fn retained_segments_flush_idle_and_eof_without_dropping_a_slow_backlog() {
+        let (audio, input) = mpsc::channel(1);
+        let (segments, mut output) = mpsc::channel(2);
+        let worker =
+            tokio::spawn(async move { segment_translation(input, segments, &options()).await });
+        audio.send(vec![5000; 1000]).await.unwrap();
+        let first = output.recv().await.unwrap();
+        assert_eq!(first.samples, vec![5000; 1000]);
+        assert_eq!((first.start_sample, first.end_sample), (0, 1000));
+        assert!(
+            !worker.is_finished(),
+            "idle flushing must keep the source open"
+        );
 
-    #[tokio::test]
-    async fn full_warning_channel_cannot_block_live_audio() {
-        let segments = LiveSegments::new(&options());
-        let mut segmenter = Segmenter::new(&options());
-        let (events, _received) = mpsc::channel(1);
-        events.try_send(ProviderEvent::Connected).unwrap();
-        for _ in 0..20 {
-            segments.push(segmenter.push(&vec![3000; 8000]).remove(0), &events);
+        let producer = tokio::spawn(async move {
+            for _ in 0..40 {
+                audio.send(vec![5000; INPUT_RATE]).await.unwrap();
+            }
+            audio.send(vec![5000; 73]).await.unwrap();
+        });
+        tokio::task::yield_now().await;
+        tokio::time::advance(Duration::from_secs(60)).await;
+        assert!(
+            !producer.is_finished(),
+            "inference capacity must backpressure input"
+        );
+        assert!(!worker.is_finished());
+        let mut end = first.end_sample;
+        let mut count = 1;
+        while let Some(segment) = output.recv().await {
+            assert_eq!(segment.start_sample, end);
+            assert_eq!(
+                segment.end_sample - segment.start_sample,
+                segment.samples.len() as u64
+            );
+            assert!(segment.samples.iter().all(|sample| *sample == 5000));
+            end = segment.end_sample;
+            count += 1;
         }
-        assert_eq!(
-            segments.recv(&events).await.unwrap().start_sample,
-            18 * 8000
-        );
-        assert_eq!(
-            segments.recv(&events).await.unwrap().start_sample,
-            19 * 8000
-        );
+        producer.await.unwrap();
+        worker.await.unwrap().unwrap();
+        assert_eq!(end, 1000 + 40 * INPUT_RATE as u64 + 73);
+        assert_eq!(count, 82);
     }
 
     #[tokio::test]
-    async fn slow_live_inference_recovers_with_newest_segments_and_continues() {
+    async fn slow_translation_backpressures_and_keeps_every_segment_in_order() {
         use std::sync::{
             Arc,
             atomic::{AtomicUsize, Ordering},
@@ -1039,19 +894,21 @@ mod tests {
             assert_eq!(events_rx.recv().await, Some(ProviderEvent::Connected));
             audio_tx.send(vec![3000; 8000]).await.unwrap();
             entered.notified().await;
-            for _ in 0..8 {
-                audio_tx.send(vec![3000; 8000]).await.unwrap();
-            }
-            // Capacity becomes available only once the final frame is taken.
-            drop(audio_tx.reserve().await.unwrap());
-            assert!(matches!(
-                events_rx.recv().await,
-                Some(ProviderEvent::Warning { .. })
-            ));
+            let producer = tokio::spawn(async move {
+                for _ in 0..8 {
+                    audio_tx.send(vec![3000; 8000]).await.unwrap();
+                }
+                audio_tx
+            });
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            assert!(
+                !producer.is_finished(),
+                "slow inference must backpressure retained audio"
+            );
             release.notify_one();
             let mut offsets = Vec::new();
             let mut completed = 0;
-            while completed != 3 {
+            while completed != 9 {
                 match events_rx.recv().await.unwrap() {
                     ProviderEvent::Transcript {
                         input: true,
@@ -1062,14 +919,15 @@ mod tests {
                     _ => {}
                 }
             }
-            assert_eq!(offsets, vec![0, 3500, 4000]);
-            assert_eq!(calls.load(Ordering::SeqCst), 3);
+            assert_eq!(offsets, (0..9).map(|index| index * 500).collect::<Vec<_>>());
+            assert_eq!(calls.load(Ordering::SeqCst), 9);
             assert!(!worker.is_finished());
-            // A later utterance still works after overload and silence.
+            let audio_tx = producer.await.unwrap();
+            // A later utterance still works after the inference backlog drains.
             audio_tx.send(vec![0; 16000]).await.unwrap();
-            audio_tx.send(vec![3000; 8000]).await.unwrap();
+            audio_tx.send(vec![3000; 6400]).await.unwrap();
             while events_rx.recv().await != Some(ProviderEvent::TurnComplete) {}
-            assert_eq!(calls.load(Ordering::SeqCst), 4);
+            assert_eq!(calls.load(Ordering::SeqCst), 10);
         })
         .await
         .unwrap();
@@ -1144,13 +1002,7 @@ mod tests {
         let (events, _output) = mpsc::channel(16);
         let worker = tokio::spawn(async move {
             provider
-                .process(
-                    &session(),
-                    SegmentSource::History(source),
-                    rendered,
-                    &events,
-                    true,
-                )
+                .process(&session(), source, rendered, &events, true)
                 .await
         });
         timeout(Duration::from_secs(3), entered.notified())
@@ -1372,6 +1224,73 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn translation_eof_drains_all_queued_segments_and_rendered_tail() {
+        let app = Router::new()
+            .route(
+                "/inference",
+                post(|| async {
+                    tokio::time::sleep(Duration::from_millis(15)).await;
+                    Json(json!({"text":"Original segment."}))
+                }),
+            )
+            .route(
+                "/api/chat",
+                post(|| async {
+                    Json(json!({"done":true,"message":{"content":"Translated segment."}}))
+                }),
+            )
+            .route(
+                "/synthesize",
+                post(|| async {
+                    (
+                        [(header::CONTENT_TYPE, "audio/wav")],
+                        encode_wav(&vec![4000; 1600]).unwrap(),
+                    )
+                }),
+            );
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let provider = LocalProvider::new(LocalProviderConfig {
+            whisper_endpoint: format!("{base}/inference"),
+            ollama_endpoint: format!("{base}/api/chat"),
+            piper_endpoint: format!("{base}/synthesize"),
+            ..options()
+        })
+        .unwrap();
+        let (audio_tx, audio_rx) = mpsc::channel(8);
+        for _ in 0..4 {
+            audio_tx.send(vec![5000; 8000]).await.unwrap();
+        }
+        audio_tx.send(vec![5000; 100]).await.unwrap();
+        drop(audio_tx);
+        let (events, mut received) = mpsc::channel(64);
+        timeout(
+            Duration::from_secs(3),
+            provider.run(session(), audio_rx, events, CancellationToken::new()),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let mut originals = 0;
+        let mut translations = 0;
+        let mut completed = 0;
+        let mut pcm = 0;
+        while let Some(event) = received.recv().await {
+            match event {
+                ProviderEvent::Transcript { input: true, .. } => originals += 1,
+                ProviderEvent::Transcript { input: false, .. } => translations += 1,
+                ProviderEvent::TurnComplete => completed += 1,
+                ProviderEvent::Audio { samples, .. } => pcm += samples.len(),
+                ProviderEvent::Connected => (),
+                unexpected => panic!("unexpected event while draining translation: {unexpected:?}"),
+            }
+        }
+        assert_eq!((originals, translations, completed, pcm), (5, 5, 5, 12_000));
+        server.abort();
+    }
+
+    #[tokio::test]
     async fn transcription_only_calls_whisper_without_translation_or_synthesis() {
         use std::sync::{
             Arc,
@@ -1510,7 +1429,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn transcription_silent_eof_succeeds_but_translation_eof_is_error() {
+    async fn transcription_and_translation_silent_eof_succeed_without_inference() {
         for transcription_only in [true, false] {
             let config = LocalProviderConfig {
                 whisper_endpoint: "http://127.0.0.1:1/inference".into(),
@@ -1531,26 +1450,10 @@ mod tests {
             let result = provider
                 .run(session(), input, events, CancellationToken::new())
                 .await;
-            assert_eq!(result.is_ok(), transcription_only);
+            result.unwrap();
             assert_eq!(output.recv().await, Some(ProviderEvent::Connected));
             assert_eq!(output.recv().await, None);
         }
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn transcription_eof_drains_accepted_segments_even_if_inference_was_slow() {
-        let segments = LiveSegments::new(&options());
-        let mut segmenter = Segmenter::new(&options());
-        let (events, mut received) = mpsc::channel(2);
-        for segment in segmenter.push(&vec![4000; 16000]) {
-            segments.push(segment, &events);
-        }
-        segments.close();
-        tokio::time::advance(segments.max_age + Duration::from_secs(1)).await;
-        assert_eq!(segments.recv(&events).await.unwrap().start_sample, 0);
-        assert_eq!(segments.recv(&events).await.unwrap().start_sample, 8000);
-        assert!(segments.recv(&events).await.is_none());
-        assert!(received.try_recv().is_err());
     }
 
     #[tokio::test]
@@ -1781,5 +1684,12 @@ mod tests {
                 .is_err()
         );
         assert_eq!(event_rx.recv().await, None);
+    }
+    #[tokio::test(start_paused = true)]
+    async fn output_delivery_waits_for_capacity_and_allows_force_cancellation() {
+        super::super::assert_event_backpressure(|events, event| async move {
+            emit(&events, event).await
+        })
+        .await;
     }
 }

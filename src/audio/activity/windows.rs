@@ -41,6 +41,7 @@ struct RouteObservation {
     pair: Pair,
     active: bool,
     microphone_default: bool,
+    speaker_default: bool,
     callback_epoch: u64,
 }
 
@@ -64,7 +65,7 @@ pub(super) async fn run(
     let slot = match WORKER_SLOT.try_acquire() {
         Ok(slot) => slot,
         Err(_) => {
-            publish(&state, None, None, Some("waiting for the previous Windows audio inspection to finish; routing remains suspended".into()), false, false);
+            publish(&state, None, None, Some("waiting for the previous Windows audio inspection to finish; routing remains suspended".into()), false, false, false);
             tokio::select! {
                 _ = cancel.cancelled() => return,
                 _ = state.closed() => return,
@@ -90,6 +91,7 @@ pub(super) async fn run(
             None,
             None,
             Some("could not start the Windows audio activity monitor".into()),
+            false,
             false,
             false,
         );
@@ -121,7 +123,7 @@ pub(super) async fn run(
             }
             observation = observations.recv() => {
                 let Some(observation) = observation else {
-                    publish(&state, None, None, Some("the Windows audio activity monitor stopped; routing remains suspended".into()), false, false);
+                    publish(&state, None, None, Some("the Windows audio activity monitor stopped; routing remains suspended".into()), false, false, false);
                     break;
                 };
                 if observation.microphone_selection != *mic_playback.borrow_and_update()
@@ -131,18 +133,19 @@ pub(super) async fn run(
                 }
                 last_observation = observation.finished;
                 if last_observation.elapsed() > INSPECTION_TIMEOUT {
-                    publish(&state, None, None, Some("Windows audio activity inspection timed out; routing remains suspended".into()), false, false);
+                    publish(&state, None, None, Some("Windows audio activity inspection timed out; routing remains suspended".into()), false, false, false);
                     continue;
                 }
                 let microphone_changed = changed_mapping(&last_microphone, &observation.microphone);
                 let speaker_changed = changed_mapping(&last_speaker, &observation.speaker);
-                publish(&state, Some(&observation.microphone), Some(&observation.speaker), observation.error, microphone_changed, speaker_changed);
+                let speaker_selection_changed = changed_speaker_selection(&last_speaker, &observation.speaker);
+                publish(&state, Some(&observation.microphone), Some(&observation.speaker), observation.error, microphone_changed, speaker_changed, speaker_selection_changed);
                 last_microphone = observation.microphone.ok();
                 last_speaker = observation.speaker.ok();
             }
             _ = watchdog.tick() => {
                 if last_observation.elapsed() > INSPECTION_TIMEOUT {
-                    publish(&state, None, None, Some("Windows audio activity inspection timed out; routing remains suspended".into()), false, false);
+                    publish(&state, None, None, Some("Windows audio activity inspection timed out; routing remains suspended".into()), false, false, false);
                 }
             }
         }
@@ -162,8 +165,12 @@ pub(super) async fn run(
         if current.speaker {
             current.speaker_epoch = current.speaker_epoch.wrapping_add(1);
         }
+        if current.speaker_selected {
+            current.speaker_selection_epoch = current.speaker_selection_epoch.wrapping_add(1);
+        }
         current.microphone = false;
         current.speaker = false;
+        current.speaker_selected = false;
     });
 }
 
@@ -184,6 +191,23 @@ fn changed_mapping(
     })
 }
 
+fn changed_speaker_selection(
+    previous: &Option<RouteObservation>,
+    current: &Result<RouteObservation, String>,
+) -> bool {
+    current.as_ref().is_ok_and(|current| {
+        previous.as_ref().is_none_or(|previous| {
+            previous.pair != current.pair
+                || policy::client_epoch_changed(
+                    previous.speaker_default,
+                    current.speaker_default,
+                    previous.callback_epoch,
+                    current.callback_epoch,
+                )
+        })
+    })
+}
+
 fn publish(
     state: &watch::Sender<EndpointUse>,
     microphone: Option<&Result<RouteObservation, String>>,
@@ -191,11 +215,18 @@ fn publish(
     error: Option<String>,
     microphone_changed: bool,
     speaker_changed: bool,
+    speaker_selection_changed: bool,
 ) {
     let mic_active = error.is_none()
         && microphone.is_some_and(|result| result.as_ref().is_ok_and(|route| route.active));
     let speaker_active = error.is_none()
         && speaker.is_some_and(|result| result.as_ref().is_ok_and(|route| route.active));
+    let speaker_selected = error.is_none()
+        && speaker.is_some_and(|result| {
+            result
+                .as_ref()
+                .is_ok_and(|route| route.active || route.speaker_default)
+        });
     let mic_error = microphone.and_then(|value| value.as_ref().err()).cloned();
     let speaker_error = speaker.and_then(|value| value.as_ref().err()).cloned();
     state.send_if_modified(|current| {
@@ -208,18 +239,26 @@ fn publish(
             || common
             || current.speaker != speaker_active
             || current.speaker_error != speaker_error;
+        let speaker_selection_changed = speaker_selection_changed
+            || common
+            || current.speaker_selected != speaker_selected
+            || current.speaker_error != speaker_error;
         if mic_changed {
             current.microphone_epoch = current.microphone_epoch.wrapping_add(1);
         }
         if speaker_changed {
             current.speaker_epoch = current.speaker_epoch.wrapping_add(1);
         }
+        if speaker_selection_changed {
+            current.speaker_selection_epoch = current.speaker_selection_epoch.wrapping_add(1);
+        }
         current.microphone = mic_active;
         current.speaker = speaker_active;
+        current.speaker_selected = speaker_selected;
         current.microphone_error = mic_error;
         current.speaker_error = speaker_error;
         current.error = error;
-        mic_changed || speaker_changed
+        mic_changed || speaker_changed || speaker_selection_changed
     });
 }
 
@@ -230,7 +269,9 @@ fn invalidate(state: &watch::Sender<EndpointUse>, microphone: bool) {
             current.microphone_epoch = current.microphone_epoch.wrapping_add(1);
         } else {
             current.speaker = false;
+            current.speaker_selected = false;
             current.speaker_epoch = current.speaker_epoch.wrapping_add(1);
+            current.speaker_selection_epoch = current.speaker_selection_epoch.wrapping_add(1);
         }
     });
 }
@@ -423,26 +464,33 @@ fn inspect_route(
     let result = pair
         .and_then(|pair| observer.inspect(enumerator, pair))
         .map(|mut route| {
+            // Windows permits separate defaults for calls and other apps. An
+            // unavailable role grants no authorization; external sessions are
+            // still inspected above. Speaker selection does not start capture.
+            let direction = if microphone {
+                wasapi::Direction::Capture
+            } else {
+                wasapi::Direction::Render
+            };
+            let defaults: Vec<String> = [
+                wasapi::Role::Console,
+                wasapi::Role::Multimedia,
+                wasapi::Role::Communications,
+            ]
+            .iter()
+            .filter_map(|role| {
+                enumerator
+                    .get_default_device_for_role(&direction, role)
+                    .ok()
+            })
+            .filter_map(|device| device.get_id().ok())
+            .collect();
             if microphone {
-                // Windows permits separate defaults for calls and other apps. An
-                // unavailable role grants no authorization; external sessions are
-                // still inspected above. Never query default render devices here.
-                let defaults: Vec<String> = [
-                    wasapi::Role::Console,
-                    wasapi::Role::Multimedia,
-                    wasapi::Role::Communications,
-                ]
-                .iter()
-                .filter_map(|role| {
-                    enumerator
-                        .get_default_device_for_role(&wasapi::Direction::Capture, role)
-                        .ok()
-                })
-                .filter_map(|device| device.get_id().ok())
-                .collect();
                 route.microphone_default =
                     policy::microphone_requested(&route.pair, &defaults, false);
                 route.active |= route.microphone_default;
+            } else {
+                route.speaker_default = policy::speaker_selected(&route.pair, &defaults, false);
             }
             route
         });
@@ -574,6 +622,7 @@ impl Observer {
                 .values()
                 .any(|session| session.activity.active()),
             microphone_default: false,
+            speaker_default: false,
             callback_epoch: self.signal.epoch(),
         })
     }

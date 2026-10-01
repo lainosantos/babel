@@ -657,12 +657,16 @@
   "routing.speaker_audio_short": "Speaker audio",
   "routing.after_output_translation": "After output translation",
   "routing.played_audio": "Played audio",
-  "retention.title": "Session files need recovery",
-  "retention.hint": "Original audio is still available to retry unfinished recording or transcription. Keep Babel open until recovery finishes; closing it makes pending audio unrecoverable.",
+  "retention.title": "Session work needs recovery",
+  "retention.hint": "Original audio is retained to retry unfinished processing. An interrupted translation may replay earlier speech; completed translation routes are not repeated. Keep Babel open until recovery finishes; closing it makes pending audio unrecoverable.",
   "retention.read_error": "Could not check pending sessions: {error}",
   "retention.invalid_response": "Invalid pending-session response",
   "retention.recover": "Recover session",
   "retention.recovering": "Recovering…",
   "retention.available": "Retained audio: {size} MiB",
-  "retention.recovered": "Session recovered: {name}"
+  "retention.recovered": "Session recovered: {name}",
+  "session.finalizing": "Finalizing session",
+  "session.finalizing_title": "Finalizing sessions",
+  "session.finalizing_hint": "Pending work continues in the background. Keep Babel open until it finishes. You can start another session.",
+  "session.capture_stopped": "Session capture stopped. Any pending work continues in the background."
 }

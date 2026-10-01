@@ -32,6 +32,11 @@
     </header>
     <main class="workspace-content" id="main-content">
       <div class="workspace-notices"><div id="notice" class="notice" role="status" hidden=""></div><div id="error" class="notice error" role="alert" hidden=""></div><div id="session-error" class="notice error" role="alert" hidden=""></div><div id="routing-error" class="notice error" role="alert" hidden=""></div><div id="config-conflict" class="notice config-conflict" role="alert" hidden=""><p data-i18n="ui.settings_were_changed_from_the_tray_or_another_dashboard_review_the_saved_v">Settings were changed from the tray or another dashboard. Review the saved version before continuing. Reloading discards unsaved changes on this screen.</p><button id="reload-config" type="button" class="button secondary" data-i18n="ui.reload_saved_settings">Reload saved settings</button></div></div>
+      <section id="finalizing-card" class="retention-card" aria-labelledby="finalizing-title" hidden>
+        <h2 id="finalizing-title" data-i18n="session.finalizing_title">Finalizing sessions</h2>
+        <p class="field-hint" data-i18n="session.finalizing_hint">Pending work continues in the background. Keep Babel open until it finishes. You can start another session.</p>
+        <ul id="finalizing-sessions" class="retention-sessions"></ul>
+      </section>
       <section id="retention-card" class="retention-card" aria-labelledby="retention-title" hidden>
         <h2 id="retention-title" data-i18n="retention.title">Session files need recovery</h2>
         <p class="field-hint" data-i18n="retention.hint">Original audio is still available to retry unfinished recording or transcription. Keep Babel open until recovery finishes; closing it makes pending audio unrecoverable.</p>
@@ -76,7 +81,6 @@
 
                 <label><span data-i18n="ui.capture_queue_ms">Capture queue (ms)</span><input id="audio-capture_queue_ms" data-section="audio" data-field="capture_queue_ms" type="number" min="100" max="1000" step="10"></label>
                 <label><span data-i18n="ui.playback_queue_ms">Playback queue (ms)</span><input id="audio-playback_queue_ms" data-section="audio" data-field="playback_queue_ms" type="number" min="100" max="5000" step="10"></label>
-                <label><span data-i18n="ui.maximum_capture_age_ms">Maximum capture age (ms)</span><input id="audio-max_capture_age_ms" data-section="audio" data-field="max_capture_age_ms" type="number" min="100" max="1000" step="10"></label>
                 <label><span data-i18n="ui.device_latency_ms">Device latency (ms)</span><input id="audio-device_latency_ms" data-section="audio" data-field="device_latency_ms" type="number" min="5" max="200" step="1"></label>
               </div>
               <p class="field-hint" data-i18n="ui.smaller_queues_reduce_accumulated_audio_if_playback_underruns_occur_increas">Smaller queues reduce accumulated audio. If playback underruns occur, increase the queue or device latency. The network and model also affect delay.</p>

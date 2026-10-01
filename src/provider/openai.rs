@@ -27,12 +27,12 @@ use super::{ProviderEvent, SessionConfig, SpeechProvider, TranscriptMetadata};
 use crate::audio::resample::Resampler;
 
 mod transcription;
+mod translation;
 
 const TRANSLATION_MODEL: &str = "gpt-realtime-translate";
 const MAX_MESSAGE_BYTES: usize = 512 * 1024;
 const MAX_PCM_BYTES: usize = 4 * 48_000;
 const IO_TIMEOUT: Duration = Duration::from_millis(500);
-const EVENT_TIMEOUT: Duration = Duration::from_secs(2);
 type Socket = WebSocketStream<MaybeTlsStream<TcpStream>>;
 type SessionResult<T> = std::result::Result<T, Failure>;
 
@@ -207,10 +207,12 @@ fn setup(config: &SessionConfig, transcription_model: &str) -> Value {
         config.source_language, config.target_language, config.prompt
     );
     // Native Realtime output uses the model default, never a custom voice ID.
+    // Client VAD creates one explicit response per bounded utterance, including
+    // the final partial utterance on EOF, without interrupting earlier output.
     json!({"type":"session.update", "session":{
         "type":"realtime", "model":config.model, "output_modalities":["audio"], "instructions":instructions,
         "audio":{"input":{"format":{"type":"audio/pcm","rate":24000}, "transcription":transcription,
-            "turn_detection":{"type":"server_vad","silence_duration_ms":config.vad_silence_ms,"prefix_padding_ms":100,"create_response":true,"interrupt_response":false}},
+            "turn_detection":null},
             "output":{"format":{"type":"audio/pcm","rate":24000}}}
     }})
 }
@@ -304,7 +306,7 @@ impl OpenAiProvider {
                 _ = cancel.cancelled() => return Ok(()),
                 result = self.connection(config,key,&endpoint,&mut audio,&events) => match result { Ok(()) => return Ok(()), Err(failure) => failure },
             };
-            if !failure.retryable || (self.transcription_only && audio.is_closed()) {
+            if !failure.retryable || audio.is_closed() {
                 bail!("{}", failure.message);
             }
             if started.elapsed() >= Duration::from_secs(60) {
@@ -327,10 +329,12 @@ impl OpenAiProvider {
                 _ = cancel.cancelled() => return Ok(()),
                 _ = tokio::time::sleep(Duration::from_millis((250u64 << (attempts-1).min(5)).min(5000))) => (),
             }
-            if self.transcription_only && audio.is_closed() {
-                bail!("OpenAI ASR input ended before reconnection completed");
+            if audio.is_closed() {
+                bail!("OpenAI input ended before reconnection completed");
             }
-            discard_audio(&mut audio);
+            if self.transcription_only {
+                discard_audio(&mut audio);
+            }
         }
     }
 
@@ -410,7 +414,7 @@ impl OpenAiProvider {
         })
         .await
         .map_err(|_| Failure::retry("OpenAI session setup timed out"))??;
-        if !history && !(self.transcription_only && audio.is_closed()) {
+        if !history && self.transcription_only && !audio.is_closed() {
             discard_audio(audio);
         }
         emit(events, ProviderEvent::Connected).await?;
@@ -420,12 +424,7 @@ impl OpenAiProvider {
         if self.transcription_only {
             return transcription::run_live(socket, audio, events, config.vad_silence_ms).await;
         }
-        let (writer, reader) = socket.split();
-        let (control_tx, control_rx) = mpsc::channel(8);
-        tokio::select! {
-            result = send_audio(writer,audio,control_rx,is_translation(&config.model)) => result,
-            result = receive_events(reader,events,control_tx,config,false) => result,
-        }
+        translation::run(socket, audio, events, config).await
     }
 }
 
@@ -460,9 +459,9 @@ async fn io_deadline<T>(
         .map_err(socket_failure)
 }
 async fn emit(events: &mpsc::Sender<ProviderEvent>, event: ProviderEvent) -> SessionResult<()> {
-    timeout(EVENT_TIMEOUT, events.send(event))
+    events
+        .send(event)
         .await
-        .map_err(|_| Failure::fatal("OpenAI output consumer is too slow"))?
         .map_err(|_| Failure::fatal("OpenAI output consumer closed"))
 }
 fn parse_json(bytes: &[u8]) -> SessionResult<Value> {
@@ -504,88 +503,6 @@ async fn receive_setup(socket: &mut Socket) -> SessionResult<Value> {
             Message::Pong(_) => (),
             Message::Close(_) => return Err(Failure::retry("OpenAI closed during setup")),
             Message::Frame(_) => return Err(Failure::fatal("invalid raw OpenAI frame")),
-        }
-    }
-}
-
-async fn send_audio(
-    mut writer: SplitSink<Socket, Message>,
-    audio: &mut mpsc::Receiver<Vec<i16>>,
-    mut control: mpsc::Receiver<Message>,
-    translation: bool,
-) -> SessionResult<()> {
-    let mut heartbeat = tokio::time::interval(Duration::from_secs(15));
-    heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-    heartbeat.tick().await;
-    let mut resampler = Resampler::new(16000, 24000);
-    let mut input = Vec::with_capacity(16000);
-    let mut output = Vec::with_capacity(24000);
-    let mut bytes = Vec::with_capacity(48000);
-    loop {
-        tokio::select! {
-            message=control.recv()=>{
-                let message=message.ok_or_else(||Failure::retry("OpenAI receive loop stopped"))?;
-                io_deadline(writer.send(message)).await?;
-            }
-            samples=audio.recv()=>{
-                let samples=samples.ok_or_else(||Failure::fatal("audio source closed unexpectedly"))?;
-                if samples.len()>16000 { return Err(Failure::fatal("input audio chunk exceeds one second")); }
-                if samples.is_empty() { continue; }
-                input.clear(); output.clear(); bytes.clear();
-                input.extend(samples.iter().map(|sample|f32::from(*sample)/32768.0));
-                resampler.process(&input,&mut output);
-                bytes.extend(output.iter().flat_map(|sample| ((sample.clamp(-1.0,1.0)*32767.0).round() as i16).to_le_bytes()));
-                if bytes.is_empty() {continue;}
-                let kind=if translation {"session.input_audio_buffer.append"} else {"input_audio_buffer.append"};
-                io_deadline(writer.send(Message::Text(json!({"type":kind,"audio":STANDARD.encode(&bytes)}).to_string().into()))).await?;
-            }
-            _=heartbeat.tick()=>{io_deadline(writer.send(Message::Ping(Vec::new().into()))).await?;}
-        }
-    }
-}
-
-async fn receive_events(
-    mut reader: SplitStream<Socket>,
-    events: &mpsc::Sender<ProviderEvent>,
-    control: mpsc::Sender<Message>,
-    config: &SessionConfig,
-    transcription_only: bool,
-) -> SessionResult<()> {
-    let mut utterances: HashMap<String, TranscriptMetadata> = HashMap::new();
-    let mut transcription = transcription::FinalTranscripts::default();
-    loop {
-        let message = timeout(Duration::from_secs(45), reader.next())
-            .await
-            .map_err(|_| Failure::retry("OpenAI connection stopped responding"))?
-            .ok_or_else(|| Failure::retry("OpenAI WebSocket closed unexpectedly"))?
-            .map_err(socket_failure)?;
-        let value = match message {
-            Message::Text(text) => parse_json(text.as_bytes())?,
-            Message::Binary(bytes) => parse_json(&bytes)?,
-            Message::Ping(data) => {
-                control
-                    .try_send(Message::Pong(data))
-                    .map_err(|_| Failure::retry("OpenAI control channel is congested"))?;
-                continue;
-            }
-            Message::Pong(_) => continue,
-            Message::Close(frame) => {
-                return Err(match frame.map(|f| u16::from(f.code)) {
-                    Some(1008) => {
-                        Failure::fatal("OpenAI rejected session policy or authentication")
-                    }
-                    _ => Failure::retry("OpenAI WebSocket closed unexpectedly"),
-                });
-            }
-            Message::Frame(_) => return Err(Failure::fatal("invalid raw OpenAI frame")),
-        };
-        let decoded = if transcription_only {
-            transcription.decode(&value)?
-        } else {
-            decode_event(&value, config, &mut utterances)?
-        };
-        for event in decoded {
-            emit(events, event).await?;
         }
     }
 }
@@ -801,8 +718,8 @@ mod tests {
         let message = setup(&standard, provider.transcription_model(&standard));
         assert!(message.pointer("/session/audio/output/voice").is_none());
         assert_eq!(
-            message.pointer("/session/audio/input/turn_detection/interrupt_response"),
-            Some(&json!(false))
+            message.pointer("/session/audio/input/turn_detection"),
+            Some(&Value::Null)
         );
         assert!(
             !provider
@@ -1356,5 +1273,12 @@ mod tests {
             Some(ProviderEvent::Reconnecting { attempt: 1 })
         );
         server.await.unwrap();
+    }
+    #[tokio::test(start_paused = true)]
+    async fn output_delivery_waits_for_capacity_and_allows_force_cancellation() {
+        super::super::assert_event_backpressure(|events, event| async move {
+            emit(&events, event).await
+        })
+        .await;
     }
 }

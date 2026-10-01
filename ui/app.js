@@ -11,6 +11,7 @@
   const microphoneDraft = { source: 'physical_microphone', device: '' };
   const microphoneSources = Object.freeze({ speaker_original: 'babel-source:speaker_original', speaker_output: 'babel-source:speaker_output' });
   const retention = { sessions: [], fresh: false, error: '', polling: false, generation: 0, recovering: new Set(), errors: new Map(), nodes: new Map() };
+  const finalizingNodes = new Map();
   let translationSelection = [...routeNames];
   let token = new URLSearchParams(location.hash.slice(1)).get('token');
   try {
@@ -742,6 +743,8 @@
         ? t("ui.settings_changed_outside_this_dashboard_reload_saved_settings_before_saving")
       : running
         ? t("ui.session_active_end_it_to_change_settings_physical_devices_can_be_switched_f")
+      : state.status?.finalizing
+        ? t('session.finalizing_hint')
       : state.status?.local_runtime?.phase === 'preparing'
         ? t('local.preparing_session')
       : !processingSelected
@@ -750,6 +753,34 @@
           ? t("ui.you_have_unsaved_settings_starting_the_session_also_saves_them")
           : t("ui.choose_which_features_to_use_and_start_a_session_to_translate_transcribe_or");
     renderRetention();
+  }
+
+  function renderFinalizing() {
+    const sessions = state.status?.finalizing_sessions || [];
+    const card = byId('finalizing-card');
+    card.hidden = !state.status?.finalizing && sessions.length === 0;
+    const present = new Set(sessions.map(session => session.session_id));
+    for (const [id, row] of finalizingNodes) {
+      if (!present.has(id)) { row.node.remove(); finalizingNodes.delete(id); }
+    }
+    for (const session of sessions) {
+      let row = finalizingNodes.get(session.session_id);
+      if (!row) {
+        const node = document.createElement('li'); node.className = 'retention-session';
+        const detail = document.createElement('div'); detail.className = 'retention-session-detail';
+        const name = document.createElement('strong');
+        const status = document.createElement('p'); status.className = 'field-hint';
+        const error = document.createElement('p'); error.className = 'retention-session-error';
+        error.setAttribute('role', 'status');
+        detail.append(name, status, error); node.append(detail);
+        row = { node, name, status, error };
+        finalizingNodes.set(session.session_id, row); byId('finalizing-sessions').append(node);
+      }
+      row.name.textContent = session.session_name || session.session_id;
+      row.status.textContent = t('session.finalizing');
+      row.error.textContent = session.last_error || '';
+      row.error.hidden = !session.last_error;
+    }
   }
 
   function renderRetention() {
@@ -822,12 +853,13 @@
     state.status = status;
     state.statusFresh = fresh;
     renderLocalRuntime();
+    renderFinalizing();
     const sessionIdentity = status.session_name || status.session_id;
     const sessionLabel = sessionIdentity ? t(status.running ? 'session.identity' : 'session.previous', { name: sessionIdentity }) : '';
     if (byId('session-identity').textContent !== sessionLabel) byId('session-identity').textContent = sessionLabel;
     byId('session-identity').hidden = !sessionIdentity;
     const waiting = routeNames.every(route => routeWaiting(route, status));
-    byId('session-state').textContent = status.running ? t("ui.session_active") : waiting ? t('routing.waiting_for_app') : status.routing_active ? t("ui.original_audio") : t("ui.no_routing");
+    byId('session-state').textContent = status.running ? t("ui.session_active") : status.finalizing ? t('session.finalizing') : waiting ? t('routing.waiting_for_app') : status.routing_active ? t("ui.original_audio") : t("ui.no_routing");
     byId('status-dot').className = `status-dot${status.running || status.routing_active ? ' running' : ''}${status.last_error || status.routing_error ? ' error' : ''}`;
     byId('session-error').textContent = status.last_error || '';
     byId('session-error').hidden = !status.last_error;
@@ -1004,7 +1036,8 @@
   byId('stop').addEventListener('click', () => action(async () => {
     await api('/stop', { method: 'POST' });
     renderStatus(await api('/status'));
-    announce(t("ui.session_ended_original_audio_passes_through_the_configured_devices_again"));
+    announce(t('session.capture_stopped'));
+    void refreshRetention();
   }));
   byId('reload-config').addEventListener('click', () => action(async () => { await reloadConfig(); announce(t("ui.saved_settings_reloaded_review_devices_before_starting")); }));
   byId('refresh-devices').addEventListener('click', () => action(async () => { await Promise.all([refreshDevices(), refreshPlatform()]); announce(t("ui.device_list_refreshed")); }));

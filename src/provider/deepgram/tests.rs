@@ -791,7 +791,7 @@ async fn silence_uses_text_keepalive_and_cancellation_works_with_full_event_queu
         transcript("first".into(), None, 0, 1000)
     );
     // TurnComplete occupies the only slot; cancellation must interrupt the
-    // pending second transcript instead of waiting for its slow-consumer limit.
+    // pending second transcript without waiting for consumer capacity.
     cancel.cancel();
     timeout(Duration::from_secs(1), worker)
         .await
@@ -863,4 +863,12 @@ fn a_repeated_old_boundary_does_not_end_the_current_utterance() {
         finals.decode(&current, true).unwrap(),
         vec![ProviderEvent::TurnComplete]
     );
+}
+
+#[tokio::test(start_paused = true)]
+async fn output_delivery_waits_for_capacity_and_allows_force_cancellation() {
+    super::super::assert_event_backpressure(
+        |events, event| async move { emit(&events, event).await },
+    )
+    .await;
 }

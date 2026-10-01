@@ -45,6 +45,70 @@ fn evaluated(snapshot: &Value) -> UseSnapshot {
 }
 
 #[test]
+fn inactive_default_speaker_authorizes_tail_without_starting_capture() {
+    let snapshot = fixture();
+    let mut observed = evaluated(&snapshot);
+    select_default_speaker(
+        &mut observed,
+        &snapshot,
+        "babel_speaker.monitor",
+        "babel_speaker",
+    );
+    assert!(observed.speaker_selected());
+    assert!(observed.speaker_clients.is_empty());
+    let (sender, receiver) = watch::channel(EndpointUse::default());
+    publish_state(&sender, false, true, true, None, None, None);
+    let epoch = receiver.borrow().speaker_selection_epoch;
+    publish_state(
+        &sender,
+        false,
+        false,
+        observed.speaker_selected(),
+        None,
+        None,
+        None,
+    );
+    assert!(!receiver.borrow().speaker);
+    assert!(receiver.borrow().speaker_selected);
+    assert_eq!(receiver.borrow().speaker_selection_epoch, epoch);
+    select_default_speaker(
+        &mut observed,
+        &snapshot,
+        "babel_speaker.monitor",
+        "real_output",
+    );
+    publish_state(
+        &sender,
+        false,
+        false,
+        observed.speaker_selected(),
+        None,
+        None,
+        None,
+    );
+    assert!(!receiver.borrow().speaker_selected);
+    assert!(receiver.borrow().speaker_selection_epoch > epoch);
+}
+
+#[test]
+fn paused_explicit_speaker_stream_keeps_selection_until_it_is_removed() {
+    let mut snapshot = fixture();
+    external_clients(&mut snapshot);
+    snapshot["sink_inputs"]
+        .as_array_mut()
+        .unwrap()
+        .last_mut()
+        .unwrap()["corked"] = json!(true);
+    let mut observed = evaluated(&snapshot);
+    assert!(observed.speaker_selected());
+    assert!(observed.speaker_clients.is_empty());
+    let (sender, receiver) = watch::channel(EndpointUse::default());
+    publish_state(&sender, false, false, true, None, None, None);
+    apply_event(Event::RemovedSinkInput(310), &mut observed, &sender);
+    assert!(!receiver.borrow().speaker_selected);
+}
+
+#[test]
 fn internal_remap_and_babel_workers_are_not_external_clients() {
     let result = evaluated(&fixture());
     assert!(result.microphone_clients.is_empty());

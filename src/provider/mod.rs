@@ -143,9 +143,9 @@ fn known_model_family(model: &str, family: &str) -> bool {
 pub trait SpeechProvider: Send + Sync {
     fn id(&self) -> &'static str;
 
-    /// Runs until cancellation or an error. Translators reject unexpected audio
-    /// EOF. Dedicated original recognizers finalize pending speech on EOF; their
-    /// source is session-owned and closes only after its capture routes stop.
+    /// Runs until input EOF, cancellation, or an error. EOF flushes pending
+    /// speech and drains final output before success. Cancellation forcibly
+    /// abandons pending work; callers must distinguish it from a completed drain.
     async fn run(
         &self,
         config: SessionConfig,
@@ -190,6 +190,50 @@ pub fn create_configured_provider(
         "local" => Ok(Arc::new(local::LocalProvider::new(local.clone())?)),
         _ => create_provider(kind),
     }
+}
+
+/// Exercise each provider's delivery helper without a socket or real clock.
+#[cfg(test)]
+async fn assert_event_backpressure<F, Fut, E>(send: F)
+where
+    F: Fn(Sender<ProviderEvent>, ProviderEvent) -> Fut + Copy + Send + 'static,
+    Fut: std::future::Future<Output = std::result::Result<(), E>> + Send + 'static,
+    E: std::fmt::Debug + Send + 'static,
+{
+    let (events, mut received) = tokio::sync::mpsc::channel(1);
+    events.send(ProviderEvent::Connected).await.unwrap();
+    let queued = tokio::spawn(send(events.clone(), ProviderEvent::TurnComplete));
+    tokio::task::yield_now().await;
+    tokio::time::advance(std::time::Duration::from_secs(60)).await;
+    assert!(
+        !queued.is_finished(),
+        "bounded consumer capacity must wait without expiring"
+    );
+    assert_eq!(received.recv().await, Some(ProviderEvent::Connected));
+    queued.await.unwrap().unwrap();
+    assert_eq!(received.recv().await, Some(ProviderEvent::TurnComplete));
+
+    events.send(ProviderEvent::Connected).await.unwrap();
+    let cancel = CancellationToken::new();
+    let stopping = cancel.clone();
+    let output = events.clone();
+    let queued = tokio::spawn(async move {
+        // The provider session owns force cancellation; delivery must not hide
+        // that branch while it waits for its downstream consumer's capacity.
+        tokio::select! {
+            biased;
+            _ = stopping.cancelled() => false,
+            result = send(output, ProviderEvent::TurnComplete) => { result.unwrap(); true },
+        }
+    });
+    tokio::task::yield_now().await;
+    assert!(!queued.is_finished());
+    cancel.cancel();
+    assert!(!queued.await.unwrap());
+    assert_eq!(received.recv().await, Some(ProviderEvent::Connected));
+    assert!(received.try_recv().is_err());
+    drop(received);
+    assert!(send(events, ProviderEvent::TurnComplete).await.is_err());
 }
 
 #[cfg(test)]

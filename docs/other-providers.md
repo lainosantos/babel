@@ -78,9 +78,14 @@ prompt = "Preserve technical software development terms."
 The adapter configures PCM16 mono at 24 kHz in both directions of the connection.
 Babel's internal speech capture arrives at 16 kHz and is converted with a sinc
 filter; this does not recover frequencies absent from the original signal.
-The conversational version uses the GA `session.audio.input/output` contract
-and does not automatically interrupt the previous translation when new speech
-is detected. See [Realtime conversations](https://developers.openai.com/api/docs/guides/realtime-conversations)
+The conversational version uses the GA `session.audio.input/output` contract.
+Babel detects speech boundaries locally with an RMS threshold of 0.01, the
+configured VAD silence duration and a maximum turn length of ten seconds. It
+sends one explicit audio commit and response request at a time, awaiting that
+response's completion before submitting the next turn. This preserves speech
+order and prevents a previous response from acknowledging newer input. Speech
+captured while a response runs remains queued, so a slow model increases delay.
+The previous translation is not interrupted by new speech. See [Realtime conversations](https://developers.openai.com/api/docs/guides/realtime-conversations)
 and [WebSockets](https://developers.openai.com/api/docs/guides/voice-websockets?voice-api=realtime).
 
 The translation session does not request original recognition to generate the
@@ -90,11 +95,24 @@ of the OpenAI translation model. Legacy `providers.*.transcription_model` fields
 do not replace `transcription.providers.*.model` after migration. See the
 [transcription configuration and migration guide](transcription.md).
 
-The connection releases input audio only after setup confirmation. Reconnection
-has bounded retries and discards old audio: it neither replays accumulated
-queues nor claims to restore earlier context. Stopping the route immediately
-cancels pending audio and may cut off the final translation. Messages, audio and
-queues are bounded; remote errors expose neither keys nor raw response content.
+The connection retains input during setup and releases it after confirmation.
+Setup failures have bounded retries. Once translation
+has consumed audio, a connection failure leaves the session incomplete with
+its originals retained for recovery; reconnecting an empty stream cannot claim
+that earlier speech was processed.
+
+Stop ends capture and closes the provider's input after queued audio drains.
+For continuous translation, Babel flushes the resampler tail, sends
+`session.close`, and receives remaining audio and text through `session.closed`.
+For conversational translation, it commits the final partial utterance and waits
+for its matching completed response and any requested input transcript. Playback
+and processing can continue after capture stops. A missing final acknowledgement
+or failed request reports an incomplete session and preserves retained originals.
+Messages and active queues are bounded; output delivery waits for playback or
+text-storage capacity without a consumer-delivery deadline. Network, request
+and final-acknowledgement deadlines still apply. Older source audio remains
+available through the session's encrypted journal. Remote errors expose neither keys nor
+raw response content.
 Actual model availability requires validation with your own account; the
 [official model details](https://developers.openai.com/api/docs/models/gpt-realtime-translate)
 do not guarantee access for every account.
@@ -138,10 +156,12 @@ associated with commits by `item_id`, with at most 64 pending reorder items.
 Per-direction ordering does not synchronize speech between connections. The
 default model provides neither diarization nor word timing.
 
-Stopping the session cancels pending recognition and may lose the last unfinished
-sentence. Wait for a short pause and final result before stopping; received
-results are drained to TXT. Enable WAV recording separately to preserve original
-capture independently of recognizer responses.
+Stopping the session closes capture and flushes pending recognition, including
+the final unfinished sentence. The provider waits for every submitted commit's
+final transcript, and received results drain to TXT. A timeout or interrupted
+result leaves the session incomplete with originals retained for recovery.
+Enable WAV recording separately when you also want a permanent original-audio
+file; temporary encrypted retention is independent of that setting.
 
 ## Deepgram: continuous original-audio transcription
 
@@ -160,7 +180,11 @@ connection-local labels, not names or persistent personal identities.
 `language = "auto"` selects `multi` for general Nova-2/Nova-3 models. This covers
 the model's multilingual set, not every individually supported language. Flux
 uses another protocol and is not accepted by this adapter. Reconnection has a
-bounded budget and discards accumulated audio; speaker labels/offsets may reset.
+bounded budget and may discard connection-local queued audio; speaker
+labels/offsets may reset. Babel marks such an interruption incomplete and keeps
+the session's originals for recovery instead of treating later results as a
+complete transcript. Stop sends the remaining original PCM and `CloseStream`,
+then waits for final results and terminal metadata before completing.
 Keepalive maintains silent connections without inventing audio or advancing
 timestamps. See [complete configuration](transcription.md),
 [Listen v1](https://developers.deepgram.com/reference/speech-to-text/listen-streaming),
@@ -264,16 +288,20 @@ reduces clipped word beginnings. Offsets refer to segments, not word alignment.
 
 Capture and inference progress in independent tasks, with at most two segments
 waiting for inference and two audio segments waiting for playback per pipeline.
-Two routes plus independent transcription increase CPU/memory load. During live
-overload, the pipeline discards old pending input in favor of recent speech and
-reports a processing warning. Translation continues instead of closing the
-session. Synthesized speech waits in a bounded playback queue, preserving its
-order. Skipped recognition segments are marked as gaps in the transcript;
-finite transcription of retained history still waits for every segment.
-Original audio routing remains isolated from this processing. Service or
-request failures still stop translation and report their underlying cause.
-Calls have timeouts and byte limits and do not follow redirects. Segments are
-not automatically repeated, avoiding duplicate speech.
+Two routes plus independent transcription increase CPU/memory load. When
+inference falls behind, both local recognition and translation wait for queue
+capacity and preserve every accepted speech segment in order. Recent originals
+are available from RAM while encrypted journal writes proceed independently;
+older retained originals can be read back from disk. Disk synchronization is
+not on the live input path to inference. Backlog increases processing delay
+instead of dropping older speech.
+
+Stop ends capture, flushes the final partial segment, and lets queued recognition,
+translation, synthesis and playback finish. Original audio routing remains
+isolated from this processing. Service or request failures report an incomplete
+session and retain its originals for recovery. Calls have timeouts and byte
+limits and do not follow redirects. Ambiguous requests are not automatically
+repeated, avoiding duplicate speech.
 
 Babel's Rust core forbids its own `unsafe`. Inference engines use separate native
 libraries with their own safety properties; integration does not make those

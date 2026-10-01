@@ -1,5 +1,6 @@
 //! Session processing is separate from device capture and original playback.
 use super::*;
+#[cfg(test)]
 use futures_util::FutureExt;
 
 pub(super) async fn run_route(
@@ -19,23 +20,15 @@ pub(super) async fn run_route(
         history,
         retained,
     } = io;
-    if capture_changes.borrow().is_empty() || playback_changes.borrow().is_empty() {
-        metrics.state("unconfigured");
-        if !wait_for_devices(&mut capture_changes, &mut playback_changes, &cancel).await {
-            return Ok(());
-        }
+    if !wait_for_devices(&mut capture_changes, &mut playback_changes, &cancel).await {
+        return Ok(());
     }
     let translating = route.enabled;
     metrics.original_mode.store(!translating, Ordering::Relaxed);
-    let transcribing = recognition.is_some();
-    let audio_handle = crate::execution::audio_handle()?;
-    let processing_handle = crate::execution::processing_handle()?;
+    let handle = crate::execution::audio_handle()?;
     let capture_device = capture_changes.borrow().clone();
     let playback_device = playback_changes.borrow().clone();
-    let (capture_rate, capture_channels) = if translating {
-        // The switching worker keeps retrying an unavailable physical device.
-        // A speech-only fallback format must not turn disconnection into a fatal
-        // session error. Original passthrough negotiates/retries independently.
+    let (rate, channels) = if translating {
         audio::original_format(&capture_device, &playback_device)
             .await
             .unwrap_or((INPUT_RATE, 1))
@@ -44,103 +37,43 @@ pub(super) async fn run_route(
     };
     let frame_ms = [10, 20, 40, 100]
         .into_iter()
-        .find(|ms| (capture_rate * ms) % 1000 == 0)
+        .find(|ms| (rate * ms) % 1000 == 0)
         .unwrap_or(100);
-    let playback_rate = if translating {
-        OUTPUT_RATE
-    } else {
-        capture_rate
-    };
-    let playback_queue_ms = if translating {
-        cfg.audio.playback_queue_ms
-    } else {
-        80
-    };
-    let (captured_tx, device_rx) = mpsc::channel((80 / frame_ms).max(1) as usize);
-    let (sidecar_tx, mut captured_rx) =
-        mpsc::channel((cfg.audio.capture_queue_ms / frame_ms).clamp(1, 100) as usize);
-    let (input_tx, input_rx) =
-        mpsc::channel((cfg.audio.capture_queue_ms / frame_ms).max(1) as usize);
-    let (events_tx, mut events_rx) = mpsc::channel(16);
-    let (play_tx, play_rx) = mpsc::channel(
-        (playback_queue_ms
-            / if translating {
-                OUTPUT_FRAME_MS
-            } else {
-                frame_ms
-            })
-        .max(1) as usize,
-    );
-    let mut audio_jobs = JoinSet::new();
-    let mut processing_jobs = JoinSet::new();
-    let capture_options = AudioOptions {
-        sample_rate: capture_rate,
-        channels: capture_channels,
+    let options = AudioOptions {
+        sample_rate: rate,
+        channels,
         frame_ms,
         latency_ms: cfg.audio.device_latency_ms,
         queue_ms: 80.max(frame_ms),
     };
-    let playback_options = AudioOptions {
-        sample_rate: playback_rate,
-        channels: if translating { 1 } else { capture_channels },
-        frame_ms: if translating {
-            OUTPUT_FRAME_MS
-        } else {
-            frame_ms
-        },
-        latency_ms: cfg.audio.device_latency_ms,
-        queue_ms: playback_queue_ms,
-    };
+    let (sidecar_tx, mut captured_rx) =
+        mpsc::channel((cfg.audio.capture_queue_ms / frame_ms).clamp(1, 100) as usize);
+    let mut audio_jobs = JoinSet::new();
     if translating {
-        let capture_cancel = cancel.clone();
-        let capture_stats = metrics.audio.clone();
+        let (tx, rx) = mpsc::channel((80 / frame_ms).max(1) as usize);
+        let token = cancel.clone();
+        let stats = metrics.audio.clone();
         audio_jobs.spawn_on(
             async move {
                 audio::switching::capture(
                     &capture_device,
-                    capture_options,
-                    captured_tx,
+                    options,
+                    tx,
                     capture_changes,
-                    capture_cancel,
-                    capture_stats,
+                    token,
+                    stats,
                 )
                 .await
-                .context("Capture")
             },
-            &audio_handle,
+            &handle,
         );
-        let playback_cancel = cancel.clone();
-        let playback_stats = metrics.audio.clone();
         audio_jobs.spawn_on(
-            async move {
-                audio::switching::playback(
-                    &playback_device,
-                    playback_options,
-                    play_rx,
-                    playback_changes,
-                    playback_cancel,
-                    playback_stats,
-                )
-                .await
-                .context("Playback")
-            },
-            &audio_handle,
-        );
-        // The model necessarily owns translated output; capture remains on the audio executor.
-        let forward_cancel = cancel.clone();
-        let forward_stats = metrics.audio.clone();
-        audio_jobs.spawn_on(
-            async move {
-                forward_processing(device_rx, sidecar_tx, forward_cancel, forward_stats, true).await
-            },
-            &audio_handle,
+            forward_processing(rx, sidecar_tx, cancel.clone(), metrics.audio.clone(), true),
+            &handle,
         );
     } else {
-        drop(captured_tx);
-        drop(device_rx);
-        drop(play_rx);
-        let bridge_cancel = cancel.clone();
-        let bridge_stats = metrics.audio.clone();
+        let token = cancel.clone();
+        let stats = metrics.audio.clone();
         audio_jobs.spawn_on(
             async move {
                 audio::passthrough::run_route_with_sidecar(
@@ -148,63 +81,21 @@ pub(super) async fn run_route(
                         capture: capture_changes,
                         playback: playback_changes,
                     },
-                    capture_options,
-                    bridge_cancel,
-                    bridge_stats,
+                    options,
+                    token,
+                    stats,
                     sidecar_tx,
                 )
                 .await
             },
-            &audio_handle,
+            &handle,
         );
     }
-    if translating {
-        let provider_cancel = cancel.clone();
-        let cloud = cfg.profile(&route.provider).clone();
-        // Only embedded Piper resolves a per-language catalog voice. Cloud
-        // sessions leave voice selection entirely to their Live model.
-        let native_voice = if route.provider == "local" {
-            route.resolved_voice.clone()
-        } else {
-            String::new()
-        };
-        let session_config = SessionConfig {
-            model: cloud.model.clone(),
-            api_key_env: cloud.api_key_env.clone(),
-            voice: native_voice,
-            source_language: route.source_language.clone(),
-            target_language: route.target_language.clone(),
-            prompt: route.prompt.clone(),
-            vad_silence_ms: cfg.audio.quality.vad_silence_ms(),
-            connect_timeout_secs: cloud.connect_timeout_secs,
-            max_reconnect_attempts: cloud.max_reconnect_attempts,
-            input_transcription: false,
-            output_transcription: false,
-        };
-        let provider_kind = route.provider.clone();
-        let local_config = cfg.providers.local.clone();
-        spawn_processor(
-            &mut processing_jobs,
-            &processing_handle,
-            Processor::Translation,
-            async move {
-                let provider =
-                    provider::create_configured_provider(&provider_kind, &cloud, &local_config)?;
-                provider
-                    .run(session_config, input_rx, events_tx, provider_cancel)
-                    .await
-                    .context("Provider")
-            },
-        );
-    }
-    if !translating {
-        metrics.state(if transcribing {
-            "connecting"
-        } else {
-            "passthrough"
-        });
-    }
-    let mut connected = false;
+    metrics.state(if translating {
+        "running"
+    } else {
+        "passthrough"
+    });
     let mut originals = OriginalSidecar {
         speech: audio::speech::SpeechTap::new(),
         history: &history,
@@ -213,14 +104,13 @@ pub(super) async fn run_route(
         retained: retained.as_deref(),
         origin,
         metrics: &metrics,
-        // Capture may have already reported a rejected sidecar by this point.
         copy_losses: 0,
         capture_losses: 0,
     };
     let result: Result<()> = async {
         loop {
-            if cancel.is_cancelled() { break Ok(()); }
             tokio::select! {
+                biased;
                 _ = cancel.cancelled() => break Ok(()),
                 completed = audio_jobs.join_next() => {
                     if cancel.is_cancelled() { break Ok(()); }
@@ -229,135 +119,59 @@ pub(super) async fn run_route(
                         _ => bail!("An audio component ended unexpectedly"),
                     }
                 }
-                completed = processing_jobs.join_next(), if !processing_jobs.is_empty() => {
-                    if cancel.is_cancelled() { break Ok(()); }
-                    match completed {
-                        Some(Ok((Processor::Translation, Err(error)))) => break Err(error),
-                        Some(Ok((Processor::Translation, Ok(())))) => bail!("The translator ended unexpectedly"),
-                        Some(Err(error)) => break Err(error.into()),
-                        None => {}
-                    }
-                }
-                event = events_rx.recv(), if translating => {
-                    if cancel.is_cancelled() { break Ok(()); }
-                    let Some(event) = event else {
-                        break translation_result_after_eof(&mut processing_jobs, &cancel).await;
-                    };
-                    match event {
-                        ProviderEvent::Warning { message } => metrics.report_processing_error(&message),
-                        ProviderEvent::Connected => { connected = true; metrics.state("running"); }
-                        ProviderEvent::Reconnecting { .. } => {
-                            connected = false;
-                            metrics.state("reconnecting");
-                            metrics.reconnects.fetch_add(1, Ordering::Relaxed);
-                            interrupt(&metrics, &play_tx);
-                        }
-                        ProviderEvent::Interrupted => { interrupt(&metrics, &play_tx); }
-                        ProviderEvent::Audio { mut samples, sample_rate } => {
-                            ensure!(sample_rate == OUTPUT_RATE, "Provider returned an unsupported audio sample rate: {sample_rate}");
-                            ensure!(samples.len() <= OUTPUT_RATE as usize, "Provider audio chunk exceeds 1 second");
-                            apply_gain(&mut samples, route.gain);
-                            metrics.output_level.store(rms(&samples).to_bits(), Ordering::Relaxed);
-                            metrics.translated_samples.fetch_add(samples.len() as u64, Ordering::Relaxed);
-                            let generation = metrics.audio.playback_generation.load(Ordering::Acquire);
-                            for chunk in samples.chunks(OUTPUT_FRAME_SAMPLES) {
-                                if play_tx.try_send(PlaybackCommand::Audio { samples: chunk.to_vec(), generation }).is_err() {
-                                    metrics.audio.dropped_frames.fetch_add(1, Ordering::Relaxed);
-                                    bail!("Playback queue is full. The stream stopped to prevent accumulating delay; increase playback_queue_ms or check device/model speed");
-                                }
-                            }
-                        }
-                        // STS may emit transcripts for its own synthesis protocol. Only
-                        // the independently selected STT stream owns the saved original.
-                        ProviderEvent::Transcript { .. } | ProviderEvent::TurnComplete
-                            | ProviderEvent::RecoveringOriginal { .. } => {}
-                    }
-                }
                 frame = captured_rx.recv() => {
-                    if cancel.is_cancelled() {
-                        // recv() may already have removed the last original when
-                        // selection changed. It still belongs to the session files.
-                        if let Some(original) = frame { originals.retain(&original, false); }
-                        break Ok(());
-                    }
                     let Some(original) = frame else { bail!("Audio capture ended"); };
-                    // Device forwarding has already finished on the audio executor.
-                    let Some(frame) = originals.retain(&original, translating) else { continue; };
-                    let input_level = rms(&frame.samples);
-                    metrics.input_level.store(input_level.to_bits(), Ordering::Relaxed);
-                    if !translating {
-                        metrics.output_level.store(input_level.to_bits(), Ordering::Relaxed);
-                        metrics.state(match recognition.as_ref().filter(|recognizer| recognizer.available()) {
-                            Some(recognizer) if recognizer.connected() => "transcribing",
-                            Some(_) => "connecting",
-                            None => "passthrough",
-                        });
+                    if let Some(frame) = originals.retain(&original, false) {
+                        metrics.input_level.store(rms(&frame.samples).to_bits(), Ordering::Relaxed);
                     }
-                    if translating {
-                        if frame.captured_at.elapsed() > Duration::from_millis(u64::from(cfg.audio.max_capture_age_ms)) {
-                            metrics.audio.processing_dropped_frames.fetch_add(1, Ordering::Relaxed);
-                        } else {
-                            fanout_original_audio(frame.samples,
-                                (translating && connected).then_some(&input_tx),
-                                None, &metrics);
-                        }
+                    if retained.as_ref().is_some_and(|retained| retained.status().error.is_some()) {
+                        bail!("Original retention needs attention; capture stopped while accepted audio remains retained");
                     }
                 }
             }
         }
     }.await;
     cancel.cancel();
-    interrupt(&metrics, &play_tx);
-    drop(input_tx);
-    drop(play_tx);
-    // Device shutdown cannot wait for a provider or a disk writer. Background
-    // work is cancelled separately; stalled processing never owns audio leases.
-    processing_jobs.abort_all();
-    let mut cleanup_result = Ok(());
-    let audio_shutdown = tokio::time::timeout(Duration::from_secs(2), async {
-        let mut originals_open = true;
+    // Only device ownership is bounded. Session-owned readers keep every
+    // retained original and finalize independently after this capture closes.
+    let mut cleanup = Ok(());
+    let stopped = tokio::time::timeout(Duration::from_secs(2), async {
+        let mut open = true;
         while !audio_jobs.is_empty() {
             tokio::select! {
-                completed = audio_jobs.join_next() => {
-                    if let Some(completed) = completed {
-                        let completed = completed
-                            .context("Transport task interrupted")
-                            .and_then(|result| result);
-                        if completed.is_err() && cleanup_result.is_ok() {
-                            cleanup_result = completed;
-                        }
-                    }
-                }
-                original = captured_rx.recv(), if originals_open => {
-                    match original {
-                        Some(original) => { originals.retain(&original, false); }
-                        None => originals_open = false,
-                    }
+                completed = audio_jobs.join_next() => if let Some(completed) = completed {
+                    let result = completed.context("Capture task interrupted").and_then(|r| r);
+                    if result.is_err() && cleanup.is_ok() { cleanup = result; }
+                },
+                frame = captured_rx.recv(), if open => match frame {
+                    Some(frame) => { originals.retain(&frame, false); },
+                    None => open = false,
                 }
             }
         }
     })
     .await;
-    if audio_shutdown.is_err() {
+    if stopped.is_err() {
         audio_jobs.abort_all();
-        cleanup_result = Err(anyhow!("Timed out while stopping audio devices"));
+        if let Some(retained) = &retained {
+            retained.mark_unrecoverable(
+                "Capture shutdown timed out; the final device queue could not be verified",
+            );
+        }
+        cleanup = Err(anyhow!("Timed out while stopping audio capture"));
     }
-    // All device workers have finished or been aborted. Freeze the existing
-    // sidecar queue and retain its bounded tail without translation/playback.
     originals.drain(&mut captured_rx);
     drop(originals);
     drop(audio_tx);
-    // Dropping this capture sender never cancels the session-owned recognizer.
     drop(recognition);
     metrics.input_level.store(0, Ordering::Relaxed);
-    metrics.output_level.store(0, Ordering::Relaxed);
-    metrics.state(if result.is_ok() && cleanup_result.is_ok() {
+    metrics.state(if result.is_ok() && cleanup.is_ok() {
         "stopped"
     } else {
         "error"
     });
     result
-        .and(cleanup_result)
+        .and(cleanup)
         .with_context(|| format!("Stream {name}"))
 }
 
@@ -433,13 +247,23 @@ impl OriginalSidecar<'_> {
         {
             return None;
         }
+        if let Some(tail) = self.speech.finish_before(original) {
+            self.deliver(&tail);
+        }
         let frame = self.speech.convert(original);
+        self.deliver(&frame);
+        Some(frame)
+    }
+
+    fn deliver(&mut self, frame: &audio::PcmFrame) {
+        if frame.samples.is_empty() {
+            return;
+        }
         // Preserve originals before either writer or recognizer can reject a
         // frame. The store only copies into bounded RAM on this executor;
         // encrypted spill runs independently of the original audio transport.
         if let Some(retained) = self.retained
-            && !frame.samples.is_empty()
-            && let Err(error) = retained.capture(&frame, self.origin)
+            && let Err(error) = retained.capture(frame, self.origin)
         {
             self.report_missing_originals(&format!(
                 "Original audio retention failed; this frame cannot be guaranteed for recovery: {error}"
@@ -492,7 +316,6 @@ impl OriginalSidecar<'_> {
                 });
             }
         }
-        Some(frame)
     }
 
     fn drain(&mut self, captured: &mut mpsc::Receiver<audio::OriginalFrame>) {
@@ -507,10 +330,14 @@ impl OriginalSidecar<'_> {
             };
             self.retain(&original, false);
         }
+        if let Some(tail) = self.speech.finish() {
+            self.deliver(&tail);
+        }
         self.observe_copy_losses();
     }
 }
 
+#[cfg(test)]
 #[derive(Clone, Copy)]
 enum Processor {
     Translation,
@@ -519,6 +346,7 @@ enum Processor {
 /// Dropping a provider's sender can wake the receiver before its task result is
 /// available. Preserve that result instead of reporting EOF as the root cause.
 /// This runs on the processing executor; device workers keep their own runtime.
+#[cfg(test)]
 async fn translation_result_after_eof(
     jobs: &mut JoinSet<(Processor, Result<()>)>,
     cancel: &CancellationToken,
@@ -538,6 +366,7 @@ async fn translation_result_after_eof(
     }
 }
 
+#[cfg(test)]
 fn spawn_processor<F>(
     jobs: &mut JoinSet<(Processor, Result<()>)>,
     handle: &tokio::runtime::Handle,
@@ -639,6 +468,97 @@ mod tests {
             sample_rate: INPUT_RATE,
             channels: 1,
             captured_at,
+        }
+    }
+
+    #[tokio::test]
+    async fn shutdown_retains_speech_filter_tail_for_every_original_consumer() {
+        for origin in [TranscriptOrigin::Microphone, TranscriptOrigin::Speaker] {
+            let directory = tempfile::tempdir().unwrap();
+            let store = crate::retention::SessionRetention::create_in(directory.path(), "fixture")
+                .await
+                .unwrap();
+            let clock = Instant::now() - Duration::from_millis(100);
+            let retained =
+                retained::RetainedSession::new(store, clock, &tokio::runtime::Handle::current());
+            let history =
+                crate::history::HistoryBuffer::new(&crate::config::HistoryConfig::default());
+            let metrics = RouteMetrics::default();
+            let (sender, mut recorded) = mpsc::channel(8);
+            let mut recording = Some(sender);
+            let mut sidecar = OriginalSidecar {
+                speech: audio::speech::SpeechTap::new(),
+                history: &history,
+                recording: &mut recording,
+                recognition: None,
+                retained: Some(&retained),
+                origin,
+                metrics: &metrics,
+                copy_losses: 0,
+                capture_losses: 0,
+            };
+            for end in [10, 20, 30] {
+                sidecar.retain(
+                    &audio::OriginalFrame {
+                        samples: vec![0.125; 480].into(),
+                        sample_rate: 48_000,
+                        channels: 1,
+                        captured_at: clock + Duration::from_millis(end),
+                    },
+                    false,
+                );
+            }
+            let (_capture, mut captured) = mpsc::channel(1);
+            sidecar.drain(&mut captured);
+            sidecar.drain(&mut captured);
+            drop(sidecar);
+            drop(recording);
+            retained.close_capture();
+            let mut reader = retained.reader(origin);
+            let mut replayed = Vec::new();
+            while let Some(frame) = reader.next().await.unwrap() {
+                replayed.push(frame);
+            }
+            let mut records = Vec::new();
+            while let Some(frame) = recorded.recv().await {
+                records.push(frame);
+            }
+            assert_eq!(
+                replayed
+                    .iter()
+                    .map(|frame| frame.samples.len())
+                    .sum::<usize>(),
+                480
+            );
+            assert_eq!(
+                records
+                    .iter()
+                    .map(|frame| frame.samples.len())
+                    .sum::<usize>(),
+                480
+            );
+            assert_eq!(
+                replayed.len(),
+                4,
+                "One delayed tail follows the three capture frames"
+            );
+            assert_eq!(
+                replayed.last().unwrap().captured_at,
+                clock + Duration::from_millis(30)
+            );
+            for (replayed, recorded) in replayed.iter().zip(records) {
+                assert_eq!(replayed.samples, recorded.samples);
+                assert_eq!(replayed.captured_at, recorded.captured_at);
+            }
+            let snapshot = history.snapshot(600, Instant::now());
+            assert_eq!(
+                snapshot
+                    .frames
+                    .iter()
+                    .map(|frame| frame.samples().len())
+                    .sum::<usize>(),
+                480
+            );
         }
     }
 

@@ -1,5 +1,6 @@
-//! Session recovery never owns audio devices. Original input remains retained
-//! until all selected writers finish, including their final filesystem sync.
+//! Session recovery reuses retained originals without opening capture devices.
+//! Failed translation may replay to selected outputs; completed directions are
+//! skipped. Originals remain until playback and every writer's sync finish.
 use super::*;
 
 #[derive(Clone)]
@@ -14,6 +15,7 @@ pub(super) struct Archive {
     error: Arc<StdMutex<Option<String>>>,
     recovering: Arc<AtomicBool>,
     pub(super) outputs_committed: Arc<AtomicBool>,
+    pub(super) translations_committed: [Arc<AtomicBool>; 2],
 }
 
 #[derive(Debug, Serialize)]
@@ -45,6 +47,7 @@ impl Archive {
             error: Arc::default(),
             recovering: Arc::default(),
             outputs_committed: Arc::default(),
+            translations_committed: std::array::from_fn(|_| Arc::default()),
         }
     }
 
@@ -89,14 +92,14 @@ pub(super) async fn finish_archive(
     };
     archive.originals.close_capture();
     let retained = archive.originals.status();
-    // Translation diagnostics must not force a paid STT replay when every
-    // selected original-file worker already completed and synced its output.
+    // Retention is released only after every selected consumer has committed,
+    // including translated playback, not merely after the files close.
     let error = retained.error.or_else(|| {
         (!archive.outputs_committed.load(Ordering::Acquire)).then(|| {
             status
                 .last_error
                 .clone()
-                .unwrap_or_else(|| "Original file processing did not finish".into())
+                .unwrap_or_else(|| "Session processing did not finish".into())
         })
     });
     if (error.is_none() || retained.frames == 0 && archive.history.frames.is_empty())
@@ -127,8 +130,8 @@ impl Controller {
     /// Failed retries remain in Controller ownership until the app exits.
     pub async fn recover_retained_session(&self, id: &str) -> Result<()> {
         let processing = crate::execution::processing_handle()?;
-        let archive = {
-            let state = self.state.lock().await;
+        let (archive, usage) = {
+            let mut state = self.state.lock().await;
             let archive = state
                 .retained
                 .iter()
@@ -137,6 +140,30 @@ impl Controller {
                     "Retained session not found; recovery is available only while Babel stays open",
                 )?
                 .clone();
+            let translation_pending = [
+                archive.config.microphone.enabled && !archive.config.microphone_uses_speaker(),
+                archive.config.speaker.enabled,
+            ]
+            .into_iter()
+            .enumerate()
+            .any(|(index, enabled)| {
+                enabled && !archive.translations_committed[index].load(Ordering::Acquire)
+            });
+            if translation_pending {
+                ensure!(
+                    archive.config.microphone.playback_device
+                        == state.config.microphone.playback_device
+                        && archive.config.speaker.capture_device
+                            == state.config.speaker.capture_device,
+                    "Select this session's virtual endpoints before recovering its translation"
+                );
+            }
+            let usage = if translation_pending {
+                endpoint_usage(&mut state)
+            } else {
+                // File-only recovery opens neither devices nor OS observers.
+                watch::channel(audio::activity::EndpointUse::default()).1
+            };
             ensure!(
                 archive
                     .recovering
@@ -144,7 +171,7 @@ impl Controller {
                     .is_ok(),
                 "This session is already being recovered"
             );
-            archive
+            (archive, usage)
         };
         let runtime = self.local_runtime.clone();
         let state = self.state.clone();
@@ -158,10 +185,7 @@ impl Controller {
                 }
                 let _guard = Guard(archive.recovering.clone());
                 let work = async {
-                    let mut config = archive.config.clone();
-                    // Recovery has no translated output or device ownership.
-                    config.microphone.enabled = false;
-                    config.speaker.enabled = false;
+                    let config = archive.config.clone();
                     let (config, _lease) =
                         runtime.resolve(&config, CancellationToken::new()).await?;
                     let recovered = crate::session::SessionIdentity::new_with_language(
@@ -169,7 +193,7 @@ impl Controller {
                         "en",
                     )?;
                     let files = create_session_files(&config, &recovered, archive.origin).await?;
-                    replay(&archive, &config, files).await?;
+                    replay(&archive, &config, files, usage).await?;
                     ensure!(!archive.originals.status().missing_audio,
                         "Available originals were saved to new files, but an upstream capture gap cannot be reconstructed; retained audio remains available");
                     state
@@ -206,11 +230,48 @@ fn release_completed(archive: Archive) {
     });
 }
 
-async fn replay(archive: &Archive, config: &AppConfig, files: SessionFiles) -> Result<()> {
+async fn replay(
+    archive: &Archive,
+    config: &AppConfig,
+    files: SessionFiles,
+    usage: watch::Receiver<audio::activity::EndpointUse>,
+) -> Result<()> {
     let mut originals = archive.originals.snapshot()?;
     let mut workers = JoinSet::new();
     let cancellation = CancellationToken::new();
     let _cancel = cancellation.clone().drop_guard();
+    for (index, origin, route) in [
+        (0, TranscriptOrigin::Microphone, &config.microphone),
+        (1, TranscriptOrigin::Speaker, &config.speaker),
+    ] {
+        if !route.enabled
+            || (index == 0 && config.microphone_uses_speaker())
+            || archive.translations_committed[index].load(Ordering::Acquire)
+        {
+            continue;
+        }
+        let config = config.clone();
+        let route = route.clone();
+        let originals = archive.originals.clone();
+        let committed = archive.translations_committed[index].clone();
+        let usage = usage.clone();
+        workers.spawn(async move {
+            let (_devices, playback) = watch::channel(route.playback_device.clone());
+            translation::run(
+                config,
+                route,
+                origin,
+                originals,
+                Arc::default(),
+                playback,
+                None,
+                usage,
+            )
+            .await?;
+            committed.store(true, Ordering::Release);
+            Ok(())
+        });
+    }
     let transcript = if let Some(writer) = files.transcript {
         let (sender, received) = mpsc::channel(128);
         workers.spawn(writer.run(received));

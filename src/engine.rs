@@ -8,6 +8,7 @@ mod recovery;
 mod retained;
 mod route;
 mod routing;
+mod translation;
 pub use recovery::RetainedSessionStatus;
 use route::run_route;
 use routing::{Routing, maintain_routing, stop_routing};
@@ -39,23 +40,6 @@ const INPUT_RATE: u32 = 16_000;
 const OUTPUT_RATE: u32 = 24_000;
 const OUTPUT_FRAME_MS: u32 = 20;
 const OUTPUT_FRAME_SAMPLES: usize = 480;
-const PROCESSING_FINALIZE_TIMEOUT: Duration = Duration::from_secs(15);
-const GEMINI_PROCESSING_FINALIZE_TIMEOUT: Duration = Duration::from_secs(30);
-
-fn processing_finalization_timeout(config: &AppConfig) -> Duration {
-    let transcription = &config.transcription;
-    let uses_gemini = transcription.enabled
-        && ((transcription.microphone
-            && !config.microphone_uses_speaker()
-            && transcription.microphone_recognition.provider == "gemini")
-            || (transcription.speaker && transcription.speaker_recognition.provider == "gemini"));
-    if uses_gemini {
-        GEMINI_PROCESSING_FINALIZE_TIMEOUT
-    } else {
-        PROCESSING_FINALIZE_TIMEOUT
-    }
-}
-
 #[derive(Debug)]
 pub struct ConfigurationChanged;
 impl std::fmt::Display for ConfigurationChanged {
@@ -86,6 +70,8 @@ pub struct RouteStatus {
 #[derive(Clone, Debug, Default, Serialize)]
 pub struct EngineStatus {
     pub running: bool,
+    pub finalizing: bool,
+    pub finalizing_sessions: Vec<FinalizingSessionStatus>,
     pub routing_active: bool,
     pub routing_error: Option<String>,
     pub config_revision: u64,
@@ -100,6 +86,15 @@ pub struct EngineStatus {
     pub history_transcription_pending: bool,
 }
 
+#[derive(Clone, Debug, Default, Serialize)]
+pub struct FinalizingSessionStatus {
+    pub session_id: String,
+    pub session_name: String,
+    pub microphone: RouteStatus,
+    pub speaker: RouteStatus,
+    pub last_error: Option<String>,
+}
+
 #[derive(Default)]
 struct RouteMetrics {
     audio: Arc<AudioStats>,
@@ -110,6 +105,7 @@ struct RouteMetrics {
     output_level: AtomicU32,
     activity_error: StdMutex<Option<String>>,
     original_mode: AtomicBool,
+    translated_audio: StdMutex<Option<Arc<AudioStats>>>,
 }
 impl RouteMetrics {
     fn for_configuration(
@@ -173,11 +169,17 @@ impl RouteMetrics {
     }
     fn snapshot(&self) -> RouteStatus {
         let mut status = self.view.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        let translated = self
+            .translated_audio
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        let playback_stats = translated.as_ref().unwrap_or(&self.audio);
         status.captured_frames = self.audio.captured_frames.load(Ordering::Relaxed);
-        status.dropped_frames = self.audio.dropped_frames.load(Ordering::Relaxed);
+        status.dropped_frames = playback_stats.dropped_frames.load(Ordering::Relaxed);
         status.processing_dropped_frames =
             self.audio.processing_dropped_frames.load(Ordering::Relaxed);
-        status.underruns = self.audio.underruns.load(Ordering::Relaxed);
+        status.underruns = playback_stats.underruns.load(Ordering::Relaxed);
         status.translated_samples = self.translated_samples.load(Ordering::Relaxed);
         status.reconnects = self.reconnects.load(Ordering::Relaxed);
         status.input_level = f32::from_bits(self.input_level.load(Ordering::Relaxed));
@@ -188,8 +190,7 @@ impl RouteMetrics {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .clone();
-        let playback = self
-            .audio
+        let playback = playback_stats
             .playback_error
             .lock()
             .unwrap_or_else(|e| e.into_inner())
@@ -253,7 +254,6 @@ struct Running {
     history_included_secs: f64,
     history_transcription_pending: Arc<AtomicBool>,
     routes_closed: Arc<RoutesClosed>,
-    processing_finalize_timeout: Duration,
     retained: Option<recovery::Archive>,
 }
 impl Running {
@@ -283,6 +283,8 @@ impl Running {
         }
         EngineStatus {
             running: !self.task.is_finished(),
+            finalizing: false,
+            finalizing_sessions: Vec::new(),
             routing_active: !self.task.is_finished()
                 && [&microphone, &speaker].iter().any(|route| {
                     !matches!(
@@ -314,6 +316,7 @@ struct State {
     agent_revision: u64,
     commands: Arc<crate::commands::CommandService>,
     running: Option<Running>,
+    finalizing: Vec<Running>,
     last: EngineStatus,
     routing_enabled: bool,
     routing_monitor_started: bool,
@@ -323,6 +326,46 @@ struct State {
     pending_start: Option<(u64, CancellationToken)>,
     next_start_id: u64,
     retained: Vec<recovery::Archive>,
+    endpoint_observer: Option<EndpointObserver>,
+}
+
+/// One platform observer serves original routing and every session. Native
+/// query workers are deliberately singletons, so a finalizer must not acquire
+/// its own worker and prevent the next session from observing its devices.
+struct EndpointObserver {
+    microphone: String,
+    speaker: String,
+    _microphone: watch::Sender<String>,
+    _speaker: watch::Sender<String>,
+    _cancel: tokio_util::sync::DropGuard,
+    usage: watch::Receiver<audio::activity::EndpointUse>,
+}
+
+fn endpoint_usage(state: &mut State) -> watch::Receiver<audio::activity::EndpointUse> {
+    let microphone = &state.config.microphone.playback_device;
+    let speaker = &state.config.speaker.capture_device;
+    if let Some(observer) = &state.endpoint_observer
+        && observer.microphone == *microphone
+        && observer.speaker == *speaker
+    {
+        return observer.usage.clone();
+    }
+    // Replacing the actual virtual endpoints revokes observers of the old pair.
+    // Ordinary Stop/Start and physical-device changes never reach this path.
+    state.endpoint_observer.take();
+    let (mic_tx, mic_rx) = watch::channel(microphone.clone());
+    let (speaker_tx, speaker_rx) = watch::channel(speaker.clone());
+    let cancel = CancellationToken::new();
+    let usage = audio::activity::monitor_initializing(mic_rx, speaker_rx, cancel.clone());
+    state.endpoint_observer = Some(EndpointObserver {
+        microphone: microphone.clone(),
+        speaker: speaker.clone(),
+        _microphone: mic_tx,
+        _speaker: speaker_tx,
+        _cancel: cancel.drop_guard(),
+        usage: usage.clone(),
+    });
+    usage
 }
 
 /// Serializes lifecycle transitions; only non-real-time control paths use this lock.
@@ -382,6 +425,7 @@ impl Controller {
                 agent_revision: 0,
                 commands,
                 running: None,
+                finalizing: Vec::new(),
                 last: stopped_status(),
                 routing_enabled: false,
                 routing_monitor_started: false,
@@ -391,6 +435,7 @@ impl Controller {
                 pending_start: None,
                 next_start_id: 0,
                 retained: Vec::new(),
+                endpoint_observer: None,
             })),
         })
     }
@@ -416,7 +461,21 @@ impl Controller {
         }
         self.monitor_cancel.cancel();
         let session = self.stop().await;
+        // Normal Quit, like Stop, never aborts accepted work. Keep the ephemeral
+        // keys and local model leases alive while finalizers still need them.
+        loop {
+            let pending = {
+                let mut state = self.state.lock().await;
+                reap(&mut state).await;
+                !state.finalizing.is_empty()
+            };
+            if !pending {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
         let routing = stop_routing(&mut *self.state.lock().await).await;
+        self.state.lock().await.endpoint_observer.take();
         self.commands.shutdown().await;
         self.local_runtime.shutdown().await;
         session.and(routing)
@@ -425,8 +484,8 @@ impl Controller {
         let mut state = self.state.lock().await;
         reap(&mut state).await;
         ensure!(
-            state.running.is_none(),
-            "End the session before creating virtual devices"
+            state.running.is_none() && state.finalizing.is_empty(),
+            "Wait for sessions to finish before creating virtual devices"
         );
         stop_routing(&mut state).await?;
         let result = audio::install_virtual_devices().await;
@@ -439,8 +498,8 @@ impl Controller {
         let mut state = self.state.lock().await;
         reap(&mut state).await;
         ensure!(
-            state.running.is_none(),
-            "End the session before removing virtual devices"
+            state.running.is_none() && state.finalizing.is_empty(),
+            "Wait for sessions to finish before removing virtual devices"
         );
         stop_routing(&mut state).await?;
         state.routing_enabled = false;
@@ -484,6 +543,21 @@ impl Controller {
         if status.routing_error.is_none() {
             status.routing_error = state.routing_error.clone();
         }
+        status.finalizing_sessions = state
+            .finalizing
+            .iter()
+            .map(|session| {
+                let snapshot = session.snapshot();
+                FinalizingSessionStatus {
+                    session_id: session.session.id.clone(),
+                    session_name: session.session.name.clone(),
+                    microphone: snapshot.microphone,
+                    speaker: snapshot.speaker,
+                    last_error: snapshot.last_error,
+                }
+            })
+            .collect();
+        status.finalizing = !status.finalizing_sessions.is_empty();
         status.config_revision = state.config_revision;
         status.local_runtime = self.local_runtime.status();
         status.history = state.history.status(Instant::now());
@@ -575,6 +649,11 @@ impl Controller {
             // Remember the physical selection for a later source change. The
             // active mirror is independent and must not restart speaker capture.
             return Ok(());
+        }
+        if direction == DeviceDirection::Output {
+            for pending in &state.finalizing {
+                pending.physical_output.send_replace(id.clone());
+            }
         }
         if let Some(running) = &state.running {
             let sender = match direction {
@@ -716,14 +795,20 @@ impl Controller {
             transcript,
             mut audio,
         } = create_session_files(&cfg, &session, Instant::now()).await?;
-        let retention_store = if cfg.transcription.enabled || cfg.recording.enabled {
+        let retention_store = if cfg.transcription.enabled
+            || cfg.recording.enabled
+            || cfg.microphone.enabled
+            || cfg.speaker.enabled
+        {
             // An opaque identifier keeps session names out of temporary paths.
             let identity = format!("{:032x}", rand::random::<u128>());
             Some(crate::retention::SessionRetention::create(&identity).await?)
         } else {
             None
         };
-        let processing = crate::execution::processing_handle()?;
+        for finalizing in &state.finalizing {
+            finalizing.routes_closed.wait().await;
+        }
         // Stop the old capture before taking a single snapshot. The new routes
         // start strictly after this boundary, so no original frame is saved twice.
         stop_routing(&mut state).await?;
@@ -735,8 +820,9 @@ impl Controller {
             bail!("No recent audio is available for the sources selected in this session");
         }
         let origin = recent.origin;
+        let journal = crate::execution::retention_handle()?;
         let retained =
-            retention_store.map(|store| retained::RetainedSession::new(store, origin, &processing));
+            retention_store.map(|store| retained::RetainedSession::new(store, origin, &journal));
         let archive = retained.as_ref().map(|retained| {
             recovery::Archive::new(
                 session.clone(),
@@ -757,8 +843,8 @@ impl Controller {
         let (physical_output, output_changes) = watch::channel(cfg.speaker.playback_device.clone());
         let cancel = CancellationToken::new();
         let routes_closed = Arc::new(RoutesClosed::default());
-        let processing_finalize_timeout = processing_finalization_timeout(&cfg);
         let (microphone, speaker) = RouteMetrics::for_configuration(&cfg, &self.commands);
+        let usage = endpoint_usage(&mut state);
         microphone.state("waiting_for_app");
         speaker.state("waiting_for_app");
         let task = tokio::spawn(run_session(
@@ -767,6 +853,7 @@ impl Controller {
             microphone.clone(),
             speaker.clone(),
             SessionIo {
+                usage,
                 transcript,
                 audio,
                 input_changes,
@@ -780,6 +867,9 @@ impl Controller {
                 outputs_committed: archive
                     .as_ref()
                     .map(|archive| archive.outputs_committed.clone()),
+                translations_committed: archive
+                    .as_ref()
+                    .map(|archive| archive.translations_committed.clone()),
             },
         ));
         state.running = Some(Running {
@@ -795,7 +885,6 @@ impl Controller {
             history_included_secs,
             history_transcription_pending,
             routes_closed,
-            processing_finalize_timeout,
             retained: archive,
         });
         state.last = stopped_status();
@@ -805,53 +894,14 @@ impl Controller {
     pub async fn stop(&self) -> Result<()> {
         let mut state = self.state.lock().await;
         cancel_pending_start(&mut state);
-        if let Some(mut running) = state.running.take() {
+        if let Some(running) = state.running.take() {
+            // Stop defines the capture boundary. Inference, files and translated
+            // playback keep their session ownership until acknowledged completion.
             running.cancel.cancel();
-            let deadline = tokio::time::Instant::now()
-                + running.processing_finalize_timeout
-                + Duration::from_secs(5);
-            let closed = running.routes_closed.clone();
-            let first = tokio::time::timeout_at(deadline, async {
-                tokio::select! {
-                    result = &mut running.task => Some(result),
-                    _ = closed.wait() => None,
-                }
-            })
-            .await;
-            let result = match first {
-                Ok(Some(result)) => {
-                    maintain_routing(&mut state).await;
-                    Ok(result)
-                }
-                Ok(None) => {
-                    // Device workers are already closed; disk finalization can
-                    // proceed concurrently with restored original routing.
-                    maintain_routing(&mut state).await;
-                    tokio::time::timeout_at(deadline, &mut running.task).await
-                }
-                Err(error) => Err(error),
-            };
-            let mut status = running.snapshot();
-            status.running = false;
-            status.routing_active = false;
-            status.microphone.state = "stopped".into();
-            status.speaker.state = "stopped".into();
-            match result {
-                Ok(Ok(Ok(()))) => {}
-                Ok(Ok(Err(error))) => status.last_error = Some(format!("{error:#}")),
-                Ok(Err(_)) => {
-                    status.last_error = Some("The audio task was interrupted unexpectedly".into())
-                }
-                Err(_) => {
-                    running.task.abort();
-                    let _ = (&mut running.task).await;
-                    status.last_error =
-                        Some("Timed out while stopping audio; check your devices".into());
-                }
-            }
-            recovery::finish_archive(&mut state, running.retained.take(), &mut status).await;
-            state.last = status;
+            state.finalizing.push(running);
+            state.last = stopped_status();
         }
+        reap(&mut state).await;
         maintain_routing(&mut state).await;
         Ok(())
     }
@@ -896,20 +946,36 @@ fn stopped_status() -> EngineStatus {
     }
 }
 async fn reap(state: &mut State) {
-    if state.running.as_ref().is_some_and(|r| r.task.is_finished()) {
-        let mut running = state.running.take().expect("checked above");
-        let mut status = running.snapshot();
-        running.cancel.cancel();
-        if let Err(error) = (&mut running.task)
+    if state
+        .running
+        .as_ref()
+        .is_some_and(|session| session.task.is_finished() || session.cancel.is_cancelled())
+    {
+        state
+            .finalizing
+            .push(state.running.take().expect("checked running session"));
+    }
+    let mut index = 0;
+    while index < state.finalizing.len() {
+        if !state.finalizing[index].task.is_finished() {
+            index += 1;
+            continue;
+        }
+        let mut session = state.finalizing.remove(index);
+        let mut status = session.snapshot();
+        session.cancel.cancel();
+        if let Err(error) = (&mut session.task)
             .await
-            .unwrap_or_else(|_| Err(anyhow!("Audio task ended unexpectedly")))
+            .unwrap_or_else(|_| Err(anyhow!("Session task ended unexpectedly")))
         {
             status.last_error = Some(format!("{error:#}"));
         }
         status.running = false;
         status.routing_active = false;
-        recovery::finish_archive(state, running.retained.take(), &mut status).await;
-        state.last = status;
+        recovery::finish_archive(state, session.retained.take(), &mut status).await;
+        if state.running.is_none() {
+            state.last = status;
+        }
     }
 }
 
@@ -972,6 +1038,7 @@ async fn create_session_files(
 }
 
 struct SessionIo {
+    usage: watch::Receiver<audio::activity::EndpointUse>,
     transcript: Option<TranscriptWriter>,
     audio: Option<SessionAudioRecorder>,
     input_changes: watch::Receiver<String>,
@@ -983,6 +1050,7 @@ struct SessionIo {
     routes_closed: Arc<RoutesClosed>,
     retained: Option<Arc<retained::RetainedSession>>,
     outputs_committed: Option<Arc<AtomicBool>>,
+    translations_committed: Option<[Arc<AtomicBool>; 2]>,
 }
 
 #[derive(Clone)]
@@ -1023,7 +1091,6 @@ async fn run_session(
         let (tx, rx) = mpsc::channel(128);
         let recent = io.recent.clone();
         let config = cfg.clone();
-        let history_cancel = cancel.child_token();
         let pending = io.history_transcription_pending.clone();
         let affected = [
             cfg.transcription.microphone.then(|| mic.clone()),
@@ -1032,7 +1099,7 @@ async fn run_session(
         writers.spawn_on(
             count_committed_writer(
                 observe_session_writer(
-                    history::write_transcript(writer, rx, config, recent, history_cancel, pending),
+                    history::write_transcript(writer, rx, config, recent, pending),
                     "Consolidated transcription",
                     affected,
                 ),
@@ -1044,28 +1111,76 @@ async fn run_session(
     } else {
         None
     };
-    let audio_tx = if let Some(writer) = io.audio {
+    if let Some(writer) = io.audio {
         expected_writers += 1;
-        let (tx, rx) = mpsc::channel(256);
+        let originals = io
+            .retained
+            .clone()
+            .context("Recording requires original retention")?;
         let frames = io.recent.frames.clone();
+        let microphone = cfg.recording.microphone
+            && !cfg.microphone_uses_speaker()
+            && crate::config::route_configured(&cfg.microphone);
+        let speaker_enabled =
+            cfg.recording.speaker && crate::config::route_configured(&cfg.speaker);
         let affected = [
-            cfg.recording.microphone.then(|| mic.clone()),
-            cfg.recording.speaker.then(|| speaker.clone()),
+            microphone.then(|| mic.clone()),
+            speaker_enabled.then(|| speaker.clone()),
         ];
         writers.spawn_on(
             count_committed_writer(
                 observe_session_writer(
                     async move {
-                        writer
-                            .run_with_history(
-                                rx,
-                                frames.into_iter().map(|frame| AudioRecord {
-                                    lane: frame.lane,
-                                    samples: frame.samples().to_vec(),
-                                    captured_at: frame.captured_at,
-                                }),
-                            )
-                            .await
+                        let (tx, rx) = mpsc::channel(128);
+                        let feed = async {
+                            let mut readers = [
+                                microphone.then(|| originals.reader(TranscriptOrigin::Microphone)),
+                                speaker_enabled
+                                    .then(|| originals.reader(TranscriptOrigin::Speaker)),
+                            ];
+                            let mut heads: [Option<AudioRecord>; 2] = [None, None];
+                            loop {
+                                // Merge original clocks, not task scheduling order. If one
+                                // source pauses, retention buffers the other until its next
+                                // frame or capture EOF establishes a safe ordering boundary.
+                                for index in 0..2 {
+                                    if heads[index].is_none()
+                                        && let Some(reader) = &mut readers[index]
+                                    {
+                                        heads[index] = reader.next().await?;
+                                        if heads[index].is_none() {
+                                            readers[index] = None;
+                                        }
+                                    }
+                                }
+                                let selected = heads
+                                    .iter()
+                                    .enumerate()
+                                    .filter_map(|(index, frame)| {
+                                        frame.as_ref().map(|frame| (index, frame.captured_at))
+                                    })
+                                    .min_by_key(|(_, time)| *time)
+                                    .map(|(index, _)| index);
+                                let Some(selected) = selected else {
+                                    break;
+                                };
+                                tx.send(heads[selected].take().unwrap())
+                                    .await
+                                    .context("Recording writer closed before completion")?;
+                            }
+                            drop(tx);
+                            Ok::<_, anyhow::Error>(())
+                        };
+                        let write = writer.run_with_history(
+                            rx,
+                            frames.into_iter().map(|frame| AudioRecord {
+                                lane: frame.lane,
+                                samples: frame.samples().to_vec(),
+                                captured_at: frame.captured_at,
+                            }),
+                        );
+                        tokio::try_join!(feed, write)?;
+                        Ok(())
                     },
                     "Mixed original audio recording",
                     affected,
@@ -1074,10 +1189,7 @@ async fn run_session(
             ),
             &processing_handle,
         );
-        Some(tx)
-    } else {
-        None
-    };
+    }
     // Prefix workers and the recovery archive share the snapshot until all
     // selected files commit. The supervisor no longer needs its own reference.
     drop(io.recent);
@@ -1085,11 +1197,9 @@ async fn run_session(
     let (_mic_virtual_tx, mic_virtual_rx) = watch::channel(cfg.microphone.playback_device.clone());
     let (_speaker_virtual_tx, speaker_virtual_rx) =
         watch::channel(cfg.speaker.capture_device.clone());
-    let usage = audio::activity::monitor(
-        mic_virtual_rx.clone(),
-        speaker_virtual_rx.clone(),
-        cancel.child_token(),
-    );
+    // The controller-owned observer survives Stop and is shared with the next
+    // session and original routes, including on native singleton query workers.
+    let usage = io.usage;
     let mirror_source = speaker.mirror_source();
     for (
         name,
@@ -1125,6 +1235,13 @@ async fn run_session(
         if origin == TranscriptOrigin::Microphone
             && let Some(source) = &mirror_source
         {
+            if cfg.audio.microphone_source == crate::config::MicrophoneSource::SpeakerOutput
+                && cfg.speaker.enabled
+            {
+                // Translated speaker output owns its microphone destination
+                // through EOF, independently of this capture scope.
+                continue;
+            }
             routes.spawn_on(
                 run_microphone_mirror(
                     source.clone(),
@@ -1148,11 +1265,19 @@ async fn run_session(
             } else {
                 None
             };
-            let audio = if record_audio { audio_tx.clone() } else { None };
-            let recognition = transcript.map(|transcript| {
+            let recognition = if let Some(transcript) = transcript {
                 expected_writers += 1;
-                let (sink, worker) =
-                    recognition::start(cfg.clone(), transcript, metrics.clone(), io.session_origin);
+                let originals = io
+                    .retained
+                    .clone()
+                    .context("Transcription requires original retention")?;
+                let worker = recognition::start_retained(
+                    cfg.clone(),
+                    transcript,
+                    metrics.clone(),
+                    io.session_origin,
+                    originals,
+                );
                 writers.spawn_on(
                     count_committed_writer(
                         observe_session_writer(
@@ -1164,24 +1289,75 @@ async fn run_session(
                     ),
                     &processing_handle,
                 );
-                sink
-            });
+                None
+            } else {
+                None
+            };
+            if route.enabled {
+                expected_writers += 1;
+                let originals = io
+                    .retained
+                    .clone()
+                    .context("Translation requires original retention")?;
+                let committed = io.translations_committed.as_ref().map(|flags| {
+                    flags[if origin == TranscriptOrigin::Microphone {
+                        0
+                    } else {
+                        1
+                    }]
+                    .clone()
+                });
+                let translation = translation::run(
+                    cfg.clone(),
+                    route.clone(),
+                    origin,
+                    originals,
+                    metrics.clone(),
+                    playback_changes.clone(),
+                    Some(mic.clone()),
+                    usage.clone(),
+                );
+                let capture_stop = cancel.clone();
+                writers.spawn_on(
+                    count_committed_writer(
+                        observe_session_writer(
+                            async move {
+                                if let Err(error) = translation.await {
+                                    // A translator failure must restore original audio,
+                                    // rather than leave the selected endpoint silent.
+                                    capture_stop.cancel();
+                                    return Err(error);
+                                }
+                                if let Some(committed) = committed {
+                                    committed.store(true, Ordering::Release);
+                                }
+                                Ok(())
+                            },
+                            "Speech translation",
+                            [Some(metrics.clone()), None],
+                        ),
+                        committed_writers.clone(),
+                    ),
+                    &processing_handle,
+                );
+            }
             routes.spawn_on(
                 run_selected_route(
                     name,
                     cfg.clone(),
-                    route,
+                    route.clone(),
                     metrics,
                     cancel.child_token(),
                     usage.clone(),
                     RouteIo {
                         recognition,
-                        audio,
+                        audio: None,
                         origin,
                         capture_changes,
                         playback_changes,
                         history: io.history.clone(),
-                        retained: (transcribe && cfg.transcription.enabled
+                        retained: (route.enabled
+                            || transcribe && cfg.transcription.enabled
                             || record_audio && cfg.recording.enabled)
                             .then(|| io.retained.clone())
                             .flatten(),
@@ -1194,14 +1370,13 @@ async fn run_session(
     // Workers finish only after every route has released its sender. This lets
     // disk writers drain and finalize their files after audio/network shutdown.
     drop(transcript_tx);
-    drop(audio_tx);
     let result = supervise_session(
         routes,
         writers,
         cancel,
         io.routes_closed,
         [mic, speaker],
-        processing_finalization_timeout(&cfg),
+        io.retained.clone(),
     )
     .await;
     if let Some(committed) = io.outputs_committed {
@@ -1271,7 +1446,7 @@ async fn supervise_session(
     cancel: CancellationToken,
     closed: Arc<RoutesClosed>,
     metrics: [Arc<RouteMetrics>; 2],
-    processing_finalize_timeout: Duration,
+    retained: Option<Arc<retained::RetainedSession>>,
 ) -> Result<()> {
     let mut failure = None;
     loop {
@@ -1307,6 +1482,11 @@ async fn supervise_session(
     .await;
     if drained.is_err() {
         routes.abort_all();
+        if let Some(retained) = &retained {
+            retained.mark_unrecoverable(
+                "Capture shutdown timed out; queued originals could not be verified",
+            );
+        }
         // Aborted workers cannot retain device ownership or writer senders.
         // Their JoinSets are dropped immediately; no unbounded drain follows.
         let error = "Timed out while stopping audio devices";
@@ -1319,23 +1499,13 @@ async fn supervise_session(
     }
     drop(routes);
     closed.close();
-    // Recognition flushes already captured originals after device ownership has
-    // ended. Restored routing never waits on this bounded network/file drain.
-    let finalized = tokio::time::timeout(processing_finalize_timeout, async {
-        while let Some(completed) = writers.join_next().await {
-            retain_session_failure(&mut failure, completed, &metrics);
-        }
-    })
-    .await;
-    if finalized.is_err() {
-        writers.abort_all();
-        let error = "Timed out while finalizing processing/files; files may be incomplete";
-        for route in &metrics {
-            route.report_processing_error(error);
-        }
-        if failure.is_none() {
-            failure = Some(anyhow!(error));
-        }
+    if let Some(retained) = retained {
+        retained.close_capture();
+    }
+    // Accepted work is session-owned. A slow model or disk never turns elapsed
+    // time into permission to discard it; explicit failures retain the archive.
+    while let Some(completed) = writers.join_next().await {
+        retain_session_failure(&mut failure, completed, &metrics);
     }
     failure.map_or(Ok(()), Err)
 }
@@ -1374,7 +1544,7 @@ async fn run_selected_route(
     io: RouteIo,
 ) -> Result<()> {
     let origin = io.origin;
-    let processing = crate::execution::processing_handle()?;
+    let processing = crate::execution::retention_handle()?;
     activity::while_selected(usage, origin, metrics.clone(), cancel, |active_cancel| {
         let cfg = cfg.clone();
         let route = route.clone();
@@ -1382,8 +1552,8 @@ async fn run_selected_route(
         let io = io.clone();
         let processing = processing.clone();
         async move {
-            // Translation/playback are scoped to this activation. Original STT
-            // belongs to the session so a pause can still produce its final text.
+            // This activation owns only capture and original routing. Session
+            // consumers retain their cursors across device pauses and Stop.
             processing_route(
                 &processing,
                 run_route(name, cfg, route, metrics.clone(), active_cancel, io),
@@ -1437,6 +1607,7 @@ where
 
 /// Independent bounded queues: a slow recognizer cannot hold translation or
 /// physical playback. Both receive the same original PCM, before voice/gain.
+#[cfg(test)]
 fn fanout_original_audio(
     samples: Vec<i16>,
     translation: Option<&mpsc::Sender<Vec<i16>>>,
@@ -1469,6 +1640,7 @@ fn record_recognition_event(
 ) -> Result<()> {
     record_recognition_event_at(event, transcript, metrics, 0)
 }
+#[cfg(test)]
 fn record_recognition_event_at(
     event: ProviderEvent,
     transcript: &Option<TranscriptSink>,
@@ -1520,6 +1692,7 @@ fn record_recognition_event_at(
     }
 }
 
+#[cfg(test)]
 fn record(sender: &Option<TranscriptSink>, record: TranscriptRecord) -> Result<()> {
     if let Some(sender) = sender {
         if matches!(record, TranscriptRecord::Gap)
@@ -1546,6 +1719,7 @@ fn record(sender: &Option<TranscriptSink>, record: TranscriptRecord) -> Result<(
     }
     Ok(())
 }
+#[cfg(test)]
 fn interrupt(metrics: &RouteMetrics, playback: &mpsc::Sender<PlaybackCommand>) {
     metrics
         .audio
@@ -1679,46 +1853,6 @@ mod tests {
 
     type TestRoute = (mpsc::Sender<Vec<i16>>, mpsc::Receiver<Vec<i16>>);
 
-    #[test]
-    fn extended_finalization_requires_a_selected_original_gemini_recognizer() {
-        let mut config = AppConfig::default();
-        config.transcription.microphone_recognition.provider = "gemini".into();
-        config.transcription.speaker_recognition.provider = "whisper".into();
-        assert_eq!(
-            processing_finalization_timeout(&config),
-            PROCESSING_FINALIZE_TIMEOUT
-        );
-        config.transcription.enabled = true;
-        config.transcription.microphone = true;
-        assert_eq!(
-            processing_finalization_timeout(&config),
-            GEMINI_PROCESSING_FINALIZE_TIMEOUT
-        );
-        config.transcription.microphone = false;
-        assert_eq!(
-            processing_finalization_timeout(&config),
-            PROCESSING_FINALIZE_TIMEOUT
-        );
-        config.transcription.speaker = true;
-        config.transcription.speaker_recognition.provider = "gemini".into();
-        assert_eq!(
-            processing_finalization_timeout(&config),
-            GEMINI_PROCESSING_FINALIZE_TIMEOUT
-        );
-        config.transcription.speaker_recognition.provider = "whisper".into();
-        config.transcription.microphone = true;
-        for source in [
-            crate::config::MicrophoneSource::SpeakerOriginal,
-            crate::config::MicrophoneSource::SpeakerOutput,
-        ] {
-            config.audio.microphone_source = source;
-            assert_eq!(
-                processing_finalization_timeout(&config),
-                PROCESSING_FINALIZE_TIMEOUT
-            );
-        }
-    }
-
     fn synthetic_session_routes(
         cancel: &CancellationToken,
     ) -> (JoinSet<Result<()>>, Vec<TestRoute>) {
@@ -1787,7 +1921,7 @@ mod tests {
             cancel.clone(),
             closed.clone(),
             metrics.clone(),
-            PROCESSING_FINALIZE_TIMEOUT,
+            None,
         ));
         release.send(()).unwrap();
         tokio::time::timeout(Duration::from_secs(2), async {
@@ -1831,7 +1965,6 @@ mod tests {
             history_included_secs: 0.0,
             history_transcription_pending: Arc::new(AtomicBool::new(false)),
             routes_closed: closed.clone(),
-            processing_finalize_timeout: PROCESSING_FINALIZE_TIMEOUT,
             retained: None,
         });
         let status = controller.status().await;
@@ -1847,6 +1980,13 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while controller.status().await.finalizing {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
         let status = controller.status().await;
         assert!(!status.running);
         assert!(
@@ -1859,96 +1999,116 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn stalled_session_writer_does_not_hold_routes_or_unbounded_shutdown() {
-        let cancel = CancellationToken::new();
-        let (routes, mut ports) = synthetic_session_routes(&cancel);
-        let metrics = [
-            Arc::new(RouteMetrics::default()),
-            Arc::new(RouteMetrics::default()),
-        ];
-        let (writer_owned, writer_dropped) = tokio::sync::oneshot::channel::<()>();
-        let mut writers = JoinSet::new();
-        writers.spawn(async move {
-            let _owned = writer_owned;
-            std::future::pending::<Result<()>>().await
-        });
-        let closed = Arc::new(RoutesClosed::default());
-        let supervisor = tokio::spawn(supervise_session(
-            routes,
-            writers,
-            cancel.clone(),
-            closed.clone(),
-            metrics.clone(),
-            PROCESSING_FINALIZE_TIMEOUT,
-        ));
-        assert_original_frames_continue(&mut ports).await;
-        assert!(!cancel.is_cancelled() && !supervisor.is_finished());
-        cancel.cancel();
-        tokio::time::timeout(Duration::from_secs(1), closed.wait())
-            .await
-            .expect("Original routing can restart before the blocked file finishes");
-        assert!(
-            !supervisor.is_finished(),
-            "The writer is still pending after routes close"
-        );
-        let result = tokio::time::timeout(
-            PROCESSING_FINALIZE_TIMEOUT + Duration::from_secs(1),
-            supervisor,
-        )
-        .await
-        .expect("Shutdown has a global deadline")
-        .unwrap();
-        assert!(result.unwrap_err().to_string().contains("incomplete"));
-        assert!(
-            tokio::time::timeout(Duration::from_secs(1), writer_dropped)
-                .await
-                .unwrap()
-                .is_err()
-        );
-        assert!(
-            metrics
-                .iter()
-                .all(|route| route.snapshot().processing_error.is_some())
-        );
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn extended_gemini_finalization_releases_devices_before_retained_originals_finish() {
+    async fn capture_stop_releases_routes_without_aborting_slow_finalizers() {
         let cancel = CancellationToken::new();
         let (routes, _ports) = synthetic_session_routes(&cancel);
-        let metrics = [
-            Arc::new(RouteMetrics::default()),
-            Arc::new(RouteMetrics::default()),
-        ];
+        let metrics = [Arc::default(), Arc::default()];
+        let (release, wait) = tokio::sync::oneshot::channel();
         let mut writers = JoinSet::new();
-        writers.spawn(async {
-            tokio::time::sleep(Duration::from_secs(20)).await;
-            Ok(())
-        });
+        writers.spawn(async { wait.await.context("Finalizer was cancelled") });
         let closed = Arc::new(RoutesClosed::default());
-        let supervisor = tokio::spawn(supervise_session(
+        let task = tokio::spawn(supervise_session(
             routes,
             writers,
             cancel.clone(),
             closed.clone(),
-            metrics.clone(),
-            GEMINI_PROCESSING_FINALIZE_TIMEOUT,
+            metrics,
+            None,
         ));
         cancel.cancel();
-        tokio::time::timeout(Duration::from_secs(1), closed.wait())
-            .await
-            .expect("Extended STT recovery never extends the device shutdown deadline");
-        assert!(!supervisor.is_finished());
-        tokio::time::timeout(GEMINI_PROCESSING_FINALIZE_TIMEOUT, supervisor)
-            .await
-            .expect("Retained original recovery has a bounded drain")
-            .unwrap()
-            .unwrap();
+        closed.wait().await;
+        tokio::time::advance(Duration::from_secs(120)).await;
         assert!(
-            metrics
-                .iter()
-                .all(|route| route.snapshot().processing_error.is_none())
+            !task.is_finished(),
+            "Elapsed time cannot discard accepted processing"
         );
+        release.send(()).unwrap();
+        task.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn stopping_a_new_session_does_not_cancel_an_older_finalizer() {
+        let directory = tempfile::tempdir().unwrap();
+        let controller =
+            Controller::new(AppConfig::default(), directory.path().join("config.toml")).unwrap();
+        let observer_cancel = CancellationToken::new();
+        let (_observations, shared_usage) = watch::channel(audio::activity::EndpointUse::default());
+        {
+            let mut state = controller.state.lock().await;
+            let microphone = state.config.microphone.playback_device.clone();
+            let speaker = state.config.speaker.capture_device.clone();
+            let (mic_tx, _) = watch::channel(microphone.clone());
+            let (speaker_tx, _) = watch::channel(speaker.clone());
+            state.endpoint_observer = Some(EndpointObserver {
+                microphone,
+                speaker,
+                _microphone: mic_tx,
+                _speaker: speaker_tx,
+                _cancel: observer_cancel.clone().drop_guard(),
+                usage: shared_usage.clone(),
+            });
+        }
+        let mut releases = Vec::new();
+        for name in ["First", "Second"] {
+            let cancel = CancellationToken::new();
+            let stopped = cancel.clone();
+            let closed = Arc::new(RoutesClosed::default());
+            let captured = closed.clone();
+            let (release, wait) = tokio::sync::oneshot::channel();
+            releases.push(release);
+            let task = tokio::spawn(async move {
+                stopped.cancelled().await;
+                captured.close();
+                wait.await.context("Pending work was discarded")
+            });
+            let (physical_input, _) = watch::channel(String::new());
+            let (physical_output, _) = watch::channel(String::new());
+            controller.state.lock().await.running = Some(Running {
+                _cancel_on_drop: cancel.clone().drop_guard(),
+                _local_runtime: None,
+                session: crate::session::SessionIdentity::new(Some(name)).unwrap(),
+                cancel,
+                task,
+                microphone: Arc::default(),
+                speaker: Arc::default(),
+                physical_input,
+                physical_output,
+                history_included_secs: 0.0,
+                history_transcription_pending: Arc::default(),
+                routes_closed: closed,
+                retained: None,
+            });
+            controller.stop().await.unwrap();
+            let mut state = controller.state.lock().await;
+            assert!(endpoint_usage(&mut state).same_channel(&shared_usage));
+            assert!(!observer_cancel.is_cancelled());
+        }
+        let status = controller.status().await;
+        assert!(!status.running && status.finalizing);
+        assert_eq!(status.finalizing_sessions.len(), 2);
+        controller.set_config(AppConfig::default()).await.unwrap();
+        releases.pop().unwrap().send(()).unwrap();
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while controller.status().await.finalizing_sessions.len() != 1 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(
+            controller.status().await.finalizing_sessions[0].session_name,
+            "First"
+        );
+        releases.pop().unwrap().send(()).unwrap();
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while controller.status().await.finalizing {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        controller.shutdown().await.unwrap();
+        assert!(observer_cancel.is_cancelled());
     }
 
     #[tokio::test]
@@ -2332,7 +2492,6 @@ mod tests {
             history_included_secs: 0.0,
             history_transcription_pending: Arc::new(AtomicBool::new(false)),
             routes_closed: Arc::new(RoutesClosed::default()),
-            processing_finalize_timeout: PROCESSING_FINALIZE_TIMEOUT,
             retained: None,
         });
         let (interface, revision) = controller

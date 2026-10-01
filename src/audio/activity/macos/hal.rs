@@ -8,7 +8,8 @@ use anyhow::{Context, Result, ensure};
 use coreaudio_hal::{
     AudioObject, MissingQualifier, PROCESS_INPUT_DEVICES, PROCESS_IS_RUNNING_INPUT,
     PROCESS_IS_RUNNING_OUTPUT, PROCESS_OUTPUT_DEVICES, PROCESS_PID, SYSTEM_TRANSLATE_UID_TO_DEVICE,
-    System, property::SYSTEM_DEFAULT_INPUT,
+    System,
+    property::{SYSTEM_DEFAULT_INPUT, SYSTEM_DEFAULT_OUTPUT},
 };
 use cpal::traits::DeviceTrait;
 use tokio::sync::{mpsc, watch};
@@ -229,6 +230,16 @@ fn inspect(
             Err(error) => {
                 microphone_error = Some(format!(
                     "CoreAudio could not inspect the system microphone selection: {error}"
+                ))
+            }
+        }
+    }
+    if speaker_device.is_some() && speaker_error.is_none() {
+        match system.get_property(SYSTEM_DEFAULT_OUTPUT) {
+            Ok(id) => snapshot.select_default_speaker(Some(id)),
+            Err(error) => {
+                speaker_error = Some(format!(
+                    "CoreAudio could not inspect the system speaker selection: {error}"
                 ))
             }
         }

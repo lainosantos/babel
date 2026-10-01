@@ -127,9 +127,9 @@ also remains shared with session recovery until the selected files complete.
 
 ## Recover an incomplete session
 
-Sessions with recording or transcription enabled retain the selected original
-sources independently of live processing queues. If a writer, recognizer or
-finalization fails, the **Session files need recovery** card offers **Recover session**, which
+Sessions using recording, transcription or translation retain accepted original
+sources independently of processing queues. If a session-file writer, recognizer
+or file finalization fails, the **Session files need recovery** card offers **Recover session**, which
 reprocesses the retained originals. Keep Babel open until recovery completes.
 The optional pre-session prefix is retained too. Both sources keep their own
 timestamps and enter recognition separately; mixing happens only in the WAV.
@@ -145,9 +145,16 @@ windows advance the clock without an inference request.
 Provider-assigned speaker IDs may restart between requests; they are not
 persistent identities across windows or sources.
 
-Live retained PCM starts in memory. Above an 8 MiB working budget, a separate
-processing worker spills bounded batches encrypted with **XChaCha20-Poly1305**
-under a unique `.babel-retention-*` directory in the system temporary folder.
+Every active recording, transcription or translation session writes accepted
+original PCM to an encrypted temporary journal. A separate processing worker
+batches audio and encrypts it with **XChaCha20-Poly1305** under a unique
+`.babel-retention-*` directory in the system temporary folder. Independent readers
+feed recognizers, recording and translation from recent immutable frames in RAM,
+without waiting for a disk write or filesystem sync. The journal appends those
+frames asynchronously; they stay in RAM until the encrypted append is acknowledged.
+Slower consumers read older committed batches from the journal, so one consumer
+does not discard another consumer's backlog. Capture callbacks and original
+routing perform no journal I/O or inference.
 The platform resolves that folder, including its temporary-directory environment
 overrides such as `TMPDIR` on Linux/macOS and `TMP`/`TEMP` on Windows. It is
 independent of `files.base_path`. Audio and capture metadata are encrypted before
@@ -159,13 +166,15 @@ inherits the temporary parent folder's ACL. The final, explicitly requested
 TXT/WAV files still use the configured destination folders and base path. They
 are ordinary user files and are not encrypted by this temporary-storage scheme.
 
-Pending originals are not evicted by age or by a failed provider. They are
-released after all selected writers complete successfully, including their
-final filesystem sync. The already allocated optional history prefix stays
-shared in RAM. If spill fails, accepted live originals stay in memory; a 64 MiB
-live-retention ceiling reports an explicit failure rather than silently
-overwriting retained data. The ceiling excludes the separately configured
+Pending originals are not evicted by age or by a failed provider. Final files
+must complete successfully, including their filesystem sync, before their
+retained originals are released. Journal staging is bounded to 64 MiB of live
+retention memory. A storage failure keeps accepted staging data in memory and
+reports failure; reaching the ceiling reports an incomplete capture instead of
+silently overwriting retained data. The ceiling excludes the separately configured
 rolling/history prefix and small in-flight encryption/decryption buffers.
+The optional pre-session history prefix remains shared in RAM; enabling rolling
+history alone does not create the active-session journal.
 
 This is recovery while the process remains alive, **not crash recovery**.
 Normal cleanup removes temporary ciphertext and erases the key. Forced exit or
@@ -256,12 +265,19 @@ are visible without canceling original routing.
 
 ## Finalization and privacy
 
-On normal stop, Babel lets the recorder consume queued frames, writes the tail
-and updates the WAV header before closing. Intermediate headers are periodically
-updated for committed data. Power loss, forced termination or disk failure may
-lose the last seconds; an interrupted recording does not have the guarantees
-of a completed stop. Session shutdown has a bounded drain deadline and reports
-potentially incomplete files if that deadline expires.
+Stop closes capture for that session. Babel then consumes every accepted original,
+writes the recording tail and updates the WAV header before closing. Included
+history and original transcription continue independently of capture. Files stay
+in finalization until completion or an explicit provider/storage failure; no
+session-wide timer discards the pending backlog. Original routing continues, and
+a new session can start while earlier files finish. A failed finalization reports
+the error and retains originals for recovery while Babel remains open.
+
+Intermediate WAV headers are periodically updated for committed data. Power loss,
+forced termination, hardware failure or disk failure can leave files incomplete;
+an interrupted recording does not have the guarantees of a completed stop.
+Temporary encrypted originals use a key held only in RAM, so they cannot provide
+recovery after process exit or loss of that key.
 
 Files use exclusive creation and Unix mode `0600`: read/write by the user only.
 On Windows, they inherit the chosen folder's permissions. Recording stays local

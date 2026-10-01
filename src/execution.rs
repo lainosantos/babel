@@ -144,6 +144,13 @@ pub fn processing_handle() -> Result<Handle> {
     shared_handle(&PROCESSING, false, "babel-processing")
 }
 
+/// Original staging and encrypted journal commits have their own executor and
+/// blocking pool. Saturated model workers cannot starve accepted capture copies.
+pub fn retention_handle() -> Result<Handle> {
+    static RETENTION: OnceLock<std::result::Result<Runtime, String>> = OnceLock::new();
+    shared_handle(&RETENTION, false, "babel-retention")
+}
+
 fn shared_handle(
     cell: &'static OnceLock<std::result::Result<Runtime, String>>,
     audio: bool,

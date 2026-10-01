@@ -3,7 +3,7 @@ use std::{borrow::Cow, future::Future, time::Duration};
 use anyhow::{Result, bail, ensure};
 use async_trait::async_trait;
 use base64::{Engine as _, engine::general_purpose::STANDARD};
-use futures_util::{SinkExt, StreamExt, stream::SplitSink, stream::SplitStream};
+use futures_util::{SinkExt, StreamExt};
 use serde_json::{Value, json};
 use tokio::{
     net::TcpStream,
@@ -23,6 +23,7 @@ use super::{ProviderEvent, SessionConfig, SpeechProvider, TranscriptMetadata};
 mod languages;
 mod recovery;
 mod transcription;
+mod translation;
 pub(crate) use languages::target_language_code as translation_target_language;
 
 const ENDPOINT: &str = "wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent";
@@ -32,7 +33,6 @@ const MAX_MESSAGE_BYTES: usize = 512 * 1024;
 const MAX_AUDIO_BYTES: usize = 48_000; // At most one second of output in one part.
 const MAX_INPUT_SAMPLES: usize = 16_000;
 const IO_TIMEOUT: Duration = Duration::from_millis(500);
-const EVENT_TIMEOUT: Duration = Duration::from_secs(2);
 const RECEIVE_TIMEOUT: Duration = Duration::from_secs(45);
 
 type Socket = WebSocketStream<MaybeTlsStream<TcpStream>>;
@@ -310,9 +310,9 @@ async fn run_sessions(
         if !failure.retryable {
             bail!("{}", failure.message);
         }
-        // EOF is a finite STT drain. A failed acknowledgement cannot become a
+        // EOF starts a finite drain. A failed acknowledgement cannot become a
         // successful empty connection after retrying already-consumed input.
-        if is_transcription_model(config) && audio.is_closed() {
+        if audio.is_closed() {
             bail!("{}", failure.message);
         }
         // A healthy minute replenishes the budget, allowing normal long-running
@@ -340,11 +340,13 @@ async fn run_sessions(
         }
         // The source may close while retry notifications or backoff are in
         // flight. Do not discard its final queued PCM and accept an empty
-        // replacement connection as successful transcription.
-        if is_transcription_model(config) && audio.is_closed() {
+        // replacement connection as successful processing.
+        if audio.is_closed() {
             bail!("{}", failure.message);
         }
-        discard_queued_audio(&mut audio);
+        if is_transcription_model(config) {
+            discard_queued_audio(&mut audio);
+        }
     }
 }
 
@@ -509,9 +511,6 @@ async fn run_connection_mode(
         history || is_transcription_model(config),
     )
     .await?;
-    if !history && !is_transcription_model(config) {
-        discard_queued_audio(audio);
-    }
     emit(events, ProviderEvent::Connected).await?;
     if history {
         return transcribe_history(socket, audio, events, config.vad_silence_ms).await;
@@ -519,14 +518,7 @@ async fn run_connection_mode(
     if is_transcription_model(config) {
         return transcription::run(socket, audio, events, config.vad_silence_ms).await;
     }
-    let (writer, reader) = socket.split();
-    let (control_tx, control_rx) = mpsc::channel(8);
-    // Independent futures keep receiving translated PCM while capture sends.
-    // Dropping either future closes the connection and cancels its peer.
-    tokio::select! {
-        result = write_audio(writer, audio, control_rx) => result,
-        result = read_events(reader, events, resume_handle, control_tx, is_transcription_model(config)) => result,
-    }
+    translation::run(socket, audio, events, config, resume_handle).await
 }
 
 /// Manual VAD is documented for Live Transcribe. Unlike auto-VAD, it supplies
@@ -691,113 +683,6 @@ fn audio_message(samples: &[i16]) -> SessionResult<Message> {
         .to_string()
         .into(),
     ))
-}
-
-async fn write_audio(
-    mut writer: SplitSink<Socket, Message>,
-    audio: &mut mpsc::Receiver<Vec<i16>>,
-    mut control: mpsc::Receiver<Message>,
-) -> SessionResult<()> {
-    let mut heartbeat = tokio::time::interval(Duration::from_secs(15));
-    heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-    // Skip the immediate interval tick; setup just confirmed connectivity.
-    heartbeat.tick().await;
-    let mut last_audio = Instant::now();
-    let mut audio_active = false;
-    let mut inactivity = tokio::time::interval(Duration::from_secs(1));
-    inactivity.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-    loop {
-        tokio::select! {
-            message = control.recv() => {
-                let Some(message) = message else { return Err(Failure::retry("Gemini receive loop stopped")); };
-                io_deadline(writer.send(message)).await?;
-            }
-            samples = audio.recv() => {
-                let Some(samples) = samples else { return Err(Failure::fatal("audio source closed unexpectedly")); };
-                if samples.is_empty() { continue; }
-                io_deadline(writer.send(audio_message(&samples)?)).await?;
-                last_audio = Instant::now();
-                audio_active = true;
-            }
-            _ = heartbeat.tick() => {
-                io_deadline(writer.send(Message::Ping(Vec::new().into()))).await?;
-            }
-            _ = inactivity.tick() => {
-                if audio_active && last_audio.elapsed() >= Duration::from_secs(1) {
-                    io_deadline(writer.send(Message::Text(json!({"realtimeInput": {"audioStreamEnd": true}}).to_string().into()))).await?;
-                    audio_active = false;
-                }
-            }
-        }
-    }
-}
-
-async fn read_events(
-    mut reader: SplitStream<Socket>,
-    events: &mpsc::Sender<ProviderEvent>,
-    resume_handle: &mut Option<String>,
-    control: mpsc::Sender<Message>,
-    transcription_only: bool,
-) -> SessionResult<()> {
-    loop {
-        let message = timeout(RECEIVE_TIMEOUT, reader.next())
-            .await
-            .map_err(|_| Failure::retry("Gemini connection stopped responding"))?
-            .ok_or_else(|| Failure::retry("Gemini WebSocket closed unexpectedly"))?
-            .map_err(socket_error)?;
-        let value = match message {
-            Message::Text(text) => parse_json(text.as_bytes())?,
-            Message::Binary(bytes) => parse_json(&bytes)?,
-            Message::Ping(data) => {
-                control
-                    .try_send(Message::Pong(data))
-                    .map_err(|_| Failure::retry("Gemini control channel is congested"))?;
-                continue;
-            }
-            Message::Pong(_) => continue,
-            Message::Close(frame) => {
-                return Err(close_failure(
-                    frame.as_ref().map(|f| u16::from(f.code)),
-                    CloseStage::Streaming,
-                ));
-            }
-            Message::Frame(_) => return Err(Failure::fatal("unexpected raw WebSocket frame")),
-        };
-        if let Some(update) = value.get("sessionResumptionUpdate") {
-            if update.get("resumable").and_then(Value::as_bool) == Some(true) {
-                if let Some(handle) = update.get("newHandle").and_then(Value::as_str) {
-                    if handle.len() > 16_384 {
-                        return Err(Failure::fatal(
-                            "Gemini resume handle exceeds the memory limit",
-                        ));
-                    }
-                    if !handle.is_empty() {
-                        *resume_handle = Some(handle.to_owned());
-                    }
-                }
-            } else {
-                // An old handle can replay already-heard content. Resume only
-                // from a point explicitly reported as currently resumable.
-                *resume_handle = None;
-            }
-        }
-        if let Some(content) = value.get("serverContent") {
-            let decoded = if transcription_only {
-                decode_transcription_content(content)?
-            } else {
-                decode_content(content)?
-            };
-            for event in decoded {
-                emit(events, event).await?;
-            }
-        }
-        if value.get("goAway").is_some() {
-            return Err(Failure::retry("Gemini requested session rotation"));
-        }
-        if value.get("toolCall").is_some() {
-            return Err(Failure::fatal("Gemini requested an unsupported tool call"));
-        }
-    }
 }
 
 /// Recognize authoritative ASR finals, including turns without recognized words.
@@ -1087,9 +972,9 @@ fn validate_pcm_mime(mime: &str) -> SessionResult<()> {
 }
 
 async fn emit(events: &mpsc::Sender<ProviderEvent>, event: ProviderEvent) -> SessionResult<()> {
-    timeout(EVENT_TIMEOUT, events.send(event))
+    events
+        .send(event)
         .await
-        .map_err(|_| Failure::fatal("audio playback event queue is stalled"))?
         .map_err(|_| Failure::fatal("provider event receiver closed"))
 }
 

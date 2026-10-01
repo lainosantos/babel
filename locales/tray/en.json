@@ -31,5 +31,6 @@
   "agent.activated_hint": "Say your command.",
   "agent.processing_hint": "Preparing and running your command.",
   "agent.succeeded_hint": "Your command has finished.",
-  "agent.failed_hint": "Open Babel to see the details."
+  "agent.failed_hint": "Open Babel to see the details.",
+  "status.finalizing": "Babel · finalizing session"
 }

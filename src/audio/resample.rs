@@ -9,6 +9,10 @@ const PHASES: usize = 512;
 
 pub(crate) struct Resampler {
     ratio: f64,
+    input_rate: u32,
+    output_rate: u32,
+    input_samples: u64,
+    output_samples: u64,
     position: f64,
     buffer: VecDeque<f32>,
     coefficients: Vec<[f32; TAPS]>,
@@ -60,7 +64,18 @@ impl ChannelResampler {
             }
         }
     }
-    #[cfg(any(target_os = "macos", target_os = "windows", test))]
+    /// Flush only the delayed output corresponding to accepted input frames.
+    pub(crate) fn finish(&mut self, output: &mut Vec<f32>) {
+        for channel in 0..self.channels {
+            self.outputs[channel].clear();
+            self.filters[channel].finish(&mut self.outputs[channel]);
+        }
+        for frame in 0..self.outputs[0].len() {
+            for channel in 0..self.channels {
+                output.push(self.outputs[channel][frame]);
+            }
+        }
+    }
     pub(crate) fn reset(&mut self) {
         for filter in &mut self.filters {
             filter.reset();
@@ -73,6 +88,10 @@ impl Resampler {
         if input_rate == output_rate {
             return Self {
                 ratio: 1.0,
+                input_rate,
+                output_rate,
+                input_samples: 0,
+                output_samples: 0,
                 position: 0.0,
                 buffer: VecDeque::new(),
                 coefficients: Vec::new(),
@@ -106,6 +125,10 @@ impl Resampler {
         buffer.extend(std::iter::repeat_n(0.0, TAPS / 2));
         Self {
             ratio: f64::from(input_rate) / f64::from(output_rate),
+            input_rate,
+            output_rate,
+            input_samples: 0,
+            output_samples: 0,
             position: (TAPS / 2) as f64,
             buffer,
             coefficients,
@@ -114,10 +137,13 @@ impl Resampler {
     }
 
     pub(crate) fn process(&mut self, input: &[f32], output: &mut Vec<f32>) {
+        self.input_samples = self.input_samples.saturating_add(input.len() as u64);
         if self.passthrough {
             output.extend_from_slice(input);
+            self.output_samples = self.output_samples.saturating_add(input.len() as u64);
             return;
         }
+        let output_start = output.len();
         self.buffer.extend(input.iter().copied());
         while self.position.floor() as usize + TAPS / 2 < self.buffer.len() {
             let center = self.position.floor() as usize;
@@ -136,13 +162,32 @@ impl Resampler {
             .min(self.buffer.len());
         self.buffer.drain(..discard);
         self.position -= discard as f64;
+        self.output_samples = self
+            .output_samples
+            .saturating_add((output.len() - output_start) as u64);
     }
 
-    #[cfg(any(target_os = "macos", target_os = "windows", test))]
+    pub(crate) fn finish(&mut self, output: &mut Vec<f32>) {
+        if !self.passthrough {
+            // Floating-point phase accumulation may cross an exact duration
+            // by one sample. EOF uses integer frame counts to retain precisely
+            // the input duration while emitting the filter's delayed tail.
+            let expected = (u128::from(self.input_samples) * u128::from(self.output_rate))
+                .div_ceil(u128::from(self.input_rate));
+            let remaining = expected.saturating_sub(u128::from(self.output_samples));
+            let start = output.len();
+            self.process(&[0.0; TAPS / 2], output);
+            output.truncate(start.saturating_add(remaining.min(usize::MAX as u128) as usize));
+            self.reset();
+        }
+    }
+
     pub(crate) fn reset(&mut self) {
         self.buffer.clear();
         self.buffer.extend(std::iter::repeat_n(0.0, TAPS / 2));
         self.position = (TAPS / 2) as f64;
+        self.input_samples = 0;
+        self.output_samples = 0;
     }
 }
 
@@ -178,6 +223,35 @@ mod tests {
         output.clear();
         resampler.process(&[0.0; 960], &mut output);
         assert!(output.iter().all(|value| *value == 0.0));
+    }
+
+    #[test]
+    fn eof_flushes_delayed_channel_samples_once_without_extending_the_input_duration() {
+        for (input_rate, output_rate) in [(48000, 16000), (16000, 48000), (48000, 48000)] {
+            let mut resampler = ChannelResampler::new(input_rate, output_rate, 2);
+            let frames = input_rate as usize / 10;
+            let mut input = vec![0.0; frames * 2];
+            input[(frames - 1) * 2] = 1.0;
+            let mut output = Vec::new();
+            resampler.process(&input, &mut output);
+            let before = output.len();
+            resampler.finish(&mut output);
+            assert_eq!(output.len(), output_rate as usize / 10 * 2);
+            assert!(output.iter().step_by(2).any(|sample| sample.abs() > 0.001));
+            assert!(
+                output
+                    .iter()
+                    .skip(1)
+                    .step_by(2)
+                    .all(|sample| *sample == 0.0)
+            );
+            if input_rate != output_rate {
+                assert!(output.len() > before);
+            }
+            let finished = output.len();
+            resampler.finish(&mut output);
+            assert_eq!(output.len(), finished, "A second EOF duplicates no tail");
+        }
     }
 
     fn convert_tone(frequency: f64) -> Vec<f32> {

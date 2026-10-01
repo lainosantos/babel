@@ -657,12 +657,16 @@
   "routing.speaker_audio_short": "Áudio da saída",
   "routing.after_output_translation": "Após a tradução da saída",
   "routing.played_audio": "Áudio reproduzido",
-  "retention.title": "Arquivos de sessão precisam de recuperação",
-  "retention.hint": "O áudio original ainda está disponível para tentar concluir a gravação ou transcrição. Mantenha o Babel aberto até a recuperação terminar; ao fechá-lo, o áudio pendente não poderá ser recuperado.",
+  "retention.title": "Processamento de sessão precisa de recuperação",
+  "retention.hint": "O áudio original está preservado para retomar o processamento pendente. Uma tradução interrompida pode repetir falas anteriores; rotas de tradução concluídas não são repetidas. Mantenha o Babel aberto até a recuperação terminar; ao fechá-lo, o áudio pendente não poderá ser recuperado.",
   "retention.read_error": "Não foi possível verificar as sessões pendentes: {error}",
   "retention.invalid_response": "Resposta inválida de sessões pendentes",
   "retention.recover": "Recuperar sessão",
   "retention.recovering": "Recuperando…",
   "retention.available": "Áudio preservado: {size} MiB",
-  "retention.recovered": "Sessão recuperada: {name}"
+  "retention.recovered": "Sessão recuperada: {name}",
+  "session.finalizing": "Finalizando sessão",
+  "session.finalizing_title": "Sessões em finalização",
+  "session.finalizing_hint": "O trabalho pendente continua em segundo plano. Mantenha o Babel aberto até a conclusão. Você pode iniciar outra sessão.",
+  "session.capture_stopped": "Captura da sessão encerrada. O trabalho pendente continua em segundo plano."
 }

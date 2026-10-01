@@ -96,6 +96,208 @@ fn command(sample: i16, generation: u64) -> PlaybackCommand {
     }
 }
 
+struct DrainingBackend {
+    events: mpsc::Sender<Event>,
+    fail: bool,
+    draining: Option<Arc<tokio::sync::Notify>>,
+}
+
+#[async_trait]
+impl Backend for DrainingBackend {
+    async fn capture(
+        &self,
+        _: &str,
+        _: AudioOptions,
+        _: mpsc::Sender<OriginalFrame>,
+        _: CancellationToken,
+        _: Arc<AudioStats>,
+    ) -> Result<()> {
+        unreachable!("Playback-only fixture")
+    }
+
+    async fn playback(
+        &self,
+        device: &str,
+        _: AudioOptions,
+        mut input: mpsc::Receiver<PlaybackCommand>,
+        cancel: CancellationToken,
+        _: Arc<AudioStats>,
+    ) -> Result<()> {
+        while let Some(command) = input.recv().await {
+            tokio::time::sleep(Duration::from_secs(1)).await;
+            anyhow::ensure!(
+                !cancel.is_cancelled(),
+                "Normal EOF cancelled accepted playback"
+            );
+            if let PlaybackCommand::Audio {
+                samples,
+                generation,
+            } = command
+            {
+                self.events
+                    .send(Event::Played(device.into(), samples[0], generation))
+                    .await?;
+            }
+        }
+        // Device buffering can outlive the last accepted input command.
+        if let Some(draining) = &self.draining {
+            draining.notify_one();
+        }
+        tokio::select! {
+            _ = cancel.cancelled() => return Ok(()),
+            _ = tokio::time::sleep(Duration::from_secs(5)) => {},
+        }
+        anyhow::ensure!(
+            !cancel.is_cancelled(),
+            "Normal EOF interrupted device draining"
+        );
+        self.events.send(Event::Stopped(device.into())).await?;
+        anyhow::ensure!(!self.fail, "Fixture device drain failed");
+        Ok(())
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn playback_eof_waits_for_the_complete_backend_tail_and_surfaces_drain_failure() {
+    for fail in [false, true] {
+        let (events, mut received) = mpsc::channel(8);
+        let backend = DrainingBackend {
+            events,
+            fail,
+            draining: None,
+        };
+        let (_device, selected) = watch::channel("output".to_owned());
+        let (source, input) = mpsc::channel(8);
+        for sample in 1..=4 {
+            source.send(command(sample, 0)).await.unwrap();
+        }
+        drop(source);
+        let result = tokio::time::timeout(
+            Duration::from_secs(15),
+            playback_with(
+                &backend,
+                "output",
+                options(),
+                input,
+                selected,
+                CancellationToken::new(),
+                Arc::new(AudioStats::default()),
+            ),
+        )
+        .await
+        .unwrap();
+        for sample in 1..=4 {
+            assert_eq!(
+                received.recv().await,
+                Some(Event::Played("output".into(), sample, 0))
+            );
+        }
+        assert_eq!(received.recv().await, Some(Event::Stopped("output".into())));
+        if fail {
+            assert!(format!("{:#}", result.unwrap_err()).contains("Fixture device drain failed"));
+        } else {
+            result.unwrap();
+        }
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn changing_output_during_eof_drain_reports_unfinished_playback() {
+    let (events, _received) = mpsc::channel(8);
+    let draining = Arc::new(tokio::sync::Notify::new());
+    let backend = DrainingBackend {
+        events,
+        fail: false,
+        draining: Some(draining.clone()),
+    };
+    let (device, selected) = watch::channel("old".to_owned());
+    let (source, input) = mpsc::channel(1);
+    source.send(command(42, 0)).await.unwrap();
+    drop(source);
+    let stats = Arc::new(AudioStats::default());
+    let observed = stats.clone();
+    let task = tokio::spawn(async move {
+        playback_with(
+            &backend,
+            "old",
+            options(),
+            input,
+            selected,
+            CancellationToken::new(),
+            stats,
+        )
+        .await
+    });
+    tokio::time::timeout(Duration::from_secs(3), draining.notified())
+        .await
+        .unwrap();
+    device.send("new".into()).unwrap();
+    let error = tokio::time::timeout(Duration::from_secs(3), task)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("Playback device changed before queued audio finished")
+    );
+    assert_eq!(observed.dropped_frames.load(Ordering::Relaxed), 1);
+}
+
+#[tokio::test(start_paused = true)]
+async fn translated_device_switch_reports_accepted_backend_audio_with_empty_outer_queues() {
+    let (events, mut observed) = mpsc::channel(4);
+    let backend = MockBackend { events };
+    let (device, selected) = watch::channel("old".to_owned());
+    let (source, input) = mpsc::channel(1);
+    let stats = Arc::new(AudioStats {
+        translated_playback: true,
+        ..Default::default()
+    });
+    let checked = stats.clone();
+    let task = tokio::spawn(async move {
+        playback_with(
+            &backend,
+            "old",
+            options(),
+            input,
+            selected,
+            CancellationToken::new(),
+            stats,
+        )
+        .await
+    });
+    assert_eq!(event(&mut observed).await, Event::Started("old".into()));
+    source.send(command(42, 0)).await.unwrap();
+    assert_eq!(
+        event(&mut observed).await,
+        Event::Played("old".into(), 42, 0)
+    );
+    assert_eq!(
+        source.capacity(),
+        1,
+        "The outer queue is empty, but the backend accepted audio"
+    );
+    device.send("new".into()).unwrap();
+    let error = tokio::time::timeout(Duration::from_secs(3), task)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("Translated playback device changed after accepting audio")
+    );
+    assert_eq!(checked.dropped_frames.load(Ordering::Relaxed), 1);
+    assert_eq!(event(&mut observed).await, Event::Stopped("old".into()));
+    assert!(
+        observed.recv().await.is_none(),
+        "Failed translation must not silently restart output"
+    );
+}
+
 #[tokio::test(start_paused = true)]
 async fn capture_congestion_is_distinct_from_playback_discard() {
     let (events, mut received) = mpsc::channel(8);

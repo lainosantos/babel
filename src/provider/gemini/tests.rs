@@ -688,6 +688,14 @@ async fn socket_waits_for_setup_then_streams_input_and_output() {
             .send(Message::Text(r#"{"setupComplete":{}}"#.into()))
             .await
             .unwrap();
+        let first = socket.next().await.unwrap().unwrap();
+        let first: Value = serde_json::from_str(first.to_text().unwrap()).unwrap();
+        assert_eq!(
+            STANDARD
+                .decode(first["realtimeInput"]["audio"]["data"].as_str().unwrap())
+                .unwrap(),
+            [99, 0]
+        );
         let input = socket.next().await.unwrap().unwrap();
         let input: Value = serde_json::from_str(input.to_text().unwrap()).unwrap();
         assert_eq!(
@@ -702,7 +710,7 @@ async fn socket_waits_for_setup_then_streams_input_and_output() {
         let _ = socket.next().await;
     });
     let (task, audio, mut events, cancel) = spawn_provider(config(), endpoint);
-    audio.send(vec![99]).await.unwrap(); // Captured during setup: discarded, never replayed.
+    audio.send(vec![99]).await.unwrap(); // Captured during setup: retained behind the setup gate.
     assert_eq!(event(&mut events).await, ProviderEvent::Connected);
     audio.send(vec![0x1234, -2]).await.unwrap();
     assert_eq!(
@@ -822,7 +830,7 @@ async fn reconnect_budget_terminates_repeated_disconnects() {
 }
 
 #[tokio::test]
-async fn source_eof_is_a_failure_not_a_clean_stop() {
+async fn empty_source_eof_is_a_clean_stop() {
     let (listener, endpoint) = listener().await;
     let server = tokio::spawn(async move {
         let (socket, _) = listener.accept().await.unwrap();
@@ -837,13 +845,7 @@ async fn source_eof_is_a_failure_not_a_clean_stop() {
     let (task, audio, mut events, _cancel) = spawn_provider(config(), endpoint);
     assert_eq!(event(&mut events).await, ProviderEvent::Connected);
     drop(audio);
-    assert!(
-        task_result(task)
-            .await
-            .unwrap_err()
-            .to_string()
-            .contains("audio source closed")
-    );
+    task_result(task).await.unwrap();
     timeout(Duration::from_secs(3), server)
         .await
         .unwrap()
@@ -972,4 +974,12 @@ fn capability_flags_do_not_advertise_unavailable_diarization_or_cloning() {
         super::super::capabilities("unverified-model"),
         super::super::ProviderCapabilities::default()
     );
+}
+
+#[tokio::test(start_paused = true)]
+async fn output_delivery_waits_for_capacity_and_allows_force_cancellation() {
+    super::super::assert_event_backpressure(
+        |events, event| async move { emit(&events, event).await },
+    )
+    .await;
 }

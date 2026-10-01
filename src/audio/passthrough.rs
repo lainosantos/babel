@@ -653,6 +653,10 @@ mod tests {
         let _ = next_history_playback(&mut play_rx).await;
         assert!(history.snapshot(600, Instant::now()).frames.is_empty());
         history.configure(&HistoryConfig::default());
+        // The timestamp is the end of capture. Model a complete new frame
+        // after re-enabling; speech conversion subtracts its filter delay,
+        // so an instantaneous synthetic frame would predate that boundary.
+        tokio::time::sleep(Duration::from_millis(u64::from(options().frame_ms))).await;
         capture_tx.send(frame(0)).await.unwrap();
         let _ = next_history_playback(&mut play_rx).await;
         tokio::time::timeout(Duration::from_secs(1), async {

@@ -77,7 +77,6 @@ pub(super) async fn write_transcript(
     mut live: mpsc::Receiver<TranscriptRecord>,
     config: AppConfig,
     snapshot: HistorySnapshot,
-    cancel: CancellationToken,
     pending: Arc<AtomicBool>,
 ) -> Result<()> {
     let guard = PendingGuard(pending);
@@ -91,12 +90,13 @@ pub(super) async fn write_transcript(
         return writer.run(live).await;
     }
     let (output, output_rx) = mpsc::channel(128);
-    // A session deadline can abort this parent while storage is unavailable.
-    // Keep ownership of the child task instead of detaching it on that path.
+    // Keep ownership of the file task if this worker fails or is dropped.
     let mut writer_task =
         tokio_util::task::AbortOnDropHandle::new(tokio::spawn(writer.run(output_rx)));
     let (history_tx, mut history_rx) = mpsc::channel(32);
-    let replay_cancel = cancel.child_token();
+    // Stop closes capture, but accepted history belongs to the file worker.
+    // Cancel replay only when this worker ends, never with the device token.
+    let replay_cancel = CancellationToken::new();
     let replay_guard = replay_cancel.clone().drop_guard();
     let seconds = snapshot.included_secs;
     let captured_at = chrono::Utc::now()
@@ -140,8 +140,8 @@ pub(super) async fn write_transcript(
         output.send(TranscriptRecord::Section("From the session start".into()))
             .await.context("Transcript file closed")?;
         for record in backlog { output.send(record).await.context("Transcript file closed")?; }
-        // Cancelling the optional history prefix must not discard live finals
-        // still arriving after the capture routes have stopped.
+        // A failed history prefix must not discard live finals still arriving
+        // after the capture routes have stopped.
         while let Some(record) = live.recv().await {
             output.send(record).await.context("Transcript file closed")?;
         }
@@ -503,7 +503,6 @@ mod tests {
             live_rx,
             config,
             snapshot,
-            CancellationToken::new(),
             Arc::new(AtomicBool::new(true)),
         ));
         recorder
@@ -654,7 +653,6 @@ mod tests {
             rx,
             config,
             snapshot,
-            CancellationToken::new(),
             pending.clone(),
         ));
         tokio::time::timeout(Duration::from_secs(2), async {
@@ -674,16 +672,21 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn cancelling_history_preserves_accepted_live_text_and_reports_partial_prefix() {
+    async fn history_failure_preserves_accepted_live_text_and_reports_partial_prefix() {
         let directory = tempfile::tempdir().unwrap();
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = format!("http://{}/inference", listener.local_addr().unwrap());
+        let app = axum::Router::new().route(
+            "/inference",
+            axum::routing::post(|| async { axum::http::StatusCode::BAD_REQUEST }),
+        );
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
         let mut config = AppConfig::default();
         config.transcription.enabled = true;
         config.transcription.speaker = false;
         config.transcription.directory = directory.path().to_str().unwrap().into();
         config.transcription.microphone_recognition.provider = "whisper".into();
-        config.transcription.providers.whisper.endpoint =
-            format!("http://{}/inference", listener.local_addr().unwrap());
+        config.transcription.providers.whisper.endpoint = endpoint;
         let buffer = HistoryBuffer::new(&config.history);
         let now = Instant::now();
         buffer.push(
@@ -692,10 +695,14 @@ mod tests {
             now - Duration::from_secs(1),
         );
         let snapshot = buffer.snapshot(10, now);
-        let writer =
-            TranscriptWriter::create_merged(&config.transcription, "cancelled", "session", "Test")
-                .await
-                .unwrap();
+        let writer = TranscriptWriter::create_merged(
+            &config.transcription,
+            "failed-history",
+            "session",
+            "Test",
+        )
+        .await
+        .unwrap();
         let (live, rx) = mpsc::channel(4);
         live.send(TranscriptRecord::Text {
             input: true,
@@ -705,8 +712,6 @@ mod tests {
         })
         .await
         .unwrap();
-        let cancel = CancellationToken::new();
-        cancel.cancel();
         let pending = Arc::new(AtomicBool::new(true));
         let final_text = tokio::spawn(async move {
             tokio::time::sleep(Duration::from_millis(50)).await;
@@ -721,21 +726,22 @@ mod tests {
         });
         let result = tokio::time::timeout(
             Duration::from_secs(2),
-            write_transcript(writer, rx, config, snapshot, cancel, pending.clone()),
+            write_transcript(writer, rx, config, snapshot, pending.clone()),
         )
         .await
         .unwrap();
         assert!(result.is_err());
         final_text.await.unwrap();
         assert!(!pending.load(Ordering::Acquire));
-        let text = std::fs::read_to_string(directory.path().join("cancelled.txt")).unwrap();
+        let text = std::fs::read_to_string(directory.path().join("failed-history.txt")).unwrap();
         assert!(text.contains("Incomplete history:"));
         assert!(text.contains("resultado ao vivo já aceito"));
         assert!(text.contains("Final original received after capture stopped"));
+        server.abort();
     }
 
     #[tokio::test]
-    async fn slow_historical_stt_precedes_live_text_in_the_same_file() {
+    async fn closing_live_capture_keeps_history_pending_until_its_result_precedes_live_text() {
         let entered = Arc::new(tokio::sync::Notify::new());
         let release = Arc::new(tokio::sync::Notify::new());
         let arrived = entered.clone();
@@ -783,12 +789,11 @@ mod tests {
                 .unwrap();
         let (live, rx) = mpsc::channel(4);
         let pending = Arc::new(AtomicBool::new(true));
-        let task = tokio::spawn(write_transcript(
+        let mut task = tokio::spawn(write_transcript(
             writer,
             rx,
             config,
             snapshot,
-            CancellationToken::new(),
             pending.clone(),
         ));
         tokio::time::timeout(Duration::from_secs(3), entered.notified())
@@ -809,6 +814,14 @@ mod tests {
         })
         .await
         .unwrap();
+        // Closing accepted live input is the file worker's Stop boundary.
+        // It cannot cancel the separately owned, in-flight history request.
+        drop(live);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), &mut task)
+                .await
+                .is_err()
+        );
         assert!(pending.load(Ordering::Acquire));
         assert!(
             !std::fs::read_to_string(directory.path().join("history.txt"))
@@ -816,7 +829,6 @@ mod tests {
                 .contains("fala ao vivo")
         );
         release.notify_one();
-        drop(live);
         tokio::time::timeout(Duration::from_secs(3), task)
             .await
             .unwrap()

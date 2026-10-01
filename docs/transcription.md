@@ -55,8 +55,10 @@ interval to the selected service when the session starts.
 History results precede live results in the TXT file. The dashboard indicates
 when history transcription is pending; routing, playback, and translation
 continue with live audio. Recognizing several minutes may take time and consume
-provider quota. Stopping before completion may interrupt the historical prefix;
-live finals still drain into the same file after that incomplete prefix is marked.
+provider quota. Stop ends capture for that session while accepted history and
+live originals continue to completion. The historical prefix remains ahead of
+live results in the same file. A provider or storage failure is reported and
+retained originals remain available for session recovery.
 
 The default in-memory capacity is ten minutes, adjustable under **Settings →
 Recent audio history**. The dashboard shows the combined audio available;
@@ -69,9 +71,10 @@ History recognition uses a separate STT connection from live transcription.
 Gemini history and explicit session recovery use `gemini-3.5-transcribe` finite
 requests, so the key needs access to that model as well as Live Transcribe.
 Provider quotas, costs, and session limits still apply. If a connection expires
-or the session ends before completion, Babel reports that history is incomplete;
-it does not present the result as full recovery. Speaker identifiers are not
-automatically matched between historical and live connections.
+or a request fails before completion, Babel reports that history is incomplete;
+Stop alone does not cancel it. Babel does not present a failed result as full
+recovery. Speaker identifiers are not automatically matched between historical
+and live connections.
 
 ## Implemented providers
 
@@ -123,13 +126,14 @@ models. Original audio routing remains independent of both paths.
 Each source retains at most six seconds of in-flight PCM (192 KB), in addition
 to the existing bounded input queue. Recovery requests have an eight-second
 whole-request deadline and a bounded retry budget. EOF also drains retained
-originals; Gemini finalization has a bounded 27-second drain inside the session's
-30-second processing limit. A successful recovery keeps timestamps and writes
-no gap marker. Failed recovery, exhausted buffering or finalization still reports
-incomplete transcription. The session retains its original sources separately
-from provider queues and offers [session recovery](recording.md#recover-an-incomplete-session)
-if finalization cannot finish. Optional encrypted spill uses a RAM-only key;
-the ten-minute rolling history is a separate memory-only feature.
+originals until every accepted segment completes or a provider reports failure.
+There is no session-wide finalization stopwatch: a backlog may take longer than
+an individual request. A successful recovery keeps timestamps and writes no gap
+marker. Failed recovery still reports incomplete transcription. The session
+retains its original sources separately from provider queues and offers
+[session recovery](recording.md#recover-an-incomplete-session) if finalization
+cannot finish. Active sessions use an encrypted temporary journal with a RAM-only
+key; the ten-minute rolling history is a separate memory-only feature.
 
 `auto` omits the language restriction; an explicit code is sent in
 `languageCodes` (Live) or `language_codes` (recovery). This adapter provides
@@ -332,18 +336,27 @@ not prevent the session.
   Voice-command activation remains limited to the microphone and uses its own
   configuration, independently of file transcription STT.
 - Each selected STT source opens its provider lazily on the first captured frame.
-  Up to 20 seconds of original PCM are retained while it connects or catches up,
-  with separate frame-count and sample-count bounds. This queue is independent
-  of the optional ten-minute history buffer and is not saved before a session.
-  Congestion beyond the bound reports an incomplete transcript without blocking
-  audio routing. Session-owned originals are retained separately for explicit
-  recovery, with encrypted spill when needed; the queue does not own their lifetime.
-- **Stop** closes physical session routes first, then flushes the recognizers'
-  unfinished speech and drains text/files for up to 15 seconds, or 30 seconds
-  when a selected source uses Gemini STT. Original routing
-  can resume during this drain. A missing provider acknowledgement or timeout
-  reports an incomplete transcript; closing a connection is not treated as proof
-  that the last words were saved. Recognizer failures do not stop original audio.
+  Its input queue holds at most 20 seconds of original PCM, with separate frame
+  and sample limits. A slow recognizer reads the remaining accepted originals
+  from session retention as capacity becomes available, without blocking original
+  routing or discarding that backlog. Active recording, transcription and
+  translation sessions journal originals asynchronously in encrypted temporary
+  storage. Independent consumers read recent immutable audio directly from RAM
+  without waiting for disk writes or filesystem sync; slower consumers read older
+  committed journal batches. Original frames remain in RAM until their encrypted
+  append is acknowledged. The journal keeps originals through completion or
+  recovery, with at most 64 MiB of live staging memory.
+  It is independent of the optional ten-minute history buffer. Capture overruns
+  or exhausted retention storage still report an explicit incomplete session.
+- **Stop** closes capture for that session, then flushes the recognizers'
+  accepted originals and unfinished speech. Text and files keep finalizing until
+  their work completes or an explicit provider/storage failure is reported;
+  there is no 15/30-second session drain deadline. Original routing resumes and
+  a new session can start while earlier files finish independently. Provider
+  request timeouts still apply. A missing acknowledgement is an explicit failure;
+  closing a connection does not prove the last words were saved. Failed work keeps
+  its originals for [session recovery](recording.md#recover-an-incomplete-session)
+  while Babel stays open. Recognizer failures do not stop original audio.
 
 ## Older configurations
 

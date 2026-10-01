@@ -39,6 +39,7 @@ GROUPS = [
     ("Development", [
         ("docs/architecture.md", "architecture", "Architecture", "Routing isolation, memory safety, and audio processing."),
         ("docs/testing.md", "testing", "Testing", "Reproduce automated checks and hardware validation."),
+        ("docs/latency-measurements.md", "latency-measurements", "Latency measurements", "Measured audio and translation delays, methodology, and limits."),
         ("docs/ci-installers.md", "ci-installers", "CI and releases", "Checks, version tags, release assets, and signing."),
         ("docs/native-drivers.md", "native-drivers", "Native drivers", "Build and install Babel's virtual audio drivers."),
         ("CONTRIBUTING.md", "contributing", "Contributing", "English source, Conventional Commits, and contributions."),

@@ -12,7 +12,17 @@ static OWNED: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
 pub(super) struct DeviceLease(String);
 impl DeviceLease {
     pub(super) fn acquire(direction: DeviceDirection, persistent_id: &str) -> Result<Self> {
-        let key = format!("{direction:?}:{persistent_id}");
+        Self::acquire_class(direction, persistent_id, "original")
+    }
+
+    /// Shared-mode translated output must never reserve original routing's
+    /// worker slot. Each class still owns one worker until its driver closes.
+    pub(super) fn acquire_translated_output(persistent_id: &str) -> Result<Self> {
+        Self::acquire_class(DeviceDirection::Output, persistent_id, "translation")
+    }
+
+    fn acquire_class(direction: DeviceDirection, persistent_id: &str, class: &str) -> Result<Self> {
+        let key = format!("{class}:{direction:?}:{persistent_id}");
         let mut owned = OWNED
             .get_or_init(Mutex::default)
             .lock()
@@ -37,6 +47,24 @@ impl Drop for DeviceLease {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn original_and_translated_output_have_independent_exclusive_worker_slots() {
+        let id = "test-independent-output-classes";
+        let translation = DeviceLease::acquire_translated_output(id).unwrap();
+        let original = DeviceLease::acquire(DeviceDirection::Output, id).unwrap();
+        assert!(DeviceLease::acquire_translated_output(id).is_err());
+        assert!(DeviceLease::acquire(DeviceDirection::Output, id).is_err());
+        let capture = DeviceLease::acquire(DeviceDirection::Input, id).unwrap();
+        drop(translation);
+        let translation = DeviceLease::acquire_translated_output(id).unwrap();
+        assert!(DeviceLease::acquire(DeviceDirection::Output, id).is_err());
+        drop(original);
+        assert!(DeviceLease::acquire(DeviceDirection::Output, id).is_ok());
+        assert!(DeviceLease::acquire_translated_output(id).is_err());
+        drop((translation, capture));
+    }
+
     #[tokio::test]
     async fn aborting_async_waiter_does_not_release_a_still_running_os_worker() {
         let id = "test-stalled-driver";

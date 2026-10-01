@@ -6,11 +6,12 @@
 For each direction, while Babel is selected/in use:
   capture → interleaved float32, source rate/channels → bounded queues
      ├─ translation off → audio executor → original playback
-     └─ bounded copy → processing executor → PCM16 mono 16 kHz
+     └─ bounded copy → retention executor → PCM16 mono 16 kHz
         ├─ in-memory history
-        ├─ session + recording → mix original sources → one .wav file
-        ├─ session + transcription → STT → one .txt file with source labels
-        └─ session + translation → SpeechProvider → PCM16 mono 24 kHz → playback
+        └─ session originals → recent RAM + encrypted temporary journal
+           ├─ recording cursor → mix original sources → one .wav file
+           ├─ transcription cursors → STT → one .txt file with source labels
+           └─ translation cursors → SpeechProvider → PCM16 mono 24 kHz → playback
 
 Local translator:
   Whisper → Qwen → Piper (target-language default) → playback PCM
@@ -23,10 +24,12 @@ flag selects translation only: its route continues forwarding original audio
 when that flag is off. Transcription and recording select their sources
 separately. Without translation, the ASR adapter produces original text only,
 without sending that audio to a translator or synthesizer.
-Optional recording mixes originals only in the local WAV. STT failure, a full
-recording queue or a write error appears as a processing error; it does not
-cancel original routes or the other independent feature. The affected file may
-be incomplete. Processing-copy losses have a counter separate from
+Optional recording mixes originals only in the local WAV. Full downstream
+queues backpressure their own consumers while original capture continues into
+retention. STT or writer failures appear as processing errors and retain accepted
+originals for recovery; they do not cancel original routes or the other
+independent feature. The affected file may be incomplete until recovery.
+Processing-copy losses have a counter separate from
 capture/playback losses. History may also contain gaps if processing cannot
 keep up with capture.
 Fatal translation or transport failures can still end the session. The monitor
@@ -68,9 +71,19 @@ otherwise, including outside a session. It does not run a second translator.
 The mirror follows source-format changes and playback interruption/flush events,
 so canceled translation audio cannot remain queued in the virtual microphone.
 
-Both mirrors open only when Babel Microphone is selected/in use and an external
-app is sending audio to Babel Speaker. Output inactivity closes the mirror and
-discards pending frames. The physical microphone is not captured, microphone
+Original-audio mirrors open only when Babel Microphone is selected/in use and an
+external app is sending audio to Babel Speaker. Output inactivity closes this
+live forwarding path. Translated speaker mirroring is owned by the processing
+session: accepted translated audio finishes after capture Stop, including its
+virtual microphone playback tail, while the required OS usage conditions remain
+active. An unused microphone opens no playback stream. Speaker playback remains
+authorized while Babel Speaker is the system default output or an external app
+actively targets it. Linux also recognizes retained corked streams as selected.
+Capture still requires an active external client. Natural app EOF therefore
+preserves the translated tail when Babel remains the default output. Losing that
+output selection or revoking an active microphone selection interrupts playback,
+reports incomplete processing, and preserves originals for recovery. The physical
+microphone is not captured, microphone
 translation is bypassed, and speaker audio never reaches the command listener.
 Stored physical-device and provider preferences are unchanged.
 
@@ -119,8 +132,10 @@ The `babel-audio` executor has its own workers and blocking-task pool for
 capture, playback and short PCM operations. Forwarding originals performs no
 inference, speech DSP, history locking or file writing. The processing copy
 shares immutable samples through `Arc`; delivery uses `try_send`, without
-waiting for consumer capacity. The `babel-processing` executor runs providers,
-transcription, commands, history and writers. Device-selection gates and
+waiting for consumer capacity. The `babel-retention` executor stages originals,
+maintains history and batches encrypted writes in its own blocking pool. The
+`babel-processing` executor runs providers, transcription, commands and file
+writers. Device-selection gates and
 start/stop supervision stay on the control executor: revoking a route does not
 require the model to accept another task.
 
@@ -164,18 +179,18 @@ Enabling a feature with no selected source is a configuration error. The source
 must be selected and configured, but its translation may be off. Writers work
 outside audio callbacks.
 
-Original file sessions also own a recovery archive outside provider and writer
-task lifetimes. The processing sidecar retains selected PCM before either
-consumer can reject it. RAM above an 8 MiB working budget spills in encrypted
-batches to the platform's temporary directory on processing workers; neither
-crypto nor filesystem I/O runs on the original audio executor. This cache is
-independent of the configured final-file base path. Each archive owns an ephemeral
-XChaCha20-Poly1305 key, never a key file. The optional historical prefix shares its
-existing PCM arcs.
-Failed sessions remain Controller-owned for explicit replay into new final files.
-Selected writers must finish and sync before originals can be acknowledged;
-translation-only errors do not invalidate already committed files. Cleanup runs
-without the Controller state lock. See [recovery limits and privacy](recording.md#recover-an-incomplete-session).
+Processing sessions own a recovery archive outside provider and writer task
+lifetimes. The sidecar retains selected PCM before any consumer sees it. A
+dedicated background executor batches encrypted journal appends approximately
+every 250 ms (or earlier under staging pressure). Recent readers use immutable
+RAM immediately, including a one-second hot cache after disk commit; slower
+readers decrypt old batches. Neither crypto nor filesystem I/O runs on the
+original audio executor. Each archive owns an ephemeral XChaCha20-Poly1305 key,
+never a key file. The optional historical prefix shares its existing PCM arcs.
+Failed sessions remain Controller-owned for explicit recovery. All selected
+consumers, including translated playback and synced files, must finish before
+originals are released. Cleanup runs without the Controller state lock. See
+[recovery limits and privacy](recording.md#recover-an-incomplete-session).
 
 The recording worker aligns the two original sources before applying its own
 source gains and optional microphone-priority attenuation of incoming audio.
@@ -205,13 +220,14 @@ selected by other apps.
 Folders and files are prepared before stopping original routing. After closing
 the previous streams, the controller fixes the history boundary and adjusts the
 WAV time origin, avoiding artificial silence caused by file-opening time. On
-stop, closing routes releases original-routing restart while writers continue
-finalizing. The supervisor allows three seconds to release routes, then up to
-15 seconds for session-owned STT and file writers to finish. A processing
-deadline never prolongs device ownership. A timeout reports potentially
-incomplete files, and the controller also bounds its total wait. Reopening devices and ending delayed tasks
-can produce a gap; if an executor or OS call blocks, the deadline does not make
-shutdown instantaneous or guarantee preemption of a blocking call.
+stop, closing capture releases original-routing restart while processing continues
+in a background finalizer. Device shutdown remains bounded and an unverified
+capture tail is an explicit incomplete-session failure. Accepted processing has
+no blanket finalization deadline. Providers, translated playback and writers
+keep their ownership until completion or an explicit failure retains the source
+for recovery. A new session can start meanwhile; ending it does not cancel older
+finalizers. Reopening devices can still produce a brief gap; an OS or driver
+failure cannot be repaired by a processing queue.
 
 Across all three backends, the microphone activates when the Babel virtual
 endpoint is the system's default input or an external app explicitly uses it.
@@ -233,27 +249,45 @@ the system default changes to another device. `waiting_for_app` describes the
 waiting state; `running` still represents the session, while `routing_active`
 is true only if at least one direction is processing.
 
+The Controller owns one endpoint observer shared by original routing, the active
+session, older finalizers, and translation recovery. Stop/Start and physical-device
+changes reuse it, avoiding competing native inspection workers. Changing the
+configured virtual endpoints revokes the old observer and creates a replacement.
+
 When a route's activity condition disappears, its supervisor cancels capture,
-playback, translation and voice-command activation. It closes streams and
-discards playback queues before reopening. Original STT is owned by the session,
+original playback and voice-command activation. Translated playback has a separate
+selection fence that remains alive through session finalization. Losing the relevant
+OS output selection, an inspection failure, or a changed selection epoch interrupts
+translation and fences queued playback; originals remain available for explicit
+recovery. Speaker capture activity and accepted playback authorization are distinct:
+an inactive speaker remains authorized when Babel is the default output. Linux
+also accepts an external app's retained corked stream; native platforms require
+an active app client or the system default. When an app uses Babel independently
+of the default and ceases observable endpoint use, Babel cannot reliably infer
+the app's persistent choice. Any interrupted tail then requires explicit
+reselection and recovery. A rapid off/on transition cannot let delayed
+provider output enter the next activation. A translation interruption ends that
+session's capture and restores original routing when selected. Original STT is
+owned by the session,
 with one lazily opened recognizer per source and bounded pending PCM. It can
 finish a result after a device pauses, but has no playback handles and receives
 no new originals while the route is unselected. Captured timestamps map provider
-offsets back across source pauses. The next activation recreates translation
-connections/channels, so delayed translated audio cannot enter the new one.
-Separate epochs per direction preserve even rapid off/on changes coalesced by
-the control channel. The session name/ID and TXT/WAV writers remain; the
-WAV retains the session clock. A normal pause no longer creates a spurious
+offsets back across source pauses. Capture Stop alone does not revoke OS selection:
+the shared observer stays alive, allowing accepted translation and playback
+to drain while Babel remains selected/in use. Separate epochs per direction preserve
+even rapid off/on changes coalesced by the control channel. TXT/WAV writers finish
+under the original session identity, and WAV retains the session clock.
+An original-only pause does not create a spurious
 transcription interruption marker. Gemini original STT keeps unacknowledged PCM
 across Live failures and uses finite recognition; successful recovery preserves
 its clock without a gap marker. Other interruptions and processing losses remain
 visible. Inspection failure closes routes and appears in the dashboard.
-On Windows, a COM MTA worker queries the system's default microphone and checks
+On Windows, a COM MTA worker queries the system's default input/output roles and checks
 WASAPI sessions on the opposite side of each Babel cable (or optional VB-Audio
 cable), excluding Babel's PID. Pairing uses endpoint IDs and driver metadata;
 missing, ambiguous or shared pairs across the two routes are rejected. Periodic
 queries are supplemented by state callbacks from already-discovered sessions.
-On macOS 14.2+, a worker queries default input and CoreAudio processes every
+On macOS 14.2+, a worker queries default input/output and CoreAudio processes every
 200 ms, matching PID, state and devices per direction; it does not use global
 device activity, which would include Babel itself. Earlier systems suspend
 routes with a diagnostic rather than falling back to continuous capture.
@@ -267,8 +301,10 @@ processing copy and files. Changing output alone replaces its stream, converting
 format when needed. Translation retains its speech format; switching a device
 does not change the provider's output format. Session identity/files remain.
 The stream can be unavailable during a switch or after failure; the dashboard
-shows the error and a new selection allows recovery. With or without a session,
-the device layer retries the same failed endpoint every three seconds. Manually
+shows the error and a new selection allows recovery. If a translated playback
+backend is interrupted after accepting audio, Babel cannot verify its complete
+delivery: it reports failure and retains the originals for explicit recovery.
+Original routing retries the same failed endpoint every three seconds. Manually
 selecting another device switches immediately. On macOS/Windows, CPAL supplies
 the OS's persistent UID/ID; enumeration order changes do not change selection.
 There is no substitution with the default device. Legacy index-based settings
@@ -330,11 +366,13 @@ values, preventing a message-count bound from hiding arbitrarily large
 messages. The local translator sends frames of 480 samples or fewer and paces
 playback by actual PCM duration, not by HTTP message count.
 
-Original capture older than 100 ms is dropped. A full original-playback queue
-drops frames without waiting; a lost processing copy does not count as playback
-loss. Writer/STT saturation or failure is reported separately without stopping
-original forwarding. Translated playback remains bounded and can end the
-translation flow with an error instead of accumulating minutes of delay. A
+Original playback skips frames older than 100 ms; their processing copies remain
+eligible for retention. A full original-playback queue drops frames without
+waiting; a lost processing copy does not count as playback loss. Writer/STT
+saturation backpressures their independent cursors; failures are reported without
+stopping original forwarding. Translated playback queues remain bounded and apply
+backpressure to their own consumers. Slow processing can accumulate a backlog in
+encrypted retention rather than evict accepted source audio. A
 generation counter invalidates old audio on interruption, including with a full
 queue. Linux restarts playback to clear the server buffer; CPAL ignores samples
 from older generations. An interruption cannot undo sound that has physically
@@ -392,3 +430,36 @@ and the independence of original recording and STT. Do not reuse another
 provider's setup format just because both use JSON. Speaker metadata must come
 from the provider; mapping an audio direction or the last voice to a person
 would be incorrect.
+
+
+## Session completion and parallel sessions
+
+Capture ownership and processing ownership are separate. Stop closes the active
+capture, then retains that session in a background finalizer. The controller
+continues serving status and allows another session to start without cancelling
+the previous session's readers, file writers or model leases.
+
+Each enabled source is copied once into session-owned immutable PCM. Independent
+recording, STT and translation cursors apply backpressure only to their own work.
+Recent PCM is immediately available from RAM; journal commits run concurrently in
+the dedicated retention executor, in small batches, using an append-only encrypted file in
+the system temporary directory. A small hot cache avoids decrypting newly committed
+frames for readers close to real time. Slower readers load older encrypted batches.
+Only encrypted records leave staging RAM, and only acknowledged session completion
+releases the journal and RAM-only key. The optional pre-session history remains RAM-only.
+
+Provider input EOF requests completion, rather than cancellation. Local segment
+queues, translated playback and file writers drain their accepted input. There is
+no blanket 15/30-second deadline for finalization. Per-request provider failures
+are still errors, never proof of completion; retained originals support explicit
+recovery. A failed translation route may replay speech already heard because the
+APIs do not supply a durable acknowledgement for each original frame. Translation
+routes already completed are not repeated during file recovery.
+
+All of this runs outside original audio callbacks and the original routing
+executor. Native device shutdown still has bounded failure detection, and capture
+loss is reported as unrecoverable instead of falsely claiming complete output.
+Power loss or process termination erases the ephemeral key; this is not crash
+recovery, and finite RAM/disk cannot guarantee capture through indefinite storage
+failure. These limitations never authorize silent eviction or successful completion
+of known partial work.

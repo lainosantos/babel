@@ -117,7 +117,10 @@ async fn a_successful_session_acknowledges_originals_after_final_output_sync() {
     let files = create_session_files(&archive.config, &archive.session, archive.origin)
         .await
         .unwrap();
-    replay(&archive, &archive.config, files).await.unwrap();
+    let (_usage, usage) = watch::channel(audio::activity::EndpointUse::default());
+    replay(&archive, &archive.config, files, usage)
+        .await
+        .unwrap();
     archive.outputs_committed.store(true, Ordering::Release);
     let mut status = stopped_status();
     finish_archive(
@@ -520,7 +523,10 @@ async fn translation_failure_does_not_retain_already_committed_original_outputs(
     let files = create_session_files(&archive.config, &archive.session, archive.origin)
         .await
         .unwrap();
-    replay(&archive, &archive.config, files).await.unwrap();
+    let (_usage, usage) = watch::channel(audio::activity::EndpointUse::default());
+    replay(&archive, &archive.config, files, usage)
+        .await
+        .unwrap();
     archive.outputs_committed.store(true, Ordering::Release);
     let mut status = stopped_status();
     status.last_error = Some("Translation provider disconnected".into());

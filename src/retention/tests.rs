@@ -234,3 +234,301 @@ async fn unix_permissions_are_owner_only_from_creation() {
         0o600
     );
 }
+
+#[tokio::test]
+async fn journal_many_records_share_one_file_and_coexist_with_standalone_records() {
+    let base = tempfile::tempdir().unwrap();
+    let store = SessionRetention::create_in(base.path(), "journal-many")
+        .await
+        .unwrap();
+    let mut records = Vec::new();
+    for index in 0..64u8 {
+        let metadata = format!("source-frame-{index}").into_bytes();
+        let bytes = vec![index; 37];
+        let id = store.append(&metadata, &bytes).await.unwrap();
+        records.push((id, metadata, bytes));
+    }
+    let files: Vec<_> = fs::read_dir(store.directory.path())
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .collect();
+    assert_eq!(files, vec![store.journal_path()]);
+    assert_eq!(store.journal_path().file_name().unwrap(), "session.brj");
+
+    let standalone = store
+        .store(b"standalone metadata", b"standalone original")
+        .await
+        .unwrap();
+    assert_eq!(fs::read_dir(store.directory.path()).unwrap().count(), 2);
+    assert!(records.iter().all(|(id, _, _)| *id != standalone));
+    for (id, metadata, bytes) in &records {
+        let loaded = store.load(*id).await.unwrap();
+        assert_eq!(&*loaded.metadata, metadata);
+        assert_eq!(&*loaded.bytes, bytes);
+    }
+    assert_eq!(
+        &*store.load(standalone).await.unwrap().bytes,
+        b"standalone original"
+    );
+    store.ack(standalone).await.unwrap();
+    assert!(!store.path(standalone).exists());
+    assert!(store.journal_path().exists());
+    assert_eq!(
+        &*store.load(records[0].0).await.unwrap().bytes,
+        &records[0].2
+    );
+    let directory = store.directory.path().to_owned();
+    drop(store);
+    assert!(!directory.exists());
+}
+
+#[tokio::test]
+async fn journal_encrypts_metadata_and_plaintext_with_unique_record_nonces() {
+    let base = tempfile::tempdir().unwrap();
+    let store = SessionRetention::create_in(base.path(), "journal-privacy")
+        .await
+        .unwrap();
+    let metadata = b"private journal metadata must remain encrypted";
+    let plaintext = b"private journal source audio must never be written as plaintext";
+    for _ in 0..32 {
+        store.append(metadata, plaintext).await.unwrap();
+    }
+    let journal = fs::read(store.journal_path()).unwrap();
+    for secret in [
+        metadata.as_slice(),
+        plaintext.as_slice(),
+        store.key.as_ref(),
+    ] {
+        assert!(!journal.windows(secret.len()).any(|window| window == secret));
+    }
+    let record_length = HEADER_BYTES + 4 + metadata.len() + plaintext.len() + TAG_BYTES;
+    assert_eq!(journal.len(), record_length * 32);
+    let mut nonces = std::collections::HashSet::new();
+    let mut ciphertexts = std::collections::HashSet::new();
+    for record in journal.chunks_exact(record_length) {
+        assert!(record.starts_with(MAGIC));
+        assert!(nonces.insert(record[40..64].to_vec()));
+        assert!(ciphertexts.insert(record[HEADER_BYTES..].to_vec()));
+    }
+    assert_eq!(nonces.len(), 32);
+}
+
+#[tokio::test]
+async fn journal_authenticates_headers_metadata_session_and_record_identity() {
+    let base = tempfile::tempdir().unwrap();
+    let mut store = SessionRetention::create_in(base.path(), "journal-integrity")
+        .await
+        .unwrap();
+    let first = store.append(b"source metadata", &[1; 100]).await.unwrap();
+    let second = store.append(b"source metadata", &[2; 100]).await.unwrap();
+    let path = store.journal_path();
+    let original = fs::read(&path).unwrap();
+    let record_length = original.len() / 2;
+    for relative in [
+        0,
+        8,
+        24,
+        32,
+        40,
+        HEADER_BYTES,
+        HEADER_BYTES + 4,
+        HEADER_BYTES + 4 + b"source metadata".len(),
+        record_length - 1,
+    ] {
+        let mut changed = original.clone();
+        changed[record_length + relative] ^= 1;
+        fs::write(&path, changed).unwrap();
+        assert!(
+            store.load(second).await.is_err(),
+            "accepted changed journal byte {relative}"
+        );
+        assert_eq!(&*store.load(first).await.unwrap().bytes, &[1; 100]);
+    }
+    let mut replaced = original.clone();
+    replaced.copy_within(..record_length, record_length);
+    fs::write(&path, replaced).unwrap();
+    assert!(store.load(second).await.is_err());
+    assert_eq!(&*store.load(first).await.unwrap().bytes, &[1; 100]);
+    fs::write(&path, &original).unwrap();
+
+    // The session is authenticated even when key, store ID, header and payload
+    // are unchanged, so a journal cannot be reassigned to another session.
+    let session = store.session.clone();
+    Arc::get_mut(&mut store).unwrap().session = "different-session".into();
+    assert!(store.load(first).await.is_err());
+    assert!(store.load(second).await.is_err());
+    Arc::get_mut(&mut store).unwrap().session = session;
+    assert_eq!(&*store.load(second).await.unwrap().bytes, &[2; 100]);
+
+    let other = SessionRetention::create_in(base.path(), "journal-integrity")
+        .await
+        .unwrap();
+    assert!(other.load(first).await.is_err());
+    assert!(other.ack(first).await.is_err());
+    assert!(store.load(first).await.is_ok());
+}
+
+#[tokio::test]
+async fn journal_concurrent_appends_and_loads_preserve_every_record() {
+    let base = tempfile::tempdir().unwrap();
+    let store = SessionRetention::create_in(base.path(), "journal-concurrent")
+        .await
+        .unwrap();
+    let mut workers = tokio::task::JoinSet::new();
+    for index in 0..32u64 {
+        let store = store.clone();
+        workers.spawn(async move {
+            let metadata = format!("concurrent-source-{index}").into_bytes();
+            let bytes = index.to_le_bytes().repeat(64);
+            let id = store.append(&metadata, &bytes).await.unwrap();
+            let loaded = store.load(id).await.unwrap();
+            assert_eq!(&*loaded.metadata, &metadata);
+            assert_eq!(&*loaded.bytes, &bytes);
+            (id, metadata, bytes)
+        });
+    }
+    let mut sequences = std::collections::HashSet::new();
+    while let Some(result) = workers.join_next().await {
+        let (id, metadata, bytes) = result.unwrap();
+        assert!(sequences.insert(id.sequence));
+        let loaded = store.load(id).await.unwrap();
+        assert_eq!(&*loaded.metadata, &metadata);
+        assert_eq!(&*loaded.bytes, &bytes);
+    }
+    assert_eq!(sequences.len(), 32);
+    assert_eq!(fs::read_dir(store.directory.path()).unwrap().count(), 1);
+}
+
+#[tokio::test]
+async fn journal_ack_is_logical_idempotent_and_preserves_other_records() {
+    let base = tempfile::tempdir().unwrap();
+    let store = SessionRetention::create_in(base.path(), "journal-ack")
+        .await
+        .unwrap();
+    let first = store.append(b"first", &[1; 100]).await.unwrap();
+    let second = store.append(b"second", &[2; 100]).await.unwrap();
+    let path = store.journal_path();
+    let committed = fs::read(&path).unwrap();
+    store.ack(first).await.unwrap();
+    store.ack(first).await.unwrap();
+    assert!(store.load(first).await.is_err());
+    assert_eq!(fs::read(&path).unwrap(), committed);
+    assert_eq!(&*store.load(second).await.unwrap().bytes, &[2; 100]);
+
+    let third = store.append(b"third", &[3; 100]).await.unwrap();
+    assert!(store.load(first).await.is_err());
+    assert_eq!(&*store.load(second).await.unwrap().bytes, &[2; 100]);
+    assert_eq!(&*store.load(third).await.unwrap().bytes, &[3; 100]);
+    store.ack(second).await.unwrap();
+    store.ack(third).await.unwrap();
+    assert!(store.load(second).await.is_err());
+    assert!(store.load(third).await.is_err());
+    assert!(!path.exists());
+    store.ack(third).await.unwrap();
+    let fourth = store.append(b"fourth", &[4; 100]).await.unwrap();
+    assert!(fourth.sequence > third.sequence);
+    assert_eq!(&*store.load(fourth).await.unwrap().bytes, &[4; 100]);
+    assert!(store.load(first).await.is_err());
+    assert!(store.load(second).await.is_err());
+    assert!(store.load(third).await.is_err());
+}
+
+#[tokio::test]
+async fn journal_truncated_later_record_does_not_hide_earlier_committed_record() {
+    let base = tempfile::tempdir().unwrap();
+    let store = SessionRetention::create_in(base.path(), "journal-truncation")
+        .await
+        .unwrap();
+    let first = store.append(b"first", &[1; 100]).await.unwrap();
+    let first_end = fs::metadata(store.journal_path()).unwrap().len() as usize;
+    let second = store.append(b"second", &[2; 100]).await.unwrap();
+    let path = store.journal_path();
+    let original = fs::read(&path).unwrap();
+    for end in [
+        first_end,
+        first_end + HEADER_BYTES - 1,
+        first_end + HEADER_BYTES,
+        original.len() - 1,
+    ] {
+        fs::write(&path, &original[..end]).unwrap();
+        assert!(
+            store.load(second).await.is_err(),
+            "accepted journal truncated at {end}"
+        );
+        assert_eq!(&*store.load(first).await.unwrap().bytes, &[1; 100]);
+    }
+    fs::write(&path, original).unwrap();
+    assert_eq!(&*store.load(second).await.unwrap().bytes, &[2; 100]);
+}
+
+#[tokio::test]
+async fn journal_next_append_removes_uncommitted_tail_without_losing_prior_records() {
+    let base = tempfile::tempdir().unwrap();
+    let store = SessionRetention::create_in(base.path(), "journal-aborted-tail")
+        .await
+        .unwrap();
+    let first = store.append(b"first", &[1; 100]).await.unwrap();
+    let second = store.append(b"second", &[2; 100]).await.unwrap();
+    let path = store.journal_path();
+    let committed = fs::read(&path).unwrap();
+    // Simulate a write interrupted after ciphertext reached disk, before its
+    // offset was committed to the in-memory journal index.
+    let mut file = File::options().append(true).open(&path).unwrap();
+    file.write_all(&[0xa5; 777]).unwrap();
+    file.sync_all().unwrap();
+    drop(file);
+    assert_eq!(&*store.load(first).await.unwrap().bytes, &[1; 100]);
+    assert_eq!(&*store.load(second).await.unwrap().bytes, &[2; 100]);
+
+    let third = store.append(b"third", &[3; 100]).await.unwrap();
+    let journal = fs::read(&path).unwrap();
+    let expected_new_length = HEADER_BYTES + 4 + b"third".len() + 100 + TAG_BYTES;
+    assert_eq!(journal.len(), committed.len() + expected_new_length);
+    assert_eq!(&journal[..committed.len()], &committed);
+    for (id, byte) in [(first, 1), (second, 2), (third, 3)] {
+        assert_eq!(&*store.load(id).await.unwrap().bytes, &[byte; 100]);
+    }
+}
+
+#[tokio::test]
+async fn journal_rejects_invalid_record_sizes_before_committing() {
+    let base = tempfile::tempdir().unwrap();
+    let store = SessionRetention::create_in(base.path(), "journal-limits")
+        .await
+        .unwrap();
+    assert!(store.append(&[], &[]).await.is_err());
+    assert!(
+        store
+            .append(&vec![0; MAX_METADATA_BYTES + 1], &[1])
+            .await
+            .is_err()
+    );
+    assert!(
+        store
+            .append(&[], &vec![0; MAX_RECORD_BYTES + 1])
+            .await
+            .is_err()
+    );
+    assert_eq!(fs::read_dir(store.directory.path()).unwrap().count(), 0);
+    let id = store.append(b"valid", &[7; 37]).await.unwrap();
+    assert_eq!(&*store.load(id).await.unwrap().bytes, &[7; 37]);
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn journal_file_permissions_are_owner_only() {
+    use std::os::unix::fs::PermissionsExt;
+    let base = tempfile::tempdir().unwrap();
+    let store = SessionRetention::create_in(base.path(), "journal-permissions")
+        .await
+        .unwrap();
+    store.append(b"source", &[1]).await.unwrap();
+    assert_eq!(
+        fs::metadata(store.journal_path())
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777,
+        0o600
+    );
+}

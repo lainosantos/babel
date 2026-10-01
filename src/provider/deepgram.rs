@@ -30,7 +30,6 @@ const MAX_TEXT: usize = 32 * 1024;
 const MAX_WORDS: usize = 4096;
 const MAX_FINALS: usize = 16;
 const SEND_TIMEOUT: Duration = Duration::from_millis(500);
-const EVENT_TIMEOUT: Duration = Duration::from_secs(2);
 const KEEP_ALIVE: Duration = Duration::from_secs(3);
 type Socket = WebSocketStream<MaybeTlsStream<TcpStream>>;
 type StreamResult<T> = std::result::Result<T, Failure>;
@@ -471,9 +470,9 @@ async fn send<T>(
         .map_err(socket_failure)
 }
 async fn emit(events: &mpsc::Sender<ProviderEvent>, event: ProviderEvent) -> StreamResult<()> {
-    timeout(EVENT_TIMEOUT, events.send(event))
+    events
+        .send(event)
         .await
-        .map_err(|_| Failure::fatal("Deepgram transcript consumer is too slow"))?
         .map_err(|_| Failure::fatal("Deepgram transcript consumer closed"))
 }
 

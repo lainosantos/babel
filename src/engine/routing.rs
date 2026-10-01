@@ -77,6 +77,10 @@ pub(super) async fn stop_routing(state: &mut State) -> Result<()> {
 pub(super) async fn maintain_routing(state: &mut State) {
     if !state.routing_enabled
         || state
+            .finalizing
+            .iter()
+            .any(|session| !session.routes_closed.is_closed())
+        || state
             .running
             .as_ref()
             .is_some_and(|running| !running.routes_closed.is_closed())
@@ -106,6 +110,7 @@ pub(super) async fn maintain_routing(state: &mut State) {
         state.routing_error = None;
         return;
     }
+    let usage = endpoint_usage(state);
     let cfg = &state.config;
     let (input, input_rx) = watch::channel(cfg.microphone.capture_device.clone());
     let (mic_virtual, mic_virtual_rx) = watch::channel(cfg.microphone.playback_device.clone());
@@ -114,11 +119,6 @@ pub(super) async fn maintain_routing(state: &mut State) {
     let (microphone, speaker) = RouteMetrics::for_configuration(cfg, &state.commands);
     let mirror_source = speaker.mirror_source();
     let cancel = CancellationToken::new();
-    let usage = audio::activity::monitor(
-        mic_virtual_rx.clone(),
-        speaker_virtual_rx.clone(),
-        cancel.child_token(),
-    );
     let mut jobs = JoinSet::new();
     let options = AudioOptions {
         sample_rate: 48_000,

@@ -428,6 +428,7 @@ async fn playback_with(
         );
         let mut finished = false;
         let mut pending = None;
+        let mut accepted_audio = false;
         let mut mirror = stats
             .playback_mirror
             .as_ref()
@@ -463,6 +464,7 @@ async fn playback_with(
                             mirror_generation = generation;
                         }
                         let mirrored = mirror.as_ref().and_then(|mirror| mirror.prepare_playback(&command, options));
+                        accepted_audio |= matches!(command, PlaybackCommand::Audio { .. } | PlaybackCommand::Original { .. });
                         permit.send(command);
                         if let (Some(mirror), Some(frame)) = (&mirror, mirrored) { mirror.publish(&frame); }
                     } else { discard_audio(command, &stats); }
@@ -474,9 +476,50 @@ async fn playback_with(
             }
         };
         drop(mirror);
+        if matches!(end, End::Disconnected) {
+            // EOF is the normal completion of accepted playback. Closing the
+            // inner queue lets the backend drain its device buffer; cancelling
+            // it here would discard the final queued samples.
+            drop(commands);
+            loop {
+                tokio::select! {
+                    biased;
+                    _ = cancel.cancelled() => {
+                        return stop_backend(&mut request, &worker_cancel, finished).await;
+                    }
+                    changed = devices.changed(), if watch_open => {
+                        if changed.is_ok() {
+                            stats.playback_generation.fetch_add(1, Ordering::AcqRel);
+                            stats.dropped_frames.fetch_add(1, Ordering::Relaxed);
+                            stop_backend(&mut request, &worker_cancel, finished).await?;
+                            bail!("Playback device changed before queued audio finished");
+                        }
+                        watch_open = false;
+                    }
+                    result = &mut request => {
+                        return result.context("Could not finish queued playback");
+                    }
+                }
+            }
+        }
+        // Outer queues can be empty while the backend or hardware still owns
+        // accepted audio. Original routing may retry immediately, but translated
+        // output must not claim that an interrupted backend played its tail.
+        let interrupted_translation = stats.translated_playback
+            && accepted_audio
+            && matches!(end, End::Changed | End::Failed(_));
+        if interrupted_translation {
+            stats.dropped_frames.fetch_add(1, Ordering::Relaxed);
+        }
         stop_backend(&mut request, &worker_cancel, finished).await?;
         drop(request);
         drop(commands);
+        if interrupted_translation {
+            return Err(match end {
+                End::Failed(error) => error.context("Translated playback failed after accepting audio; its completion could not be verified"),
+                _ => anyhow!("Translated playback device changed after accepting audio; its completion could not be verified"),
+            });
+        }
         match end {
             End::Cancelled => return Ok(()),
             End::Disconnected if cancel.is_cancelled() => return Ok(()),

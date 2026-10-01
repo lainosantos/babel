@@ -8,10 +8,6 @@ use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 const QUEUED_SAMPLES: usize = INPUT_RATE as usize * 20;
 const QUEUED_FRAMES: usize = 2048;
 const MAX_TIMELINE_SPANS: usize = 4096;
-// Leave time for the TXT writer to persist an incomplete marker before the
-// supervisor's corresponding 15/30-second file/processing deadline.
-const FINALIZE_TIMEOUT: Duration = Duration::from_secs(12);
-const GEMINI_FINALIZE_TIMEOUT: Duration = Duration::from_secs(27);
 
 struct Original {
     frame: PcmFrame,
@@ -30,6 +26,7 @@ impl Sink {
     pub(super) fn available(&self) -> bool {
         !self.sender.is_closed()
     }
+    #[cfg(test)]
     pub(super) fn connected(&self) -> bool {
         self.connected.load(Ordering::Relaxed)
     }
@@ -93,28 +90,81 @@ pub(super) fn start(
             TranscriptOrigin::Microphone => &config.transcription.microphone_recognition,
             TranscriptOrigin::Speaker => &config.transcription.speaker_recognition,
         };
-        let provider = provider::stt::create(recognition, &config.transcription.providers)?;
-        let settings = provider::stt::session_config(recognition, &config.transcription.providers)?;
         let transcript = Some(transcript);
-        let result = run(
-            provider,
-            settings,
-            received,
-            first,
-            &transcript,
-            &metrics,
-            origin,
-            &connected,
-            &losses,
-        )
+        let result = async {
+            let provider = provider::stt::create(recognition, &config.transcription.providers)?;
+            let settings =
+                provider::stt::session_config(recognition, &config.transcription.providers)?;
+            run(
+                provider,
+                settings,
+                received,
+                first,
+                &transcript,
+                &metrics,
+                origin,
+                &connected,
+                &losses,
+            )
+            .await
+        }
         .await;
         connected.store(false, Ordering::Relaxed);
         if result.is_err() {
-            let _ = record(&transcript, TranscriptRecord::Gap);
+            let _ = record(&transcript, TranscriptRecord::Gap).await;
         }
         result
     };
     (sink, worker)
+}
+
+/// Replay the session-owned originals with backpressure on this processing
+/// worker only. Capture and routing never wait for inference to catch up.
+pub(super) fn start_retained(
+    config: AppConfig,
+    transcript: TranscriptSink,
+    metrics: Arc<RouteMetrics>,
+    origin: Instant,
+    originals: Arc<retained::RetainedSession>,
+) -> impl Future<Output = Result<()>> + Send + 'static {
+    let mut reader = originals.reader(transcript.origin);
+    let (sink, worker) = start(config, transcript, metrics, origin);
+    async move {
+        let feed = async move {
+            while let Some(record) = reader.next().await? {
+                let count = record.samples.len();
+                ensure!(
+                    count <= INPUT_RATE as usize,
+                    "Retained original frame exceeds one second"
+                );
+                if count == 0 {
+                    continue;
+                }
+                let budget = sink
+                    .budget
+                    .clone()
+                    .acquire_many_owned(count as u32)
+                    .await
+                    .context("Original recognition budget closed")?;
+                sink.sender
+                    .send(Original {
+                        frame: PcmFrame {
+                            samples: record.samples,
+                            captured_at: record.captured_at,
+                            sample_rate: INPUT_RATE,
+                        },
+                        _budget: budget,
+                    })
+                    .await
+                    .map_err(|_| {
+                        anyhow!("Recognizer closed before retained originals completed")
+                    })?;
+            }
+            Ok::<_, anyhow::Error>(())
+        };
+        tokio::try_join!(feed, worker)?;
+        Ok(())
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -129,11 +179,6 @@ async fn run(
     connected: &AtomicBool,
     losses: &AtomicU64,
 ) -> Result<()> {
-    let finalize_timeout = if provider.id() == "gemini" {
-        GEMINI_FINALIZE_TIMEOUT
-    } else {
-        FINALIZE_TIMEOUT
-    };
     let (audio, input) = mpsc::channel(8);
     let (events, mut output) = mpsc::channel(32);
     let cancel = CancellationToken::new();
@@ -148,31 +193,25 @@ async fn run(
     let mut ready = false;
     let mut seen_losses = 0;
     let mut timeline = Timeline::default();
-    let mut finish_deadline = None;
     loop {
-        if received.is_closed() && finish_deadline.is_none() {
-            finish_deadline = Some(tokio::time::Instant::now() + finalize_timeout);
-        }
         let dropped = losses.load(Ordering::Relaxed);
         if dropped != seen_losses {
-            record(transcript, TranscriptRecord::Gap)?;
+            record(transcript, TranscriptRecord::Gap).await?;
             seen_losses = dropped;
         }
         if !source_open && pending.is_empty() && ready {
-            // STT EOF explicitly flushes the final captured utterance. It does
-            // not cancel network work or retain any device/playback ownership.
+            // STT EOF flushes every accepted original and the final utterance.
+            // Provider request timeouts still report failures, but total drain
+            // time is not bounded by Stop or device/playback ownership.
             audio.take();
         }
         tokio::select! {
             biased;
-            _ = async { tokio::time::sleep_until(finish_deadline.unwrap()).await }, if finish_deadline.is_some() => {
-                bail!("Timed out finalizing original transcription; the transcript may be incomplete");
-            }
             result = &mut task => {
                 let result = result.map_err(|_| anyhow!("Recognition component failed internally"))?;
                 // The event sender can close just before task completion.
                 while let Ok(event) = output.try_recv() {
-                    persist(event, transcript, metrics, &timeline)?;
+                    persist(event, transcript, metrics, &timeline).await?;
                 }
                 result?;
                 ensure!(!source_open && pending.is_empty(), "Recognizer stopped before consuming the original audio");
@@ -196,7 +235,7 @@ async fn run(
                             }
                             _ => {}
                         }
-                        persist(event, transcript, metrics, &timeline)?;
+                        persist(event, transcript, metrics, &timeline).await?;
                     }
                     None => events_open = false,
                 }
@@ -213,14 +252,11 @@ async fn run(
                     None => source_open = false,
                 }
             }
-            // A full startup queue disables recv(), so sender closure alone
-            // cannot wake it. Observe Stop even if setup never acknowledges.
-            _ = tokio::time::sleep(Duration::from_millis(250)), if pending.len() >= QUEUED_FRAMES && finish_deadline.is_none() => {}
         }
     }
 }
 
-fn persist(
+async fn persist(
     mut event: ProviderEvent,
     transcript: &Option<TranscriptSink>,
     metrics: &RouteMetrics,
@@ -231,7 +267,63 @@ fn persist(
         metadata.end_ms = metadata.end_ms.and_then(|ms| timeline.map(ms, true));
         metadata.alignment_ms = metadata.alignment_ms.and_then(|ms| timeline.map(ms, false));
     }
-    record_recognition_event_at(event, transcript, metrics, 0)
+    let record = match event {
+        ProviderEvent::Transcript {
+            input: true,
+            text,
+            metadata,
+        } => {
+            metrics
+                .view
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .last_input_transcript = Some(text.chars().take(2048).collect());
+            TranscriptRecord::Text {
+                input: true,
+                text,
+                metadata,
+                received_at: chrono::Utc::now().to_rfc3339(),
+            }
+        }
+        ProviderEvent::TurnComplete => TranscriptRecord::TurnComplete,
+        ProviderEvent::Warning { message } => {
+            metrics.report_processing_error(&message);
+            TranscriptRecord::Gap
+        }
+        ProviderEvent::Reconnecting { .. } | ProviderEvent::Interrupted => TranscriptRecord::Gap,
+        // A recognizer never saves generated speech or translated text.
+        _ => return Ok(()),
+    };
+    self::record(transcript, record).await
+}
+
+async fn record(transcript: &Option<TranscriptSink>, record: TranscriptRecord) -> Result<()> {
+    if let Some(sink) = transcript {
+        if matches!(record, TranscriptRecord::Gap)
+            && let Some(retained) = &sink.retained
+        {
+            retained.mark_incomplete(
+                "Original transcription requires recovery after an interrupted result",
+            );
+        }
+        // This is a processing worker: a slow TXT writer may backpressure
+        // recognition without blocking capture or dropping accepted finals.
+        sink.sender
+            .send(TranscriptRecord::Routed {
+                origin: sink.origin,
+                record: Box::new(record),
+            })
+            .await
+            .map_err(|_| {
+                if let Some(retained) = &sink.retained {
+                    retained.mark_incomplete(
+                        "Transcript delivery failed; original audio is retained for recovery",
+                    );
+                }
+                anyhow!("Transcript writer closed before accepted original results were saved")
+            })?;
+    }
+    Ok(())
 }
 
 #[derive(Default)]

@@ -1,6 +1,7 @@
 //! CoreAudio process clients of the two configured virtual cables (macOS 14.2+).
 //! The selected system input also authorizes microphone routing. No hardware
-//! streams or audio taps are opened here; speaker usage still requires a client.
+//! streams or audio taps are opened here; speaker capture still requires a
+//! client, while the selected system output authorizes pending translated audio.
 
 use std::{
     collections::BTreeSet,
@@ -127,6 +128,7 @@ impl Observation {
         }
         if self.speaker_setting != speaker {
             self.snapshot.speaker_clients.clear();
+            self.snapshot.speaker_default = false;
             self.snapshot.speaker_device = None;
             self.snapshot.speaker_error = None;
         }
@@ -149,6 +151,7 @@ struct UseSnapshot {
     microphone_device: Option<u32>,
     speaker_device: Option<u32>,
     microphone_default: bool,
+    speaker_default: bool,
     microphone_clients: BTreeSet<(u32, u32)>,
     speaker_clients: BTreeSet<(u32, u32)>,
     microphone_error: Option<String>,
@@ -161,6 +164,12 @@ impl UseSnapshot {
         self.microphone_default = self
             .microphone_device
             .is_some_and(|id| id != 0 && Some(id) == default_input);
+    }
+
+    fn select_default_speaker(&mut self, default_output: Option<u32>) {
+        self.speaker_default = self
+            .speaker_device
+            .is_some_and(|id| id != 0 && Some(id) == default_output);
     }
 }
 
@@ -230,6 +239,7 @@ impl UseTracker {
             next.microphone_error = None;
         } else {
             next.speaker_clients.clear();
+            next.speaker_default = false;
             next.speaker_device = None;
             next.speaker_error = None;
         }
@@ -243,9 +253,11 @@ impl UseTracker {
         }
         if next.error.is_some() || next.speaker_error.is_some() {
             next.speaker_clients.clear();
+            next.speaker_default = false;
         }
         let microphone = next.microphone_default || !next.microphone_clients.is_empty();
         let speaker = !next.speaker_clients.is_empty();
+        let speaker_selected = next.speaker_default || speaker;
         let microphone_replaced = self.previous.microphone_device != next.microphone_device
             || (!(self.previous.microphone_default && next.microphone_default)
                 && !self
@@ -257,6 +269,12 @@ impl UseTracker {
                 .previous
                 .speaker_clients
                 .is_subset(&next.speaker_clients);
+        let speaker_selection_replaced = self.previous.speaker_device != next.speaker_device
+            || (!(self.previous.speaker_default && next.speaker_default)
+                && !self
+                    .previous
+                    .speaker_clients
+                    .is_subset(&next.speaker_clients));
         state.send_if_modified(|current| {
             let mic_changed = current.microphone != microphone
                 || microphone_replaced
@@ -265,18 +283,26 @@ impl UseTracker {
                 || speaker_replaced
                 || current.speaker_error != next.speaker_error;
             let error_changed = current.error != next.error;
+            let speaker_selection_changed = current.speaker_selected != speaker_selected
+                || speaker_selection_replaced
+                || current.speaker_error != next.speaker_error
+                || error_changed;
             if mic_changed {
                 current.microphone_epoch = current.microphone_epoch.wrapping_add(1);
             }
             if speaker_changed {
                 current.speaker_epoch = current.speaker_epoch.wrapping_add(1);
             }
+            if speaker_selection_changed {
+                current.speaker_selection_epoch = current.speaker_selection_epoch.wrapping_add(1);
+            }
             current.microphone = microphone;
             current.speaker = speaker;
+            current.speaker_selected = speaker_selected;
             current.microphone_error.clone_from(&next.microphone_error);
             current.speaker_error.clone_from(&next.speaker_error);
             current.error.clone_from(&next.error);
-            mic_changed || speaker_changed || error_changed
+            mic_changed || speaker_changed || speaker_selection_changed || error_changed
         });
         self.previous = next;
     }

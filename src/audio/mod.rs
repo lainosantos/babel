@@ -123,6 +123,8 @@ pub enum PlaybackCommand {
 
 #[derive(Debug, Default)]
 pub struct AudioStats {
+    /// Shared-mode translated output has separate ownership from original routing.
+    pub translated_playback: bool,
     /// Used only by the capture control worker, never by native audio callbacks.
     pub command_tap: Option<std::sync::Weak<crate::commands::CommandService>>,
     /// Shares speaker originals with a playback-only microphone route. Never

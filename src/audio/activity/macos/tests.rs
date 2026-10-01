@@ -269,3 +269,76 @@ fn default_mic_remains_active_after_last_external_client_closes() {
     tracker.invalidate_selection(&state, true);
     assert!(!receiver.borrow().microphone);
 }
+
+#[test]
+fn default_speaker_keeps_translated_tail_selected_after_external_audio_ends() {
+    let (state, receiver) = tokio::sync::watch::channel(EndpointUse::default());
+    let mut tracker = UseTracker::default();
+    let mut snapshot = classify_processes(42, Some(10), Some(20), &[process(100, &[], &[20])]);
+    snapshot.select_default_speaker(Some(20));
+    tracker.publish(&state, snapshot.clone());
+    let playing = receiver.borrow().clone();
+    assert!(playing.speaker && playing.speaker_selected);
+    snapshot.speaker_clients.clear();
+    tracker.publish(&state, snapshot.clone());
+    let ended = receiver.borrow().clone();
+    assert!(!ended.speaker && ended.speaker_selected);
+    assert!(ended.speaker_epoch > playing.speaker_epoch);
+    assert_eq!(
+        ended.speaker_selection_epoch,
+        playing.speaker_selection_epoch
+    );
+
+    snapshot.select_default_speaker(Some(30));
+    tracker.publish(&state, snapshot);
+    assert!(!receiver.borrow().speaker_selected);
+    assert!(receiver.borrow().speaker_selection_epoch > ended.speaker_selection_epoch);
+}
+
+#[test]
+fn inactive_nondefault_speaker_is_unselected_and_default_does_not_activate_capture() {
+    let (state, receiver) = tokio::sync::watch::channel(EndpointUse::default());
+    let mut tracker = UseTracker::default();
+    for default in [Some(30), Some(10), Some(0), None] {
+        let mut snapshot = classify_processes(42, Some(10), Some(20), &[]);
+        snapshot.select_default_speaker(default);
+        tracker.publish(&state, snapshot);
+        assert!(!receiver.borrow().speaker);
+        assert!(!receiver.borrow().speaker_selected);
+    }
+    let mut snapshot = classify_processes(42, Some(10), Some(20), &[]);
+    snapshot.select_default_speaker(Some(20));
+    tracker.publish(&state, snapshot);
+    assert!(!receiver.borrow().speaker);
+    assert!(receiver.borrow().speaker_selected);
+    assert!(!receiver.borrow().microphone);
+}
+
+#[test]
+fn selected_speaker_is_invalidated_by_errors_remapping_and_stale_observations() {
+    let (state, receiver) = tokio::sync::watch::channel(EndpointUse::default());
+    let mut tracker = UseTracker::default();
+    let mut snapshot = classify_processes(42, Some(10), Some(20), &[]);
+    snapshot.select_default_speaker(Some(20));
+    tracker.publish(&state, snapshot.clone());
+    let before_error = receiver.borrow().speaker_selection_epoch;
+    snapshot.speaker_error = Some("output query failed".into());
+    tracker.publish(&state, snapshot);
+    assert!(!receiver.borrow().speaker_selected);
+    assert!(receiver.borrow().speaker_selection_epoch > before_error);
+
+    let mut snapshot = classify_processes(42, Some(10), Some(21), &[]);
+    snapshot.select_default_speaker(Some(21));
+    tracker.publish(&state, snapshot);
+    assert!(receiver.borrow().speaker_selected);
+    let before_remapping = receiver.borrow().speaker_selection_epoch;
+    tracker.invalidate_selection(&state, false);
+    assert!(!receiver.borrow().speaker_selected);
+    assert!(receiver.borrow().speaker_selection_epoch > before_remapping);
+
+    let mut observed = observation();
+    observed.snapshot.select_default_speaker(Some(20));
+    let stale = observed.validate(Instant::now(), "mic", "replacement-speaker");
+    assert!(!stale.speaker_default);
+    assert!(stale.speaker_clients.is_empty());
+}

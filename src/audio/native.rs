@@ -5,7 +5,7 @@ use std::{
     path::{Path, PathBuf},
     sync::{
         Arc,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
     },
     thread,
     time::{Duration, Instant},
@@ -113,16 +113,31 @@ pub(crate) fn resolve(id: &str, direction: DeviceDirection) -> Result<cpal::Devi
 }
 
 fn leased_device(id: &str, direction: DeviceDirection) -> Result<(DeviceLease, cpal::Device)> {
+    leased_device_with_class(id, direction, false)
+}
+
+fn leased_device_with_class(
+    id: &str,
+    direction: DeviceDirection,
+    translated_playback: bool,
+) -> Result<(DeviceLease, cpal::Device)> {
+    let acquire = |native_id: &str| {
+        if translated_playback {
+            DeviceLease::acquire_translated_output(native_id)
+        } else {
+            DeviceLease::acquire(direction, native_id)
+        }
+    };
     match native_ids::parse(id, direction)? {
         Selection::Stable(native_id) => {
             // Own the identity before even asking the driver to resolve it: a
             // stuck lookup must not accumulate new workers on retries either.
-            let lease = DeviceLease::acquire(direction, native_id)?;
+            let lease = acquire(native_id)?;
             Ok((lease, resolve(id, direction)?))
         }
         Selection::LegacyName(_) => {
             let device = resolve(id, direction)?;
-            let lease = DeviceLease::acquire(direction, &device.id()?.to_string())?;
+            let lease = acquire(&device.id()?.to_string())?;
             Ok((lease, device))
         }
     }
@@ -292,6 +307,60 @@ mod installation_tests {
             find_distribution(temp.path(), &candidates, &required).unwrap(),
             Some(packaged.canonicalize().unwrap())
         );
+    }
+
+    #[test]
+    fn playback_completion_requires_the_last_frame_and_its_device_playback_time() {
+        let progress = PlaybackProgress::new();
+        assert!(progress.complete(0));
+        assert!(!progress.complete(2));
+        progress.consumed.store(1, Ordering::Release);
+        assert!(!progress.complete(2));
+        progress
+            .playback_until_ns
+            .store(u64::MAX, Ordering::Release);
+        progress.consumed.store(2, Ordering::Release);
+        assert!(
+            !progress.complete(2),
+            "Dequeued audio can still be buffered by the device"
+        );
+        progress.playback_until_ns.store(0, Ordering::Release);
+        assert!(progress.complete(2));
+    }
+
+    #[test]
+    fn native_queue_keeps_eof_tail_order_and_explicit_interruptions() {
+        let samples = Arc::new(ArrayQueue::new(4));
+        let stats = Arc::new(AudioStats::default());
+        let cancel = CancellationToken::new();
+        let mut queue = PlaybackQueue {
+            samples: samples.clone(),
+            failed: Arc::new(AtomicBool::new(false)),
+            stats: stats.clone(),
+            cancel: cancel.clone(),
+            source_channels: 1,
+            output_channels: 2,
+            stall_timeout: Duration::from_secs(1),
+            generation: 0,
+            sequence: 0,
+            last_sequence: 0,
+        };
+        assert!(queue.push(&[0.25, 0.5]).unwrap());
+        assert_eq!(queue.last_sequence, 2);
+        for (sequence, value) in [(1, 0.25), (2, 0.5)] {
+            let sample = samples.pop().unwrap();
+            assert_eq!(sample.sequence, sequence);
+            assert_eq!(&sample.values[..2], &[value; 2]);
+        }
+        stats.playback_generation.store(1, Ordering::Release);
+        assert!(!queue.push(&[1.0]).unwrap());
+        queue.reset(1);
+        assert_eq!(queue.last_sequence, 0);
+        assert!(queue.push(&[0.75]).unwrap());
+        assert_eq!(queue.last_sequence, 3);
+        cancel.cancel();
+        queue.drain(&PlaybackProgress::new()).unwrap();
+        assert!(!queue.push(&[1.0]).unwrap());
     }
 }
 
@@ -527,6 +596,29 @@ pub async fn capture(
 struct OutputSample {
     values: [f32; 32],
     generation: u64,
+    sequence: u64,
+}
+
+struct PlaybackProgress {
+    origin: Instant,
+    consumed: AtomicU64,
+    playback_until_ns: AtomicU64,
+}
+impl PlaybackProgress {
+    fn new() -> Self {
+        Self {
+            origin: Instant::now(),
+            consumed: AtomicU64::new(0),
+            playback_until_ns: AtomicU64::new(0),
+        }
+    }
+
+    fn complete(&self, sequence: u64) -> bool {
+        sequence == 0
+            || self.consumed.load(Ordering::Acquire) >= sequence
+                && self.origin.elapsed().as_nanos()
+                    >= u128::from(self.playback_until_ns.load(Ordering::Acquire))
+    }
 }
 
 fn output_stream<T>(
@@ -535,25 +627,35 @@ fn output_stream<T>(
     queue: Arc<ArrayQueue<OutputSample>>,
     failed: Arc<AtomicBool>,
     stats: Arc<AudioStats>,
+    progress: Arc<PlaybackProgress>,
 ) -> Result<Stream>
 where
     T: SizedSample + FromSample<f32>,
 {
     let channels = usize::from(config.channels);
+    let sample_rate = config.sample_rate;
     let mut configured = false;
     let error_stats = stats.clone();
     Ok(device.build_output_stream(
         *config,
-        move |data: &mut [T], _| {
+        move |data: &mut [T], info| {
             if !configured {
                 crate::execution::configure_audio_thread();
                 configured = true;
             }
             let mut underrun = false;
+            let mut consumed = 0;
             for frame in data.chunks_exact_mut(channels) {
                 let generation = stats.playback_generation.load(Ordering::Acquire);
                 let sample = match queue.pop() {
-                    Some(sample) if sample.generation == generation => sample.values,
+                    Some(sample) => {
+                        consumed = sample.sequence;
+                        if sample.generation == generation {
+                            sample.values
+                        } else {
+                            [0.0; 32]
+                        }
+                    }
                     _ => {
                         underrun = true;
                         [0.0; 32]
@@ -565,6 +667,25 @@ where
             }
             if underrun {
                 stats.underruns.fetch_add(1, Ordering::Relaxed);
+            }
+            if consumed > 0 {
+                // Dequeuing is not playback completion. Keep the stream alive
+                // through the backend's predicted playback time for this buffer.
+                let timestamp = info.timestamp();
+                let latency = timestamp.playback.duration_since(timestamp.callback);
+                let duration = Duration::from_secs_f64(
+                    (data.len() / channels) as f64 / f64::from(sample_rate),
+                );
+                let until = progress
+                    .origin
+                    .elapsed()
+                    .saturating_add(latency)
+                    .saturating_add(duration);
+                progress.playback_until_ns.store(
+                    until.as_nanos().min(u128::from(u64::MAX)) as u64,
+                    Ordering::Release,
+                );
+                progress.consumed.store(consumed, Ordering::Release);
             }
         },
         move |error| {
@@ -593,21 +714,116 @@ fn build_output(
     queue: Arc<ArrayQueue<OutputSample>>,
     failed: Arc<AtomicBool>,
     stats: Arc<AudioStats>,
+    progress: Arc<PlaybackProgress>,
 ) -> Result<Stream> {
     match format {
-        SampleFormat::I8 => output_stream::<i8>(device, config, queue, failed, stats),
-        SampleFormat::I16 => output_stream::<i16>(device, config, queue, failed, stats),
-        SampleFormat::I24 => output_stream::<cpal::I24>(device, config, queue, failed, stats),
-        SampleFormat::I32 => output_stream::<i32>(device, config, queue, failed, stats),
-        SampleFormat::I64 => output_stream::<i64>(device, config, queue, failed, stats),
-        SampleFormat::U8 => output_stream::<u8>(device, config, queue, failed, stats),
-        SampleFormat::U16 => output_stream::<u16>(device, config, queue, failed, stats),
-        SampleFormat::U24 => output_stream::<cpal::U24>(device, config, queue, failed, stats),
-        SampleFormat::U32 => output_stream::<u32>(device, config, queue, failed, stats),
-        SampleFormat::U64 => output_stream::<u64>(device, config, queue, failed, stats),
-        SampleFormat::F32 => output_stream::<f32>(device, config, queue, failed, stats),
-        SampleFormat::F64 => output_stream::<f64>(device, config, queue, failed, stats),
+        SampleFormat::I8 => output_stream::<i8>(device, config, queue, failed, stats, progress),
+        SampleFormat::I16 => output_stream::<i16>(device, config, queue, failed, stats, progress),
+        SampleFormat::I24 => {
+            output_stream::<cpal::I24>(device, config, queue, failed, stats, progress)
+        }
+        SampleFormat::I32 => output_stream::<i32>(device, config, queue, failed, stats, progress),
+        SampleFormat::I64 => output_stream::<i64>(device, config, queue, failed, stats, progress),
+        SampleFormat::U8 => output_stream::<u8>(device, config, queue, failed, stats, progress),
+        SampleFormat::U16 => output_stream::<u16>(device, config, queue, failed, stats, progress),
+        SampleFormat::U24 => {
+            output_stream::<cpal::U24>(device, config, queue, failed, stats, progress)
+        }
+        SampleFormat::U32 => output_stream::<u32>(device, config, queue, failed, stats, progress),
+        SampleFormat::U64 => output_stream::<u64>(device, config, queue, failed, stats, progress),
+        SampleFormat::F32 => output_stream::<f32>(device, config, queue, failed, stats, progress),
+        SampleFormat::F64 => output_stream::<f64>(device, config, queue, failed, stats, progress),
         other => bail!("unsupported native output sample format: {other}"),
+    }
+}
+
+struct PlaybackQueue {
+    samples: Arc<ArrayQueue<OutputSample>>,
+    failed: Arc<AtomicBool>,
+    stats: Arc<AudioStats>,
+    cancel: CancellationToken,
+    source_channels: u16,
+    output_channels: u16,
+    stall_timeout: Duration,
+    generation: u64,
+    sequence: u64,
+    last_sequence: u64,
+}
+impl PlaybackQueue {
+    fn reset(&mut self, generation: u64) {
+        while self.samples.pop().is_some() {}
+        self.generation = generation;
+        self.last_sequence = 0;
+    }
+
+    fn interrupted(&self) -> bool {
+        self.cancel.is_cancelled()
+            || self.stats.playback_generation.load(Ordering::Acquire) != self.generation
+    }
+
+    fn check_device(&self) -> Result<()> {
+        ensure!(
+            !self.failed.load(Ordering::Acquire),
+            "native output stream failed or the device was disconnected"
+        );
+        Ok(())
+    }
+
+    /// Blocking and conversion stay on the device worker, outside its callback.
+    fn push(&mut self, output: &[f32]) -> Result<bool> {
+        for frame in output.chunks_exact(usize::from(self.source_channels)) {
+            let mut values = [0.0; 32];
+            for (channel, value) in values
+                .iter_mut()
+                .enumerate()
+                .take(usize::from(self.output_channels))
+            {
+                *value = if self.output_channels == 1 && frame.len() > 1 {
+                    frame.iter().sum::<f32>() / frame.len() as f32
+                } else if frame.len() == 1 && channel < 2 {
+                    frame[0]
+                } else {
+                    frame.get(channel).copied().unwrap_or(0.0)
+                };
+            }
+            let mut sample = OutputSample {
+                values,
+                generation: self.generation,
+                sequence: self.sequence + 1,
+            };
+            let mut stalled_since = None;
+            loop {
+                if self.interrupted() {
+                    return Ok(false);
+                }
+                self.check_device()?;
+                match self.samples.push(sample) {
+                    Ok(()) => {
+                        self.sequence += 1;
+                        self.last_sequence = self.sequence;
+                        break;
+                    }
+                    Err(returned) => {
+                        let since = stalled_since.get_or_insert_with(Instant::now);
+                        ensure!(
+                            since.elapsed() < self.stall_timeout,
+                            "native audio output stalled; the device stopped consuming samples"
+                        );
+                        sample = returned;
+                        thread::sleep(Duration::from_millis(2));
+                    }
+                }
+            }
+        }
+        Ok(true)
+    }
+
+    fn drain(&self, progress: &PlaybackProgress) -> Result<()> {
+        while !self.interrupted() && !progress.complete(self.last_sequence) {
+            self.check_device()?;
+            thread::sleep(Duration::from_millis(2));
+        }
+        self.check_device()
     }
 }
 
@@ -625,7 +841,7 @@ pub async fn playback(
     let id = device.to_owned();
     crate::execution::audio_handle()?.spawn_blocking(move || -> Result<()> {
         if cancel.is_cancelled() { return Ok(()); }
-        let (_lease, device) = leased_device(&id, DeviceDirection::Output)?;
+        let (_lease, device) = leased_device_with_class(&id, DeviceDirection::Output, stats.translated_playback)?;
         let supported = device
             .default_output_config()
             .context("reading native output format")?;
@@ -640,6 +856,7 @@ pub async fn playback(
             (u64::from(config.sample_rate) * u64::from(ring_ms) / 1000) as usize,
         ));
         let failed = Arc::new(AtomicBool::new(false));
+        let progress = Arc::new(PlaybackProgress::new());
         let stream = build_output(
             &device,
             &config,
@@ -647,33 +864,47 @@ pub async fn playback(
             queue.clone(),
             failed.clone(),
             stats.clone(),
+            progress.clone(),
         )?;
         let mut resampler = ChannelResampler::new(options.sample_rate, config.sample_rate, options.channels);
-        let mut mapped = Vec::with_capacity((config.sample_rate / 5) as usize);
         let mut input = Vec::with_capacity(options.frame_samples());
         let mut output = Vec::with_capacity((config.sample_rate / 5) as usize);
-        let mut generation = stats.playback_generation.load(Ordering::Acquire);
+        let mut output_queue = PlaybackQueue {
+            samples: queue,
+            failed,
+            stats: stats.clone(),
+            cancel: cancel.clone(),
+            source_channels: options.channels,
+            output_channels: config.channels,
+            stall_timeout: Duration::from_millis(u64::from(options.queue_ms.max(options.latency_ms)) + 500),
+            generation: stats.playback_generation.load(Ordering::Acquire),
+            sequence: 0,
+            last_sequence: 0,
+        };
         if cancel.is_cancelled() { return Ok(()); }
         stream.play().context("starting native playback")?;
         'playback: while !cancel.is_cancelled() {
             if stats.realtime_denied.swap(false, Ordering::Relaxed) { tracing::warn!("OS denied real-time audio priority; routing continues at the available priority"); }
-            ensure!(
-                !failed.load(Ordering::Acquire),
-                "native output stream failed or the device was disconnected"
-            );
+            output_queue.check_device()?;
             let current = stats.playback_generation.load(Ordering::Acquire);
-            if generation != current {
-                while queue.pop().is_some() {}
+            if output_queue.generation != current {
+                output_queue.reset(current);
                 resampler.reset();
-                generation = current;
             }
             match source.try_recv() {
-                Err(mpsc::error::TryRecvError::Disconnected) => break,
+                Err(mpsc::error::TryRecvError::Disconnected) => {
+                    output.clear();
+                    resampler.finish(&mut output);
+                    if output_queue.push(&output)? {
+                        output_queue.drain(&progress)?;
+                    }
+                    break;
+                }
                 Err(mpsc::error::TryRecvError::Empty) => {
                     thread::sleep(Duration::from_millis(2));
                 }
                 Ok(PlaybackCommand::Flush) => {
-                    while queue.pop().is_some() {}
+                    output_queue.reset(current);
                     resampler.reset();
                 }
                 Ok(command @ (PlaybackCommand::Audio { .. } | PlaybackCommand::Original { .. })) => {
@@ -682,7 +913,7 @@ pub async fn playback(
                         PlaybackCommand::Audio { samples, generation } => (samples.into_iter().map(|sample| f32::from(sample) / 32768.0).collect(), generation),
                         PlaybackCommand::Flush => unreachable!(),
                     };
-                    if queued_generation != generation {
+                    if queued_generation != output_queue.generation {
                         continue;
                     }
                     for chunk in samples.chunks(options.frame_samples()) {
@@ -690,41 +921,8 @@ pub async fn playback(
                         input.extend_from_slice(chunk);
                         output.clear();
                         resampler.process(&input, &mut output);
-                        mapped.clear();
-                        for values in output.chunks_exact(usize::from(options.channels)) {
-                            for channel in 0..usize::from(config.channels) {
-                                mapped.push(if config.channels == 1 && values.len() > 1 { values.iter().sum::<f32>() / values.len() as f32 } else if values.len() == 1 && channel < 2 { values[0] } else { values.get(channel).copied().unwrap_or(0.0) });
-                            }
-                        }
-                        for frame in mapped.chunks_exact(usize::from(config.channels)) {
-                            let mut values = [0.0; 32];
-                            values[..frame.len()].copy_from_slice(frame);
-                            let mut sample = OutputSample {
-                                values,
-                                generation,
-                            };
-                            let mut stalled_since = None;
-                            loop {
-                                if cancel.is_cancelled() {
-                                    break 'playback;
-                                }
-                                if stats.playback_generation.load(Ordering::Acquire) != generation {
-                                    continue 'playback;
-                                }
-                                ensure!(
-                                    !failed.load(Ordering::Acquire),
-                                    "native output stream failed or the device was disconnected"
-                                );
-                                match queue.push(sample) {
-                                    Ok(()) => break,
-                                    Err(returned) => {
-                                        let since = stalled_since.get_or_insert_with(Instant::now);
-                                        ensure!(since.elapsed() < Duration::from_millis(u64::from(options.queue_ms.max(options.latency_ms)) + 500), "native audio output stalled; the device stopped consuming samples");
-                                        sample = returned;
-                                        thread::sleep(Duration::from_millis(2));
-                                    }
-                                }
-                            }
+                        if !output_queue.push(&output)? {
+                            continue 'playback;
                         }
                     }
                 }

@@ -1,6 +1,6 @@
 //! Portable policy for Windows endpoint pairing and session activity. The OS
-//! adapter supplies exact driver metadata and capture-default endpoint IDs,
-//! never a guessed GUID or an output-default activity fallback.
+//! adapter supplies exact driver metadata and default endpoint IDs. Output
+//! defaults authorize translated playback without activating speaker capture.
 
 use std::{
     collections::{HashMap, HashSet},
@@ -112,7 +112,7 @@ pub(super) fn independent(microphone: &Pair, speaker: &Pair) -> Result<()> {
 }
 
 /// The microphone feed is a render endpoint, but apps and Windows select its
-/// paired capture endpoint. Speaker defaults cannot authorize either route.
+/// paired capture endpoint. Speaker defaults cannot authorize microphone audio.
 pub(super) fn microphone_requested(
     pair: &Pair,
     default_capture_ids: &[String],
@@ -121,14 +121,20 @@ pub(super) fn microphone_requested(
     external || default_capture_ids.iter().any(|id| id == &pair.opposite)
 }
 
+/// Speaker capture uses the opposite render endpoint. Its system selection
+/// keeps already accepted translations authorized after external playback ends.
+pub(super) fn speaker_selected(pair: &Pair, default_render_ids: &[String], external: bool) -> bool {
+    external || default_render_ids.iter().any(|id| id == &pair.opposite)
+}
+
 pub(super) fn client_epoch_changed(
     previous_default: bool,
     current_default: bool,
     previous: u64,
     current: u64,
 ) -> bool {
-    // While system selection independently holds the mic open, a capture app
-    // opening/closing does not interrupt wake-word audio or reset its queues.
+    // While system selection independently authorizes a direction, an app
+    // opening/closing does not interrupt its pending audio or reset its queues.
     !(previous_default && current_default) && previous != current
 }
 
@@ -493,5 +499,29 @@ mod tests {
         assert!(client_epoch_changed(true, false, 1, 3));
         assert!(client_epoch_changed(false, true, 1, 3));
         assert!(!client_epoch_changed(false, false, 3, 3));
+    }
+
+    #[test]
+    fn default_render_selection_keeps_speaker_tail_authorized_after_client_eof() {
+        let speaker = pair(
+            &babel_endpoints(),
+            "babel-speaker-capture",
+            Direction::Capture,
+        )
+        .unwrap();
+        let defaults = ["babel-speaker-render".into()];
+        assert!(speaker_selected(&speaker, &defaults, true));
+        assert!(speaker_selected(&speaker, &defaults, false));
+        assert!(!client_epoch_changed(true, true, 1, 2));
+        for defaults in [
+            vec![],
+            vec!["physical-render".into()],
+            vec!["babel-speaker-capture".into()],
+            vec!["babel-mic-render".into()],
+        ] {
+            assert!(!speaker_selected(&speaker, &defaults, false));
+            assert!(speaker_selected(&speaker, &defaults, true));
+        }
+        assert!(client_epoch_changed(false, false, 1, 2));
     }
 }

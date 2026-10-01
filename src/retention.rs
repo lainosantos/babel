@@ -1,16 +1,18 @@
 //! Encrypted, ephemeral retention for original processing input.
 //!
-//! Callers batch frames and await storage before submitting them to inference.
+//! Callers batch frames on a worker; live inference may read its independent
+//! RAM buffer while encrypted persistence proceeds in the background.
 //! These APIs must never run on an audio callback or the original routing
 //! executor. Only ciphertext reaches disk; the per-store key lives in RAM and
 //! is erased when the last owner disappears. This deliberately cannot recover
 //! after process exit. OS swap and crash dumps are outside this API's control.
 use std::{
-    fs::{self, File},
-    io::{Read, Write},
+    collections::BTreeMap,
+    fs::{self, File, OpenOptions},
+    io::{Read, Seek, SeekFrom, Write},
     path::{Path, PathBuf},
     sync::{
-        Arc,
+        Arc, Mutex,
         atomic::{AtomicU64, Ordering},
     },
 };
@@ -44,9 +46,21 @@ pub struct RetainedRecord {
     pub bytes: Zeroizing<Vec<u8>>,
 }
 
+#[derive(Clone, Copy)]
+struct JournalEntry {
+    offset: u64,
+    length: u64,
+}
+
+#[derive(Default)]
+struct JournalState {
+    committed_len: u64,
+    records: BTreeMap<u64, JournalEntry>,
+}
+
 /// Keep an Arc in session/archive ownership until processing and text storage
 /// have committed. A provider task must not be the only owner of this object.
-/// No automatic age, size, or acknowledgment eviction occurs.
+/// No automatic age or size eviction occurs; acknowledgement is explicit.
 pub struct SessionRetention {
     key: Zeroizing<[u8; 32]>,
     directory: TempDir,
@@ -54,6 +68,7 @@ pub struct SessionRetention {
     session: Box<str>,
     next: AtomicU64,
     operations: Arc<Semaphore>,
+    journal: Mutex<JournalState>,
 }
 
 impl SessionRetention {
@@ -105,6 +120,7 @@ impl SessionRetention {
                 session,
                 next: AtomicU64::new(0),
                 operations: Arc::new(Semaphore::new(2)),
+                journal: Mutex::new(JournalState::default()),
             }))
         })
         .await
@@ -115,6 +131,7 @@ impl SessionRetention {
     /// Success means encrypted bytes were written and synced. If the awaiting
     /// task is cancelled, its blocking operation may finish; the store still
     /// owns the encrypted file and removes it when its final owner is dropped.
+    #[cfg(test)]
     pub async fn store(self: &Arc<Self>, metadata: &[u8], bytes: &[u8]) -> Result<RecordId> {
         ensure!(
             metadata.len() <= MAX_METADATA_BYTES,
@@ -147,6 +164,41 @@ impl SessionRetention {
         .context("Retention storage worker failed")?
     }
 
+    /// Append a caller-batched original to one encrypted session journal.
+    /// The record becomes addressable only after sync_data succeeds. Failed
+    /// appends never publish an ID; a later append removes an uncommitted tail
+    /// under the same worker lock before writing. Acknowledgement is logical
+    /// until every journal record is acknowledged; then its file is reclaimed.
+    pub async fn append(self: &Arc<Self>, metadata: &[u8], bytes: &[u8]) -> Result<RecordId> {
+        ensure!(
+            metadata.len() <= MAX_METADATA_BYTES,
+            "Retention metadata exceeds the limit"
+        );
+        ensure!(
+            !bytes.is_empty() && bytes.len() <= MAX_RECORD_BYTES,
+            "Retention payload size is invalid"
+        );
+        let permit = self
+            .operations
+            .clone()
+            .acquire_owned()
+            .await
+            .context("Retention worker unavailable")?;
+        let mut plaintext = Zeroizing::new(Vec::with_capacity(
+            4 + metadata.len() + bytes.len() + TAG_BYTES,
+        ));
+        plaintext.extend_from_slice(&(metadata.len() as u32).to_le_bytes());
+        plaintext.extend_from_slice(metadata);
+        plaintext.extend_from_slice(bytes);
+        let store = self.clone();
+        tokio::task::spawn_blocking(move || {
+            let _permit = permit;
+            store.append_blocking(plaintext)
+        })
+        .await
+        .context("Retention append worker failed")?
+    }
+
     pub async fn load(self: &Arc<Self>, id: RecordId) -> Result<RetainedRecord> {
         self.validate_id(id)?;
         let permit = self
@@ -164,15 +216,41 @@ impl SessionRetention {
         .context("Retention read worker failed")?
     }
 
-    /// Delete only after the caller has committed its corresponding result.
+    /// Acknowledge only after the caller has committed its corresponding result.
+    /// Standalone records are deleted; journal records lose their index entry
+    /// and the journal is deleted once all its records are acknowledged.
     /// This is explicit and idempotent; failed processing must never call ack.
     pub async fn ack(self: &Arc<Self>, id: RecordId) -> Result<()> {
         self.validate_id(id)?;
         let store = self.clone();
-        tokio::task::spawn_blocking(move || match fs::remove_file(store.path(id)) {
-            Ok(()) => Ok(()),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-            Err(error) => Err(error).context("Could not remove acknowledged retention record"),
+        tokio::task::spawn_blocking(move || {
+            let mut journal = store
+                .journal
+                .lock()
+                .map_err(|_| anyhow!("Retention journal worker unavailable"))?;
+            if journal.records.contains_key(&id.sequence) {
+                if journal.records.len() == 1 {
+                    // Reclaim only after every indexed record is acknowledged.
+                    // Holding the journal lock excludes concurrent appends and
+                    // readers. Failed deletion retains the index for a retry.
+                    match fs::remove_file(store.journal_path()) {
+                        Ok(()) => (),
+                        Err(error) if error.kind() == std::io::ErrorKind::NotFound => (),
+                        Err(_) => {
+                            return Err(anyhow!("Could not remove acknowledged retention journal"));
+                        }
+                    }
+                    journal.committed_len = 0;
+                }
+                journal.records.remove(&id.sequence);
+                return Ok(());
+            }
+            drop(journal);
+            match fs::remove_file(store.path(id)) {
+                Ok(()) => Ok(()),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+                Err(error) => Err(error).context("Could not remove acknowledged retention record"),
+            }
         })
         .await
         .context("Retention cleanup worker failed")?
@@ -192,6 +270,10 @@ impl SessionRetention {
             .join(format!("{:016x}.brc", id.sequence))
     }
 
+    fn journal_path(&self) -> PathBuf {
+        self.directory.path().join("session.brj")
+    }
+
     fn aad(&self, header: &[u8]) -> Vec<u8> {
         let mut aad = Vec::with_capacity(header.len() + self.session.len());
         aad.extend_from_slice(header);
@@ -199,7 +281,10 @@ impl SessionRetention {
         aad
     }
 
-    fn store_blocking(&self, mut plaintext: Zeroizing<Vec<u8>>) -> Result<RecordId> {
+    fn encrypt_record(
+        &self,
+        plaintext: &mut Zeroizing<Vec<u8>>,
+    ) -> Result<(RecordId, [u8; HEADER_BYTES])> {
         let sequence = self
             .next
             .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |v| v.checked_add(1))
@@ -222,9 +307,15 @@ impl SessionRetention {
             .encrypt_in_place(
                 XNonce::from_slice(&header[40..64]),
                 &self.aad(&header),
-                &mut *plaintext,
+                &mut **plaintext,
             )
             .map_err(|_| anyhow!("Retention encryption failed"))?;
+        Ok((id, header))
+    }
+
+    #[cfg(test)]
+    fn store_blocking(&self, mut plaintext: Zeroizing<Vec<u8>>) -> Result<RecordId> {
+        let (id, header) = self.encrypt_record(&mut plaintext)?;
         // The temporary file contains ciphertext from its very first write.
         let mut file = tempfile::Builder::new()
             .prefix(".writing-")
@@ -242,13 +333,115 @@ impl SessionRetention {
         Ok(id)
     }
 
+    fn append_blocking(&self, mut plaintext: Zeroizing<Vec<u8>>) -> Result<RecordId> {
+        let (id, header) = self.encrypt_record(&mut plaintext)?;
+        let mut state = self
+            .journal
+            .lock()
+            .map_err(|_| anyhow!("Retention journal worker unavailable"))?;
+        let offset = state.committed_len;
+        let length = (HEADER_BYTES + plaintext.len()) as u64;
+        let end = offset
+            .checked_add(length)
+            .ok_or_else(|| anyhow!("Retention journal length overflow"))?;
+        let mut options = OpenOptions::new();
+        options.read(true).write(true).create(true).truncate(false);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        // Files are opened within the worker rather than kept alive in the
+        // store, so Windows can remove the directory when its last owner drops.
+        let mut file = options
+            .open(self.journal_path())
+            .map_err(|_| anyhow!("Could not open encrypted retention journal"))?;
+        let existing = file
+            .metadata()
+            .map_err(|_| anyhow!("Could not inspect encrypted retention journal"))?
+            .len();
+        ensure!(
+            existing >= offset,
+            "Encrypted retention journal lost committed records"
+        );
+        if existing != offset {
+            // No ID references this tail: publication and rollback share this
+            // mutex. Never truncate an earlier successfully committed record.
+            file.set_len(offset)
+                .map_err(|_| anyhow!("Could not repair uncommitted retention journal tail"))?;
+            file.sync_data()
+                .map_err(|_| anyhow!("Could not sync repaired retention journal"))?;
+        }
+        file.seek(SeekFrom::Start(offset))
+            .map_err(|_| anyhow!("Could not position encrypted retention journal"))?;
+        let written = (|| -> Result<()> {
+            file.write_all(&header)
+                .map_err(|_| anyhow!("Could not append retention journal header"))?;
+            file.write_all(&plaintext)
+                .map_err(|_| anyhow!("Could not append encrypted retention journal payload"))?;
+            file.sync_data()
+                .map_err(|_| anyhow!("Could not sync encrypted retention journal"))?;
+            Ok(())
+        })();
+        if let Err(error) = written {
+            // A failed rollback is also safe: committed_len stays unchanged and
+            // the next append must repair that tail before it can publish an ID.
+            let _ = file.set_len(offset).and_then(|()| file.sync_data());
+            return Err(error);
+        }
+        state
+            .records
+            .insert(id.sequence, JournalEntry { offset, length });
+        state.committed_len = end;
+        Ok(id)
+    }
+
     fn load_blocking(&self, id: RecordId) -> Result<RetainedRecord> {
+        let state = self
+            .journal
+            .lock()
+            .map_err(|_| anyhow!("Retention journal worker unavailable"))?;
+        if let Some(entry) = state.records.get(&id.sequence).copied() {
+            let end = entry
+                .offset
+                .checked_add(entry.length)
+                .ok_or_else(|| anyhow!("Encrypted retention journal index is invalid"))?;
+            ensure!(
+                end <= state.committed_len,
+                "Encrypted retention journal index is invalid"
+            );
+            let mut file = File::open(self.journal_path())
+                .map_err(|_| anyhow!("Could not open encrypted retention journal"))?;
+            let size = file
+                .metadata()
+                .map_err(|_| anyhow!("Could not inspect encrypted retention journal"))?
+                .len();
+            ensure!(
+                end <= size,
+                "Encrypted retention journal record is truncated"
+            );
+            file.seek(SeekFrom::Start(entry.offset))
+                .map_err(|_| anyhow!("Could not position encrypted retention journal"))?;
+            // Limit reads to the authenticated indexed record, excluding later
+            // committed records and any failed append's uncommitted tail.
+            return self.decode_record(&mut file.take(entry.length), id, entry.length);
+        }
+        drop(state);
         let mut file =
             File::open(self.path(id)).context("Could not open encrypted retention record")?;
         let size = file
             .metadata()
             .context("Could not inspect encrypted retention record")?
             .len();
+        self.decode_record(&mut file, id, size)
+    }
+
+    fn decode_record(
+        &self,
+        file: &mut impl Read,
+        id: RecordId,
+        size: u64,
+    ) -> Result<RetainedRecord> {
         ensure!(
             (HEADER_BYTES + TAG_BYTES + 5) as u64 <= size
                 && size <= (HEADER_BYTES + MAX_ENCRYPTED_BYTES) as u64,

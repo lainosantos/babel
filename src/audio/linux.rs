@@ -549,6 +549,37 @@ impl AudioProcess {
         let _ = self.child.wait().await;
         self.stderr.await.unwrap_or_default()
     }
+
+    async fn drain(
+        mut self,
+        cancel: &CancellationToken,
+        stats: &AudioStats,
+        generation: u64,
+    ) -> Result<()> {
+        let mut check = tokio::time::interval(Duration::from_millis(5));
+        let status = loop {
+            tokio::select! {
+                biased;
+                _ = cancel.cancelled() => {
+                    self.stop().await;
+                    return Ok(());
+                }
+                _ = check.tick() => {
+                    if stats.playback_generation.load(Ordering::Acquire) != generation {
+                        self.stop().await;
+                        return Ok(());
+                    }
+                }
+                status = self.child.wait() => break status.context("waiting for audio output to drain")?,
+            }
+        };
+        let stderr = self.stderr.await.unwrap_or_default();
+        ensure!(
+            status.success(),
+            "audio output failed while draining: {status}: {stderr}"
+        );
+        Ok(())
+    }
 }
 
 pub async fn capture(
@@ -706,7 +737,15 @@ pub async fn playback(
             command = source.recv() => command,
         };
         match next {
-            None => break Ok(()),
+            None => {
+                // pacat drains the server stream after stdin EOF. Killing it
+                // here would discard PCM already accepted by its pipe/server.
+                drop(stdin);
+                return process
+                    .drain(&cancel, &stats, generation)
+                    .await
+                    .with_context(|| format!("playback {device}"));
+            }
             Some(PlaybackCommand::Flush) => {
                 drop(stdin);
                 process.stop().await;
@@ -767,6 +806,60 @@ pub async fn playback(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    async fn draining_process(script: &str) -> AudioProcess {
+        let mut child = Command::new("sh")
+            .args(["-c", script])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .kill_on_drop(true)
+            .spawn()
+            .unwrap();
+        let stderr = child.stderr.take().unwrap();
+        let mut stdin = child.stdin.take().unwrap();
+        stdin.write_all(&[0; 128]).await.unwrap();
+        drop(stdin);
+        AudioProcess {
+            child,
+            stderr: tokio::spawn(collect_stderr(stderr)),
+        }
+    }
+
+    #[tokio::test]
+    async fn playback_process_eof_waits_for_drain_and_reports_failed_exit() {
+        let stats = AudioStats::default();
+        let cancel = CancellationToken::new();
+        let started = Instant::now();
+        draining_process("cat >/dev/null; sleep 0.05")
+            .await
+            .drain(&cancel, &stats, 0)
+            .await
+            .unwrap();
+        assert!(started.elapsed() >= Duration::from_millis(50));
+        let error = draining_process("cat >/dev/null; exit 7")
+            .await
+            .drain(&cancel, &stats, 0)
+            .await
+            .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("audio output failed while draining")
+        );
+    }
+
+    #[tokio::test]
+    async fn playback_process_drain_remains_immediately_cancellable() {
+        let stats = AudioStats::default();
+        let cancel = CancellationToken::new();
+        let process = draining_process("cat >/dev/null; exec sleep 30").await;
+        cancel.cancel();
+        tokio::time::timeout(Duration::from_secs(1), process.drain(&cancel, &stats, 0))
+            .await
+            .unwrap()
+            .unwrap();
+    }
 
     #[test]
     fn capture_bytes_preserve_partial_stereo_tail_and_distinguish_rejections() {

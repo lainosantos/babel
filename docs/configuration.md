@@ -130,10 +130,15 @@ direction. They do not turn off capture, playback, transcription, or recording.
 During a session, a direction with translation off continues passing original
 audio. The `transcription.*` and `recording.*` options choose their own sources.
 
-**Start session** activates the selected features. **Stop session** finalizes
-processing and files and returns to original forwarding. To also stop forwarding
-and release capture, use **Quit Babel**. No session is needed with no features
-selected; the button is unavailable and the backend also rejects that start.
+**Start session** activates the selected features. **Stop session** stops new
+capture for that session and moves its accepted work to **Finalizing sessions**.
+Recording, original transcription and translated playback continue independently.
+You can immediately start another session with separate files and processing;
+older sessions retain their own models, source audio and encryption keys until
+completion. Translated sessions targeting the same endpoint serialize playback
+to avoid talking over one another. Explicit failures remain available for recovery.
+Original routing uses its separate audio executor and never waits for journal
+writes, file finalization or inference.
 
 | Session selections | Audio heard at destinations | Files |
 |---|---|---|
@@ -258,12 +263,13 @@ used where its protocol requires internal recognition. It no longer determines
 the model writing the TXT. See [the transcription guide](transcription.md).
 
 In independent recognition, the TXT receives only final results; partials are
-not repeated in the file. Stopping a session cancels pending recognition, so
-the last sentence still processing may not appear. When that segment matters,
-wait for a short pause and the final result before stopping. The writer drains
-final results already received; speech not yet finalized by the service is not
-guaranteed. WAV recording is a separate path and retains the selected capture
-regardless of that result.
+not repeated in the file. Stop closes source capture without cancelling the last
+sentence, queued originals or optional historical prefix. There is no global
+finalization deadline that discards accepted audio. Provider request failures
+remain visible and retain the source for recovery while Babel stays open.
+Recent originals are read directly from RAM, while a separate worker commits an
+encrypted journal in the system temporary directory. Slower consumers read older
+journal batches; neither disk latency nor model backpressure blocks original routing.
 
 ## Languages and prompts
 
@@ -303,17 +309,23 @@ disconnecting hardware to see available devices.
 are enforced by saturation to prevent numeric overflow; high values may cause
 audible clipping.
 
-Quality profiles adjust transport/VAD, rather than providing a fictitious cloud
-model fidelity control:
+Quality profiles adjust conversational end-of-speech detection. They do not
+change the cloud model's fidelity or guarantee a shorter translation delay:
 
-| Profile | Local frame in non-dedicated models | Conversational VAD silence |
-|---|---:|---:|
-| `low_latency` | 10 ms | 200 ms |
-| `balanced` | 20 ms | 400 ms |
-| `high_quality` | 40 ms | 700 ms |
+| Profile | Conversational VAD silence |
+|---|---:|
+| `low_latency` | 200 ms |
+| `balanced` | 400 ms |
+| `high_quality` | 700 ms |
 
-For dedicated models, Babel sends 100 ms frames. Internal translated playback
-uses mono PCM16 at 24 kHz in frames of up to 20 ms. The Linux server or Rust
+Dedicated continuous translation does not use that conversational silence
+threshold. Device capture selects the smallest interval among 10, 20, 40 and
+100 ms containing a whole number of samples at the negotiated rate, normally
+10 ms. The Gemini adapter sends each speech copy as it arrives without waiting
+to accumulate a 100 ms batch. Internal translated playback uses mono PCM16 at
+24 kHz in frames of up to 20 ms. Playback queue sizes are capacity limits, not
+startup prefill targets; reducing capacity can cause overflow without reducing
+the model's first-response time. The Linux server or Rust
 resampler adapts the physical rate. AI capture is mono at 16 kHz; the OpenAI
 adapter converts it to 24 kHz. This does not make translated output high-fidelity
 stereo music audio: its focus is translated speech.
@@ -326,7 +338,9 @@ starting/stopping a session, although reopening streams may produce a short gap.
 Babel must remain running to forward audio; automatic startup is optional.
 
 - `capture_queue_ms`: 100–1000 ms, default 200. Bounds capture and sending queues.
-- `max_capture_age_ms`: 100–1000 ms, default 200. Old local frames are discarded.
+- `max_capture_age_ms`: legacy setting retained for configuration compatibility.
+  Session processing no longer discards accepted originals because of their age;
+  delayed consumers read the retained backlog.
 - `playback_queue_ms`: 100–5000 ms, default 2000. A ceiling, not a deliberate delay.
 - `device_latency_ms`: 5–200 ms, default 30. A latency request to the backend;
   drivers and the system may choose a different buffer. CPAL uses the supported

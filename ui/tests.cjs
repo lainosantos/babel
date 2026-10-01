@@ -66,6 +66,9 @@ async function page(t, options = {}) {
   let audioHistory = { enabled: true, capacity_secs: 600, available_secs: 180, combined_audio_secs: 180, microphone_secs: 180, speaker_secs: 90, ...options.history };
   let historySession = { history_included_secs: 0, history_transcription_pending: false, ...options.historySession };
   let retainedSessions = options.retainedSessions || [];
+  let finalizingSessions = options.finalizingSessions || [];
+  const finalizeOnStop = options.finalizeOnStop;
+  let sessionSequence = 0;
   let retentionRequest = options.retentionRequest;
   let recoveryRequest = options.recoveryRequest;
   let routingActive = true;
@@ -123,10 +126,13 @@ async function page(t, options = {}) {
       if (firstStatus && initialChange) { initialChange(config); revision++; }
       firstStatus = false;
       const route = name => ({ ...metrics, state: running && config[name].enabled ? 'streaming' : routingActive || running ? 'passthrough' : 'stopped', ...routeStatuses[name] });
-      value = { ...historySession, history: audioHistory, local_runtime: localRuntime, running, routing_active: routingActive, routing_error: routingError, config_revision: revision, session_name: sessionName, session_id: sessionId, microphone: route('microphone'), speaker: route('speaker'), last_error: null };
+      value = { ...historySession, history: audioHistory, local_runtime: localRuntime, running, finalizing: finalizingSessions.length > 0, finalizing_sessions: finalizingSessions, routing_active: routingActive, routing_error: routingError, config_revision: revision, session_name: sessionName, session_id: sessionId, microphone: route('microphone'), speaker: route('speaker'), last_error: null };
     }
-    else if (parsed.pathname === '/api/start') { if (startRequest) { const response = await startRequest(); if (response instanceof Response) return response; } running = true; sessionName = body?.name || 'Automatic session'; sessionId = 'fixture-session-id'; }
-    else if (parsed.pathname === '/api/stop') running = false;
+    else if (parsed.pathname === '/api/start') { if (startRequest) { const response = await startRequest(); if (response instanceof Response) return response; } running = true; sessionName = body?.name || 'Automatic session'; sessionSequence++; sessionId = `fixture-session-id${sessionSequence > 1 ? `-${sessionSequence}` : ''}`; }
+    else if (parsed.pathname === '/api/stop') {
+      if (running && finalizeOnStop) finalizingSessions.push({ session_id: sessionId, session_name: sessionName, microphone: metrics, speaker: metrics, last_error: null });
+      running = false;
+    }
     else if (parsed.pathname === '/api/autostart') { if (options.method === 'POST') autostart = body.enabled; value = { ...autostartMetadata, enabled: autostart, supported: true, description: autostart ? 'Início automático ativado; tradução parada.' : 'Início automático desativado.' }; }
     else if (parsed.pathname === '/api/credentials' && options.method === 'GET') value = { configured: credentials.has(parsed.searchParams.get('api_key_env')) };
     else if (parsed.pathname === '/api/credentials') credentials.add(body.api_key_env);
@@ -138,8 +144,83 @@ async function page(t, options = {}) {
   window.eval(fs.readFileSync(path.join(__dirname, 'workspace.js'), 'utf8'));
   await settle(() => !byId('start').disabled && calls.some(call => call.path === '/api/platform'), 'dashboard did not initialize');
   const set = (id, value) => { const input = byId(id); if (input.type === 'checkbox') input.checked = value; else input.value = value; input.dispatchEvent(new window.Event('input', { bubbles: true })); };
-  return { window, doc, byId, calls, set, history: status => { audioHistory = status; }, historySession: status => { historySession = status; }, retention: sessions => { retainedSessions = sessions; }, retentionRequest: handler => { retentionRequest = handler; }, recoveryRequest: handler => { recoveryRequest = handler; }, runtime: status => { localRuntime = status; }, config: () => config, poll: () => interval(), externalChange: callback => { callback(config); revision++; }, filePaths: handler => { filePathsHandler = handler; }, platformFailure: failure => { platformFailure = failure; }, routing: (active, error = null) => { routingActive = active; routingError = error; }, routeStatus: (route, status) => { routeStatuses[route] = status; } };
+  return { window, doc, byId, calls, set, history: status => { audioHistory = status; }, historySession: status => { historySession = status; }, finalizing: sessions => { finalizingSessions = sessions; }, retention: sessions => { retainedSessions = sessions; }, retentionRequest: handler => { retentionRequest = handler; }, recoveryRequest: handler => { recoveryRequest = handler; }, runtime: status => { localRuntime = status; }, config: () => config, poll: () => interval(), externalChange: callback => { callback(config); revision++; }, filePaths: handler => { filePathsHandler = handler; }, platformFailure: failure => { platformFailure = failure; }, routing: (active, error = null) => { routingActive = active; routingError = error; }, routeStatus: (route, status) => { routeStatuses[route] = status; } };
 }
+
+test('stopped captures finalize in the background while a new session starts independently', async t => {
+  const p = await page(t, { language: 'en', finalizeOnStop: true });
+  p.set('session-name', 'First session');
+  p.byId('start').click();
+  await settle(() => !p.byId('stop').hidden && !p.byId('stop').disabled);
+  p.byId('stop').click();
+  await settle(() => !p.byId('start').hidden && !p.byId('start').disabled);
+  assert.equal(p.byId('stop').hidden, true);
+  assert.equal(p.byId('settings').disabled, false);
+  assert.equal(p.byId('finalizing-card').hidden, false);
+  assert.equal(p.byId('session-state').textContent, 'Finalizing session');
+  assert.equal(p.byId('finalizing-sessions').children.length, 1);
+  assert.match(p.byId('finalizing-sessions').textContent, /First session/);
+  assert.equal(p.byId('notice').textContent, 'Session capture stopped. Any pending work continues in the background.');
+
+  p.set('session-name', 'Second session');
+  p.byId('start').click();
+  await settle(() => !p.byId('stop').hidden && !p.byId('stop').disabled);
+  assert.equal(p.byId('session-state').textContent, 'Session active');
+  assert.match(p.byId('session-identity').textContent, /Second session/);
+  assert.match(p.byId('finalizing-sessions').textContent, /First session/);
+  p.byId('stop').click();
+  await settle(() => !p.byId('start').disabled);
+  assert.equal(p.byId('finalizing-sessions').children.length, 2);
+
+  p.finalizing([{ session_id: 'fixture-session-id-2', session_name: 'Second session' }]);
+  await p.poll();
+  assert.equal(p.byId('finalizing-sessions').children.length, 1);
+  assert.doesNotMatch(p.byId('finalizing-sessions').textContent, /First session/);
+  p.finalizing([]);
+  await p.poll();
+  assert.equal(p.byId('finalizing-card').hidden, true);
+  assert.equal(p.byId('start').disabled, false);
+});
+
+test('background finalization failures stay visible as retained work and never report successful completion', async t => {
+  const pending = { session_id: 'pending-session', session_name: '<img src=x onerror=alert(1)>', last_error: 'Provider unavailable' };
+  const p = await page(t, { language: 'en', finalizingSessions: [pending] });
+  assert.match(p.byId('finalizing-sessions').textContent, /Provider unavailable/);
+  assert.equal(p.byId('finalizing-sessions').querySelector('img'), null);
+  p.finalizing([]);
+  p.retention([{ id: pending.session_id, name: pending.session_name, error: pending.last_error, memory_bytes: 500, encrypted_bytes: 0, recovering: false }]);
+  await p.poll();
+  assert.equal(p.byId('finalizing-card').hidden, true);
+  assert.equal(p.byId('retention-card').hidden, false);
+  assert.match(p.byId('retention-sessions').textContent, /Provider unavailable/);
+  assert.doesNotMatch(p.byId('notice').textContent, /Session ended|saved|finalized/i);
+  assert.equal(p.byId('start').disabled, false);
+});
+
+test('background finalization localizes without changing session controls or pending identities', async t => {
+  const p = await page(t, { language: 'en', finalizingSessions: [{ session_id: 'pending', session_name: 'Pending recording' }] });
+  p.byId('interface-language').value = 'pt';
+  p.byId('interface-language').dispatchEvent(new p.window.Event('change', { bubbles: true }));
+  await settle(() => p.byId('session-state').textContent === 'Finalizando sessão');
+  assert.equal(p.byId('finalizing-title').textContent, 'Sessões em finalização');
+  assert.match(p.byId('finalizing-sessions').textContent, /Pending recording/);
+  assert.match(p.byId('finalizing-sessions').textContent, /Finalizando sessão/);
+  assert.equal(p.byId('start').disabled, false);
+});
+
+test('checking retained work after Stop does not delay starting another session', async t => {
+  const p = await page(t, { language: 'en', finalizeOnStop: true });
+  p.byId('start').click();
+  await settle(() => !p.byId('stop').hidden && !p.byId('stop').disabled);
+  let finishRetention;
+  p.retentionRequest(() => new Promise(resolve => { finishRetention = resolve; }));
+  p.byId('stop').click();
+  await settle(() => finishRetention && !p.byId('start').disabled);
+  p.byId('start').click();
+  await settle(() => !p.byId('stop').hidden && !p.byId('stop').disabled);
+  finishRetention([]);
+  assert.equal(p.byId('finalizing-card').hidden, false);
+});
 
 test('the real dashboard separates routing, translation, transcription and recording into six workspace destinations', async t => {
   const p = await page(t);

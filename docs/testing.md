@@ -67,9 +67,9 @@ Two supervisor tests exercise independent synthetic routes while a writer fails
 or remains pending. Both routes must keep transporting frames,
 `Controller::status()` must report active routing with a visible processing
 error, and closing routes must allow original routing to resume before waiting
-for the stalled writer. The global drain deadline ends that wait and reports
-potentially incomplete files; the test also verifies disposal of the pending
-task. Another test writes/reopens a real WAV after preparing it before capture
+for the stalled writer. There is no global processing drain deadline: a finalizer
+remains owned after 120 simulated seconds and completes when its worker does.
+Another test writes/reopens a real WAV after preparing it before capture
 and verifies that preparation time does not add initial silence. These writer
 and WAV cases passed locally on Linux on September 30, 2026.
 
@@ -88,6 +88,44 @@ hotplug and format-switch testing on each OS. Opening/closing streams, global
 CPU/memory pressure or a blocked OS call can still cause gaps, including when
 stopping a session. These tests establish neither a zero-gap promise nor a p99
 target.
+
+### Retained originals and background completion
+
+```sh
+cargo test --locked --lib engine::retained::tests::
+cargo test --locked --lib retention::tests::
+cargo test --locked --lib engine::recognition::tests::
+cargo test --locked --lib engine::translation::tests::
+cargo test --locked --lib provider::gemini::translation::tests::
+cargo test --locked --lib provider::openai::translation::tests::
+cargo test --locked --lib provider::local::tests::
+cargo test --locked --lib audio::switching::tests::
+```
+
+Independent microphone/output readers cross RAM-to-journal transitions without
+gaps or duplicates. A zero-timeout read receives recent audio before any disk
+commit, proving that the provider fast path does not await persistence. Journal
+tests cover authenticated ciphertext, concurrent appends/reads, partial-tail
+repair, permissions and cleanup. A reader's ownership prevents early deletion.
+
+A 40-second original backlog reaches local STT in full after source EOF; slow
+translation backpressures its own feeder without evicting accepted segments.
+Transcript delivery also waits for a writer blocked for 45 simulated seconds.
+Provider fixtures distinguish input EOF from final model acknowledgement and
+require the last output before success. Playback fixtures retain ownership until
+the device drain completes and report interrupted delivery as incomplete.
+Controller tests keep older finalizers alive while another session is stopped.
+
+These are deterministic local/loopback tests, not live-cloud latency measurements
+or proof against OS, device, disk or process failure. A crashed process loses its
+RAM-only encryption key. Pending originals are recoverable only while that key
+and their data remain available.
+
+The September 30, 2026 finalization validation passed 610 Rust library tests
+(seven environment-dependent tests ignored), all 133 interface tests and Clippy
+with warnings denied. Windows library/test cross-compilation also passed; no
+macOS SDK compilation or native Windows/macOS hardware execution was performed
+in that local run. No live provider key or microphone was used by these tests.
 
 ### Original transport precision on a real audio server
 
@@ -108,6 +146,37 @@ resampling between different formats. For the full suite on machines with many
 CPUs, `cargo test --locked --all-targets -- --test-threads=4` avoids hundreds of
 mock servers and deadline tests competing simultaneously for the application's
 bounded executors.
+
+### Translation playback latency without a model or network
+
+The Linux-only `audio_latency_probe` example sends 100 ms synthetic tone pulses
+through Babel's production playback backend and dedicated audio executor. It
+observes only its own temporary null sink's monitor, checks that existing Babel
+endpoints and system defaults stay unchanged, and removes the owned module after
+success or failure. It needs a running PulseAudio/PipeWire session and `pactl`,
+`pacat` and `parec` in `PATH`. It does not open physical devices, read user settings
+or call providers.
+
+```sh
+cargo run --release --locked --example audio_latency_probe -- \
+  --trials 12 --device-latency-ms 30 --queue-ms 2000
+```
+
+If the checkout uses locally extracted Pulse tools, prefix the command with
+`PATH="$PWD/.tools/pulse/usr/bin:$PATH"`. Compare `--device-latency-ms 10` or
+`--queue-ms 200` in separate runs; keep the other options and system load the same.
+The example emits JSON with all trials, the first pulse, median, p95 and range.
+Quantiles use linear interpolation. Playback uses mono PCM at 24 kHz and 20 ms
+frames, matching translated audio; the observer uses 10 ms frames. Workers are
+opened before the pulses, so this does not measure initial device startup.
+
+The main timing starts when the command enters an available playback queue and
+ends when the monitor delivers a frame containing the pulse. It includes monitor
+capture and process scheduling. A separate estimate removes only the known
+position inside that observation frame. Neither number is physical, acoustic,
+model or network latency, nor a measurement of sustained playback backlog.
+`queue-ms` is capacity, not an instruction to wait until that duration is filled.
+This software-loopback probe does not establish Windows/macOS native latency.
 
 ## Local translation overload and recovery
 
@@ -507,6 +576,173 @@ a pending checklist for target hardware, not a record of completed execution.
 See [platforms](platforms.md) for topology and drivers,
 [local models](local-inference.md) for integrated preparation, and
 [other providers](other-providers.md) for optional external endpoints.
+
+## Live translation latency through the dashboard
+
+`scripts/measure_translation_latency.py` measures the running Babel application
+with synthetic speech. The harness requires Linux and the `pactl`, `pacat` and
+`parec` clients; it does not validate native Windows or macOS hardware. See the
+[recorded measurements](latency-measurements.md) for executed results and limits.
+
+Prepare an explicitly selected **synthetic** mono PCM16 WAV at 16 kHz, between
+1 and 60 seconds long. Use the same speech, source/target languages, audio
+quality and prompt for provider comparisons. The harness preserves the current
+microphone languages, prompt and quality; it selects the requested provider's
+existing profile. Supply its API key through the Babel dashboard. The script
+checks whether that key is configured without retrieving or exporting it.
+
+The selected Babel instance must have no active session or pending file
+recovery. Its routes and processing settings are temporarily changed for the
+test. Use a dedicated test instance to keep everyday routing uninterrupted, and
+do not edit its settings while testing. Four uniquely named null sinks isolate
+the supplied audio from physical speakers and microphones. Two carry the test
+microphone route; the other two keep the disabled speaker route valid and
+silent during session validation. System default devices are not selected or
+changed.
+
+In Bash, read the actual dynamic dashboard address and token without placing
+the token in command history. The URL must be the bare loopback address, with
+no token fragment. These values remain in the calling process environment;
+the token is excluded from audio child processes and reports.
+
+```bash
+read -r -p 'Bare dashboard URL: ' BABEL_DASHBOARD_URL
+read -r -s -p 'Dashboard token: ' BABEL_DASHBOARD_TOKEN
+export BABEL_DASHBOARD_URL BABEL_DASHBOARD_TOKEN
+
+# Calibrate the original software route without contacting a cloud provider.
+python3 scripts/measure_translation_latency.py \
+  --speech /absolute/path/synthetic.wav --provider gemini --routing-only \
+  --trials 3 --json /tmp/babel-routing-latency.json
+
+# This explicitly sends the selected synthetic fixture to Gemini and may cost credits.
+python3 scripts/measure_translation_latency.py \
+  --speech /absolute/path/synthetic.wav --provider gemini --trials 3 \
+  --json /tmp/babel-gemini-latency.json \
+  --capture-output /tmp/babel-synthetic-translations
+
+# Requires the OpenAI key to be configured in the same test instance.
+python3 scripts/measure_translation_latency.py \
+  --speech /absolute/path/synthetic.wav --provider openai --trials 3 \
+  --json /tmp/babel-openai-latency.json
+
+unset BABEL_DASHBOARD_URL BABEL_DASHBOARD_TOKEN
+```
+
+An optional `--model` temporarily overrides only the selected provider model;
+use a compatible Live model available to that API key. For example,
+`--model gemini-3.8-live` compares the conversational Live model with the
+configured translation model. `--playback-queue-ms` temporarily overrides the
+translated playback capacity within Babel's 100–5,000 ms range. Use the same
+capacity across comparison runs and report failures at the normal capacity
+separately. Extra capacity does not impose a startup prefill.
+`--capture-output` saves
+only generated test output for listening or waveform inspection. There are no
+transcript, recording, history or command-processing sessions during the test.
+No real microphone is selected.
+
+Each trial reports setup readiness separately from first sound, the observed
+input-to-engine and input-to-output delays, output duration, final tail delay,
+dropped-frame counters and reconnections. The fixture's PCM hash identifies
+the audio used without storing its text or the complete configuration. The
+script paces input in 10 ms blocks and polls engine counters every 20 ms by
+default. Compare several trials, and reject trials with errors or losses.
+
+These timestamps include operating-system audio scheduling. The engine event
+is observed through polling, so an engine-to-output difference can be slightly
+negative within the measurement error. It is not an exact network, inference
+or causal playback delay. Output completion is inferred after three seconds
+without output above the selected amplitude threshold; it is not the provider's
+turn-complete acknowledgment. Live Translate can continue sending silent PCM,
+so an increasing sample counter does not necessarily mean continued speech.
+A pause longer than the quiet-tail setting can end observation before a later
+phrase; verify the saved synthetic output for completeness.
+First sound also does not establish translation accuracy or the time needed to
+understand a full phrase. Listen to the optional synthetic output for that check.
+
+On normal completion or interruption, the script stops only its own session,
+restores its changed configuration fields using revision checks, and removes
+only modules whose identity still matches its unique devices. Concurrent user
+edits are preserved and reported. If the process is forcibly killed, cleanup
+cannot run; review the test instance's settings before resuming it. Check
+`configuration_restored` and `errors` in the report after every run.
+Voice commands are disabled and restored through their separate configuration
+API and revision, so the synthetic fixture cannot invoke configured MCP tools.
+
+The harness's safety tests do not access devices, the network or paid models:
+
+```sh
+python3 -m unittest scripts/test_translation_latency_probe.py
+```
+
+### Synthetic Gemini text-to-speech cascade experiment
+
+`scripts/gemini_cascade_bridge.py` is a development benchmark, not an installed
+Babel provider. It receives synthetic PCM through the existing custom Realtime
+transport, requests English text directly from Portuguese audio using
+`gemini-3.5-flash-lite`, and streams synthesis from
+`gemini-3.8-flash-lite-tts`. The complete translated segment is collected before
+TTS starts. No prepared transcript is substituted for the incoming audio.
+
+Install the benchmark's Python dependencies in an isolated development
+environment, outside the distributed application:
+
+```sh
+python3 -m venv .tools/cascade-benchmark-venv
+.tools/cascade-benchmark-venv/bin/pip install websockets==15.0.1 httpx==0.28.1
+.tools/cascade-benchmark-venv/bin/python scripts/gemini_cascade_bridge.py \
+  --synthetic-only --warm-http --segment-seconds 0 \
+  --ready-file /tmp/babel-cascade-ready.json \
+  --report-file /tmp/babel-cascade-stages.json
+```
+
+The bridge binds port zero and writes its actual endpoint with an unpredictable
+path to the private readiness file. In another terminal, use that endpoint as
+`BABEL_CASCADE_ENDPOINT`, with the dashboard environment described above:
+
+```sh
+python3 scripts/measure_translation_latency.py \
+  --speech /absolute/path/synthetic.wav --provider openai \
+  --model benchmark-gemini-cascade \
+  --local-bridge "$BABEL_CASCADE_ENDPOINT" --credential-provider gemini \
+  --playback-queue-ms 5000 --quiet-tail 8 --tail-timeout 60 --trials 3 \
+  --json /tmp/babel-cascade-latency.json \
+  --capture-output /tmp/babel-synthetic-cascade-output
+```
+
+Here `openai` selects the existing wire protocol only. All paid requests go to
+fixed official Google endpoints. The explicit credential-profile option passes
+the existing Gemini key to the local bridge through the normal authentication
+handshake. Both processes keep it in memory; it is absent from reports, saved
+configuration and command arguments. This is an intentional handoff to a local
+test provider, not an API to retrieve stored credentials. Python and HTTP
+libraries do not guarantee zeroization of temporary memory copies. Stop the
+bridge after the experiment.
+
+`--warm-http` prepares the HTTPS connection with a bounded model-metadata
+request before announcing readiness, then reuses that client with a 120-second
+keepalive. This separates connection setup from speech timing, as the Live
+comparison does. Omit the flag to measure a cold first REST request. The
+optional `--include-synthetic-text` writes generated test translations into
+the private stage report for quality verification; it is off by default and
+must only be used with non-private synthetic speech.
+
+Use `--segment-seconds 0` for whole utterances with 400 ms silence detection,
+or restart the bridge with `--segment-seconds 2` for bounded short segments.
+Short segments can cut words or remove context; check complete translated
+meaning, ordering and repetition before treating earlier sound as an
+improvement. Reports separate segment capture, first text, complete text, first
+TTS PCM and playback. Output is paced after the first PCM arrives so normal
+generation bursts do not overflow Babel's playback queue. This prototype uses
+one ordered processing worker; queued segments can therefore accumulate delay.
+Compare its full-chain timing, not just text-generation or synthesis time.
+Require all captured segments to complete and no pending speech at disconnect.
+
+The bridge's protocol and safety tests use no paid endpoints:
+
+```sh
+.tools/cascade-benchmark-venv/bin/python scripts/test_gemini_cascade_bridge.py
+```
 
 ## Native drivers: tests separate from the application
 

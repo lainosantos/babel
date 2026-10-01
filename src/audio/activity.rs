@@ -16,29 +16,50 @@ use tokio_util::sync::CancellationToken;
 pub struct EndpointUse {
     pub microphone: bool,
     pub speaker: bool,
+    /// Output selection may remain valid after the last active stream ends.
+    pub speaker_selected: bool,
     pub microphone_epoch: u64,
     pub speaker_epoch: u64,
+    pub speaker_selection_epoch: u64,
     pub microphone_error: Option<String>,
     pub speaker_error: Option<String>,
     pub error: Option<String>,
 }
 
-/// A changed epoch invalidates the corresponding route, even if several activity
-/// transitions have been coalesced by the watch receiver into the same boolean.
-pub fn monitor(
+/// The first watch change confirms an actual device observation, including an
+/// unused microphone. Consumers can wait without treating startup as inactivity.
+/// Epochs retain selection changes even if watch updates have been coalesced.
+pub(crate) fn monitor_initializing(
     mic_playback: watch::Receiver<String>,
     speaker_capture: watch::Receiver<String>,
     cancel: CancellationToken,
 ) -> watch::Receiver<EndpointUse> {
+    monitor_from(
+        mic_playback,
+        speaker_capture,
+        cancel,
+        EndpointUse {
+            error: Some("Inspecting virtual audio endpoint use".into()),
+            ..Default::default()
+        },
+    )
+}
+
+fn monitor_from(
+    mic_playback: watch::Receiver<String>,
+    speaker_capture: watch::Receiver<String>,
+    cancel: CancellationToken,
+    initial: EndpointUse,
+) -> watch::Receiver<EndpointUse> {
     #[cfg(target_os = "linux")]
     {
-        let (sender, receiver) = watch::channel(EndpointUse::default());
+        let (sender, receiver) = watch::channel(initial);
         tokio::spawn(linux::run(mic_playback, speaker_capture, cancel, sender));
         receiver
     }
     #[cfg(any(target_os = "macos", target_os = "windows"))]
     {
-        let (sender, receiver) = watch::channel(EndpointUse::default());
+        let (sender, receiver) = watch::channel(initial);
         #[cfg(target_os = "macos")]
         tokio::spawn(macos::run(mic_playback, speaker_capture, cancel, sender));
         #[cfg(target_os = "windows")]
@@ -71,8 +92,10 @@ mod linux {
     #[derive(Default, Debug)]
     struct UseSnapshot {
         microphone_default: bool,
+        speaker_default: bool,
         microphone_clients: HashSet<u64>,
         speaker_clients: HashSet<u64>,
+        speaker_selected_clients: HashSet<u64>,
         microphone_error: Option<String>,
         speaker_error: Option<String>,
     }
@@ -80,6 +103,9 @@ mod linux {
     impl UseSnapshot {
         fn microphone_active(&self) -> bool {
             self.microphone_default || !self.microphone_clients.is_empty()
+        }
+        fn speaker_selected(&self) -> bool {
+            self.speaker_default || !self.speaker_selected_clients.is_empty()
         }
     }
 
@@ -161,14 +187,16 @@ mod linux {
                                 }
                                 Event::RemovedSinkInput(id) => {
                                     current.speaker_clients.remove(&id);
+                                    current.speaker_selected_clients.remove(&id);
                                 }
                                 Event::Refresh => (),
                             }
                         }
-                        publish(
+                        publish_state(
                             &state,
                             current.microphone_active(),
                             !current.speaker_clients.is_empty(),
+                            current.speaker_selected(),
                             current.microphone_error.clone(),
                             current.speaker_error.clone(),
                             None,
@@ -177,8 +205,9 @@ mod linux {
                     }
                     Err(error) => {
                         snapshot = UseSnapshot::default();
-                        publish(
+                        publish_state(
                             &state,
+                            false,
                             false,
                             false,
                             None,
@@ -208,6 +237,8 @@ mod linux {
                     speaker_watch_open = result.is_ok();
                     invalidate_direction(&state, false);
                     snapshot.speaker_clients.clear();
+                    snapshot.speaker_selected_clients.clear();
+                    snapshot.speaker_default = false;
                 }
                 event = events.recv() => {
                     match event {
@@ -218,7 +249,7 @@ mod linux {
                 _ = interval.tick() => (),
             }
         }
-        publish(&state, false, false, None, None, None);
+        publish_state(&state, false, false, false, None, None, None);
         subscription_cancel.cancel();
         let _ = subscription.await;
     }
@@ -228,10 +259,11 @@ mod linux {
             Event::RemovedSourceOutput(id) => {
                 if snapshot.microphone_clients.remove(&id) && !snapshot.microphone_active() {
                     let current = state.borrow().clone();
-                    publish(
+                    publish_state(
                         state,
                         false,
                         current.speaker,
+                        current.speaker_selected,
                         current.microphone_error,
                         current.speaker_error,
                         current.error,
@@ -239,12 +271,14 @@ mod linux {
                 }
             }
             Event::RemovedSinkInput(id) => {
-                if snapshot.speaker_clients.remove(&id) && snapshot.speaker_clients.is_empty() {
+                let removed = snapshot.speaker_selected_clients.remove(&id);
+                if snapshot.speaker_clients.remove(&id) || removed {
                     let current = state.borrow().clone();
-                    publish(
+                    publish_state(
                         state,
                         current.microphone,
-                        false,
+                        !snapshot.speaker_clients.is_empty(),
+                        snapshot.speaker_selected(),
                         current.microphone_error,
                         current.speaker_error,
                         current.error,
@@ -255,10 +289,31 @@ mod linux {
         }
     }
 
+    #[cfg(test)]
     fn publish(
         state: &watch::Sender<EndpointUse>,
         microphone: bool,
         speaker: bool,
+        microphone_error: Option<String>,
+        speaker_error: Option<String>,
+        error: Option<String>,
+    ) {
+        publish_state(
+            state,
+            microphone,
+            speaker,
+            speaker,
+            microphone_error,
+            speaker_error,
+            error,
+        );
+    }
+
+    fn publish_state(
+        state: &watch::Sender<EndpointUse>,
+        microphone: bool,
+        speaker: bool,
+        speaker_selected: bool,
         microphone_error: Option<String>,
         speaker_error: Option<String>,
         error: Option<String>,
@@ -271,18 +326,25 @@ mod linux {
             let speaker_changed = current.speaker != speaker
                 || current.speaker_error != speaker_error
                 || error_changed;
+            let selection_changed = current.speaker_selected != speaker_selected
+                || current.speaker_error != speaker_error
+                || error_changed;
             if mic_changed {
                 current.microphone_epoch = current.microphone_epoch.wrapping_add(1);
             }
             if speaker_changed {
                 current.speaker_epoch = current.speaker_epoch.wrapping_add(1);
             }
+            if selection_changed {
+                current.speaker_selection_epoch = current.speaker_selection_epoch.wrapping_add(1);
+            }
             current.microphone = microphone;
             current.speaker = speaker;
+            current.speaker_selected = speaker_selected;
             current.microphone_error = microphone_error;
             current.speaker_error = speaker_error;
             current.error = error;
-            mic_changed || speaker_changed
+            mic_changed || speaker_changed || selection_changed
         });
     }
 
@@ -294,6 +356,8 @@ mod linux {
             } else {
                 current.speaker = false;
                 current.speaker_epoch = current.speaker_epoch.wrapping_add(1);
+                current.speaker_selected = false;
+                current.speaker_selection_epoch = current.speaker_selection_epoch.wrapping_add(1);
             }
         });
     }
@@ -366,14 +430,18 @@ mod linux {
             let short = pactl(&["list", "short", "modules"], MAX_SNAPSHOT_BYTES).await?;
             snapshot["modules"] = Value::Array(parse_short_modules(&short)?);
         }
-        // The system default is a user's microphone selection even if no app
-        // has opened capture yet. Query it only to authorize the microphone;
-        // a default output never authorizes speaker capture or playback.
-        let default_source = pactl(&["get-default-source"], 4096)
-            .await
-            .and_then(|bytes| {
-                String::from_utf8(bytes).context("default microphone name was not UTF-8")
-            });
+        // Output default selection authorizes an already accepted translation
+        // tail. It never authorizes opening speaker capture without a client.
+        let (default_source, default_sink) = tokio::join!(
+            pactl(&["get-default-source"], 4096),
+            pactl(&["get-default-sink"], 4096)
+        );
+        let default_source = default_source.and_then(|bytes| {
+            String::from_utf8(bytes).context("default microphone name was not UTF-8")
+        });
+        let default_sink = default_sink.and_then(|bytes| {
+            String::from_utf8(bytes).context("default speaker name was not UTF-8")
+        });
         let mut result = evaluate(
             &snapshot,
             mic_device,
@@ -386,7 +454,37 @@ mod linux {
                 "Could not inspect the system microphone selection: {error:#}"
             ));
         }
+        match default_sink {
+            Ok(name) => select_default_speaker(&mut result, &snapshot, speaker_device, name.trim()),
+            Err(error) => {
+                result.speaker_error = Some(format!(
+                    "Could not inspect the system speaker selection: {error:#}"
+                ));
+            }
+        }
         Ok(result)
+    }
+
+    fn select_default_speaker(
+        result: &mut UseSnapshot,
+        snapshot: &Value,
+        speaker_device: &str,
+        default_sink: &str,
+    ) {
+        if result.speaker_error.is_some() {
+            return;
+        }
+        let sinks = snapshot["sinks"]
+            .as_array()
+            .expect("validated activity snapshot");
+        let sources = snapshot["sources"]
+            .as_array()
+            .expect("validated activity snapshot");
+        let selected = speaker_sink(sinks, sources, speaker_device).ok();
+        result.speaker_default = selected.is_some()
+            && sinks.iter().any(|sink| {
+                sink["name"].as_str() == Some(default_sink) && index(&sink["index"]) == selected
+            });
     }
 
     fn parse_short_modules(bytes: &[u8]) -> Result<Vec<Value>> {
@@ -628,6 +726,9 @@ mod linux {
                 continue;
             }
             if speaker_sink_id.is_some() && index(&stream["sink"]) == speaker_sink_id {
+                if let Some(id) = index(&stream["index"]) {
+                    result.speaker_selected_clients.insert(id);
+                }
                 match client_index(stream) {
                     Ok(Some(id)) => {
                         result.speaker_clients.insert(id);
@@ -643,6 +744,8 @@ mod linux {
         }
         if result.speaker_error.is_some() {
             result.speaker_clients.clear();
+            result.speaker_selected_clients.clear();
+            result.speaker_default = false;
         }
         Ok(result)
     }

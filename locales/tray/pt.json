@@ -31,5 +31,6 @@
   "agent.activated_hint": "Pode dizer o seu comando.",
   "agent.processing_hint": "Preparando e executando o comando.",
   "agent.succeeded_hint": "Seu comando foi concluído.",
-  "agent.failed_hint": "Veja os detalhes no Babel."
+  "agent.failed_hint": "Veja os detalhes no Babel.",
+  "status.finalizing": "Babel · finalizando sessão"
 }

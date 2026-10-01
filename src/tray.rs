@@ -90,6 +90,7 @@ fn physical_action(id: &str) -> Option<(DeviceDirection, &str)> {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 struct TrayStatus {
     running: bool,
+    finalizing: bool,
     routing_active: bool,
     error: bool,
     revision: u64,
@@ -101,6 +102,8 @@ fn tray_status_label(status: TrayStatus, language: &str) -> String {
             "status.error"
         } else if status.running {
             "status.running"
+        } else if status.finalizing {
+            "status.finalizing"
         } else if status.routing_active {
             "status.routing"
         } else {
@@ -195,7 +198,7 @@ fn monitor(
                 }
                 _ = tick.tick() => {
                     let status = controller.status().await;
-                    let next = TrayStatus { running: status.running, routing_active: status.routing_active, error: status.last_error.is_some() || status.routing_error.is_some(), revision: status.config_revision };
+                    let next = TrayStatus { running: status.running, finalizing: status.finalizing, routing_active: status.routing_active, error: status.last_error.is_some() || status.routing_error.is_some(), revision: status.config_revision };
                     let language = if known_revision != Some(next.revision) {
                         let (interface, revision) = controller.interface_snapshot().await;
                         // A concurrent save may fall between these snapshots.
@@ -900,6 +903,17 @@ mod tests {
         assert_eq!(tray_status_label(status, "pt"), "Babel · áudio original");
         status.running = true;
         assert_eq!(tray_status_label(status, "pt"), "Babel · sessão ativa");
+        status.finalizing = true;
+        assert_eq!(tray_status_label(status, "en"), "Babel · session active");
+        status.running = false;
+        assert_eq!(
+            tray_status_label(status, "en"),
+            "Babel · finalizing session"
+        );
+        assert_eq!(
+            tray_status_label(status, "pt"),
+            "Babel · finalizando sessão"
+        );
         status.error = true;
         assert_eq!(
             tray_status_label(status, "pt"),
@@ -947,6 +961,7 @@ mod tests {
     fn language_switch_preserves_session_state_and_menu_action_identity() {
         let status = TrayStatus {
             running: true,
+            finalizing: false,
             routing_active: true,
             error: false,
             revision: 9,
