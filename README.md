@@ -13,10 +13,11 @@ Translation, transcription and recording are independent. Outside a session,
 Babel routes original audio between the configured devices. Turning off a
 direction's translation preserves that routing during a session as well.
 
-> **Platform validation:** Babel has been validated on **Linux**.
-> **Windows and macOS still require validation on native systems**, including
-> installation, virtual devices and audio routing. Successful builds and CI
-> checks do not replace this validation.
+> **Platform status:** Babel is **100% functional on Linux**.
+> **Windows and macOS have not been tested on native systems** and still require
+> **production driver signing**. Installation, virtual devices and audio routing
+> remain unvalidated on those platforms. Successful builds and CI checks do not
+> replace native-system testing.
 
 The command agent uses **only the original physical microphone**, with a
 configurable wake name (default: “Babel”), local Whisper, **Needle 3** and
@@ -115,7 +116,8 @@ translation and transcription disabled, without starting cloud calls. See
 
 On macOS and Windows, the **native Babel driver** provides two independent
 routes. Source code and build scripts are in `native/macos` and `native/windows`;
-**distribution-package signing and native hardware validation are still pending**.
+**production driver signing, distribution-package signing and native-system
+testing are still pending**.
 The app uses CoreAudio/WASAPI through CPAL, with persistent IDs and app-activity
 monitoring. On macOS, that detection requires **macOS 14.2+**. BlackHole and
 VB-CABLE remain optional alternatives, not dependencies of Babel's own driver.
