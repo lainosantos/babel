@@ -245,7 +245,10 @@ fn setup_message(config: &SessionConfig, resume_handle: Option<&str>) -> Result<
     if is_translation_model(config) {
         setup["generationConfig"]["translationConfig"] = json!({
             "targetLanguageCode": translation_target_language(&config.target_language)?,
-            "echoTargetLanguage": false,
+            // Translation replaces original playback. Suppressing speech that
+            // already matches the target would mute that route entirely,
+            // including translated speech returning through a test call.
+            "echoTargetLanguage": true,
         });
     } else {
         let system_instruction = format!(

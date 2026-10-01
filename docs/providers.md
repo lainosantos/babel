@@ -41,7 +41,7 @@ Translation has two modes selected by model:
 
 | Model | Behavior | Configuration |
 |---|---|---|
-| `gemini-3.5-live-translate-preview` | Continuous translation as audio arrives; the default model for real-time translation | Target BCP-47 code; automatic source language. Voice, prompts, VAD and reasoning are not sent. `echoTargetLanguage=false`: silence when speech is already in the target language. |
+| `gemini-3.5-live-translate-preview` | Continuous translation as audio arrives; the default model for real-time translation | Target BCP-47 code; automatic source language. Voice, prompts, VAD and reasoning are not sent. `echoTargetLanguage=true`: speech already in the target language remains audible. |
 | `gemini-3.8-live` | Bidirectional audio, with generation subject to the model's activity/turn detection | Languages in the interpreting prompt and VAD silence duration; model-default voice. `NO_INTERRUPTION` allows capture to continue while translation plays. |
 
 The client does not turn `gemini-3.8-flash` into a speech model or promise
@@ -49,6 +49,14 @@ continuous translation in generic Live mode. Availability/permissions depend
 on the Google account. Models may change; their names remain configurable.
 The `models/` prefix is optional. Translation-specific mode activates only for
 the documented identifier, not a partial match.
+
+Babel enables [target-language echo](https://ai.google.dev/gemini-api/docs/live-api/live-translate#configuration)
+because translated routes replace original playback. Disabling it would silence
+speech already in the destination language. For example, when both directions
+target English, translated microphone speech can return as incoming English in
+a two-account call. Original recording captures that incoming speech before
+speaker translation, so an audible recording alone does not confirm playback
+at the headphones or speakers.
 
 Live Translate accepts a specific set of target codes. Babel maps regional
 locales such as `en-US` and `en-GB` to the documented `en`, and `es-MX` to `es`,

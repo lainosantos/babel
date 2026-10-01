@@ -338,7 +338,7 @@ fn translate_setup_only_uses_supported_translation_options() {
     );
     assert_eq!(
         setup["setup"]["generationConfig"]["translationConfig"]["echoTargetLanguage"],
-        false
+        true
     );
     for unsupported in [
         "systemInstruction",
@@ -373,7 +373,7 @@ async fn regional_target_is_normalized_before_setup_and_audio_exchange() {
             serde_json::from_str(socket.next().await.unwrap().unwrap().to_text().unwrap()).unwrap();
         assert_eq!(
             setup["setup"]["generationConfig"]["translationConfig"],
-            json!({"targetLanguageCode":"en", "echoTargetLanguage":false})
+            json!({"targetLanguageCode":"en", "echoTargetLanguage":true})
         );
         socket
             .send(Message::Text(

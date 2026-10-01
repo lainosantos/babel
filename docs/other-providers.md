@@ -61,6 +61,17 @@ transcription under the [translation event contract](https://developers.openai.c
 The source-language field does not force a language in that session; translation
 uses received audio. In the conversational model, it becomes part of the instructions.
 
+The dedicated model may suppress speech already in the target language, as
+described in the [official mixed-language guidance](https://developers.openai.com/cookbook/examples/voice_solutions/realtime_translation_guide#account-for-mixed-language-speech).
+Babel currently replaces original playback on translated routes and does not
+automatically mix originals into OpenAI translation. Such speech can therefore
+be silent at the selected output, while original recording and transcription
+still capture it. Gemini's target-language echo setting does not apply to this
+API. In a two-account test, translating microphone audio into English and then
+translating its return into English can expose this limitation. A direction
+that does not need translation can use original routing by disabling its
+translation switch.
+
 For translation with custom instructions:
 
 ```toml
