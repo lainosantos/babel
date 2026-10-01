@@ -154,6 +154,36 @@ pub(super) async fn start_retained(
             return Err(error);
         }
     };
+    let result = run_retained(
+        provider,
+        settings,
+        transcript.clone(),
+        metrics.clone(),
+        origin,
+        originals,
+    )
+    .await;
+    if result.is_err() {
+        metrics.recovery("transcription", false);
+        let _ = record(&Some(transcript), TranscriptRecord::Gap).await;
+    }
+    result
+}
+
+async fn run_retained(
+    provider: Arc<dyn provider::SpeechProvider>,
+    mut settings: SessionConfig,
+    transcript: TranscriptSink,
+    metrics: Arc<RouteMetrics>,
+    origin: Instant,
+    originals: Arc<retained::RetainedSession>,
+) -> Result<()> {
+    let retries = settings.max_reconnect_attempts;
+    // The engine owns the exact window and its retry budget. Do not multiply
+    // outer attempts by a second provider retry loop.
+    settings.max_reconnect_attempts = 0;
+    // Finite original windows use the configured recognizer's protocol for
+    // both normal processing and replay. Recovery never substitutes a model.
     let mut reader = originals.reader(transcript.origin);
     loop {
         let Some(first) = reader.next().await? else {
@@ -193,19 +223,33 @@ pub(super) async fn start_retained(
         let results = loop {
             match resilience::segment(provider.clone(), settings.clone(), &samples, true).await {
                 Ok(results) => break results,
-                Err(_) => {
+                Err(error) => {
                     attempts = attempts.saturating_add(1);
+                    metrics.recovery_error("transcription", Some(&format!("{error:#}")));
+                    resilience::retry_live(
+                        &error,
+                        attempts,
+                        retries,
+                        originals.status().capture_closed,
+                    )?;
                     metrics.recovery("transcription", true);
                     metrics.reconnects.fetch_add(1, Ordering::Relaxed);
                     // Keep this exact segment and its timeline. No speculative
                     // text or gap is persisted before successful completion.
-                    tokio::time::sleep(resilience::delay(attempts)).await;
+                    resilience::backoff(&originals, attempts, retries).await;
+                    resilience::retry_live(
+                        &error,
+                        attempts,
+                        retries,
+                        originals.status().capture_closed,
+                    )?;
                 }
             }
         };
         for event in results {
             persist(event, &Some(transcript.clone()), &metrics, &timeline).await?;
         }
+        metrics.recovery_error("transcription", None);
         metrics.recovery("transcription", false);
     }
 }

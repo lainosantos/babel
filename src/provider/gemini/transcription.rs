@@ -37,7 +37,7 @@ async fn before_final_deadline<T>(
 
 struct Turn {
     start_sample: u64,
-    pcm: Vec<i16>,
+    samples: usize,
     trailing_zeros: usize,
     last_input: Instant,
 }
@@ -64,185 +64,32 @@ impl Turn {
     fn new(start_sample: u64) -> Self {
         Self {
             start_sample,
-            pcm: Vec::with_capacity(MAX_TURN_SAMPLES + MAX_INPUT_SAMPLES),
+            samples: 0,
             trailing_zeros: 0,
             last_input: Instant::now(),
         }
     }
 }
 
-// Retained state is owned by the complete ASR session, not its socket.
-// Translation sockets keep their separate low-latency reconnect policy.
+/// Run only the configured Live Transcribe model. The engine owns retained
+/// originals and retries the unconfirmed window through this same protocol.
 pub(super) async fn session(
     config: &SessionConfig,
     api_key: &str,
     endpoint: &str,
-    recovery_endpoint: &str,
     mut audio: mpsc::Receiver<Vec<i16>>,
     events: mpsc::Sender<ProviderEvent>,
     cancel: CancellationToken,
 ) -> Result<()> {
     let work = async {
-        let mut state = State::default();
-        let live = async {
-            let socket = open_socket(config, api_key, endpoint, None, true).await?;
-            emit(&events, ProviderEvent::Connected).await?;
-            run_live(
-                socket,
-                &mut audio,
-                &events,
-                config.vad_silence_ms,
-                &mut state,
-            )
-            .await
-        }
-        .await;
-        match live {
-            Ok(()) => return Ok(()),
-            Err(failure) if !failure.retryable => return Err(failure),
-            Err(_) => {}
-        }
-        emit(&events, ProviderEvent::RecoveringOriginal { attempt: 1 }).await?;
-        let client = reqwest::Client::builder()
-            .redirect(reqwest::redirect::Policy::none())
-            .build()
-            .map_err(|_| Failure::fatal("Could not initialize Gemini transcription recovery"))?;
-        // All uncommitted and queued PCM remains owned. A finite request can
-        // authoritatively complete with no words, unlike an absent Live event.
-        // Keep this source in finite mode to avoid repeatedly stalling on noise.
-        finite(
-            &client,
-            recovery_endpoint,
-            api_key,
-            config,
-            &mut audio,
-            &events,
-            &mut state,
-        )
-        .await
+        let socket = open_socket(config, api_key, endpoint, None, true).await?;
+        emit(&events, ProviderEvent::Connected).await?;
+        run(socket, &mut audio, &events, config.vad_silence_ms).await
     };
     tokio::select! {
         biased;
-        _ = cancel.cancelled() => Ok(()),
-        result = work => result.map_err(|failure| anyhow::anyhow!(failure.message)),
-    }
-}
-
-#[allow(clippy::too_many_arguments)]
-async fn finite(
-    client: &reqwest::Client,
-    endpoint: &str,
-    api_key: &str,
-    config: &SessionConfig,
-    audio: &mut mpsc::Receiver<Vec<i16>>,
-    events: &mpsc::Sender<ProviderEvent>,
-    state: &mut State,
-) -> SessionResult<()> {
-    let silence = Duration::from_millis(u64::from(config.vad_silence_ms.clamp(100, 2000)));
-    let mut flush = state.turn.is_some();
-    let mut connected = false;
-    loop {
-        if flush && let Some(turn) = state.turn.as_ref() {
-            let mut attempts = 0;
-            let text = loop {
-                match recovery::recover(
-                    client,
-                    endpoint,
-                    api_key,
-                    &config.source_language,
-                    &turn.pcm,
-                )
-                .await
-                {
-                    Ok(text) => break text,
-                    Err(error) if error.retryable && attempts < config.max_reconnect_attempts => {
-                        attempts += 1;
-                        connected = false;
-                        emit(
-                            events,
-                            ProviderEvent::RecoveringOriginal { attempt: attempts },
-                        )
-                        .await?;
-                        tokio::time::sleep(Duration::from_millis(
-                            (250u64 << (attempts - 1).min(5)).min(5000),
-                        ))
-                        .await;
-                    }
-                    Err(error) => return Err(error),
-                }
-            };
-            if !text.is_empty() {
-                emit(
-                    events,
-                    ProviderEvent::Transcript {
-                        input: true,
-                        text,
-                        metadata: TranscriptMetadata {
-                            alignment_ms: Some(turn.start_sample / 16),
-                            ..Default::default()
-                        },
-                    },
-                )
-                .await?;
-            }
-            // No fallible reconnect path may replay an already emitted result.
-            state.turn = None;
-            emit(events, ProviderEvent::TurnComplete).await?;
-            if !connected {
-                emit(events, ProviderEvent::Connected).await?;
-                connected = true;
-            }
-        }
-        flush = false;
-        if state.eof {
-            return Ok(());
-        }
-        // A setup failure has no retained turn; release the startup gate so
-        // queued original frames can reach the finite recognizer.
-        if !connected && state.turn.is_none() {
-            emit(events, ProviderEvent::Connected).await?;
-            connected = true;
-        }
-        let idle = state.turn.as_ref().map(|turn| turn.last_input + silence);
-        tokio::select! {
-            _ = async { tokio::time::sleep_until(idle.unwrap()).await }, if idle.is_some() => { flush = true; }
-            samples = audio.recv() => {
-                let Some(samples) = samples else { state.eof = true; flush = state.turn.is_some(); continue; };
-                if samples.len() > MAX_INPUT_SAMPLES { return Err(Failure::fatal("input audio chunk exceeds one second")); }
-                if samples.is_empty() { continue; }
-                let start = state.position;
-                state.position = state.position.saturating_add(samples.len() as u64);
-                if state.turn.is_none() && samples.iter().all(|sample| *sample == 0) { continue; }
-                let turn = state.turn.get_or_insert_with(|| Turn::new(start));
-                turn.pcm.extend_from_slice(&samples);
-                let zeros = samples.iter().rev().take_while(|sample| **sample == 0).count();
-                turn.trailing_zeros = if zeros == samples.len() { turn.trailing_zeros + zeros } else { zeros };
-                turn.last_input = Instant::now();
-                flush = turn.pcm.len() >= MAX_TURN_SAMPLES || turn.trailing_zeros >= silence.as_millis() as usize * 16;
-            }
-        }
-    }
-}
-
-/// Historical/recovered originals use finite acknowledgments from the start.
-/// Both sources still have separate provider calls and independent PCM clocks.
-pub(super) async fn history(
-    config: &SessionConfig,
-    api_key: &str,
-    mut audio: mpsc::Receiver<Vec<i16>>,
-    events: mpsc::Sender<ProviderEvent>,
-    cancel: CancellationToken,
-) -> Result<()> {
-    let client = reqwest::Client::builder()
-        .redirect(reqwest::redirect::Policy::none())
-        .build()
-        .map_err(|_| anyhow::anyhow!("Could not initialize Gemini transcription recovery"))?;
-    let mut state = State::default();
-    tokio::select! {
-        biased;
-        _ = cancel.cancelled() => bail!("Historical transcription was cancelled"),
-        result = finite(&client, recovery::ENDPOINT, api_key, config, &mut audio, &events, &mut state) =>
-            result.map_err(|failure| anyhow::anyhow!(failure.message)),
+        _ = cancel.cancelled() => bail!("Original transcription was cancelled before completion"),
+        result = work => result.map_err(anyhow::Error::new),
     }
 }
 
@@ -310,12 +157,12 @@ async fn run_live(
                 }
                 let starting = state.turn.is_none();
                 let current = state.turn.get_or_insert_with(|| Turn::new(start));
-                // Retain originals before any socket write, including a failed start.
-                current.pcm.extend_from_slice(&samples);
+                // Original PCM remains in the engine's encrypted journal.
+                current.samples = current.samples.saturating_add(samples.len());
                 let zeros = samples.iter().rev().take_while(|sample| **sample == 0).count();
                 current.trailing_zeros = if zeros == samples.len() { current.trailing_zeros + zeros } else { zeros };
                 current.last_input = Instant::now();
-                let ending = current.pcm.len() >= MAX_TURN_SAMPLES || current.trailing_zeros >= silence_samples;
+                let ending = current.samples >= MAX_TURN_SAMPLES || current.trailing_zeros >= silence_samples;
                 if starting {
                     io_deadline(socket.send(Message::Text(
                         json!({"realtimeInput":{"activityStart":{}}}).to_string().into()
@@ -347,8 +194,8 @@ async fn run_live(
                 }
                 if let Some(content) = value.get("serverContent") {
                     if content.get("interrupted").and_then(Value::as_bool) == Some(true) {
-                        // The session still owns the complete unacknowledged PCM.
-                        // Recover it before claiming any original audio was lost.
+                        // The engine retains this window and retries it without
+                        // changing the configured provider or model.
                         return Err(Failure::retry("Gemini interrupted original transcription"));
                     }
                     let final_text = transcription_final(content)?;
@@ -389,4 +236,4 @@ async fn run_live(
 mod tests;
 
 #[cfg(test)]
-mod recovery_tests;
+mod session_tests;

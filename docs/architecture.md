@@ -451,13 +451,22 @@ the dedicated retention executor, in small batches, using an append-only encrypt
 the system temporary directory. A small hot cache avoids decrypting newly committed
 frames for readers close to real time. Slower readers load older encrypted batches.
 Only encrypted records leave staging RAM, and only acknowledged session completion
-releases the journal and RAM-only key. The optional pre-session history remains RAM-only.
+releases the journal and RAM-only key. Optional pre-session history uses its own
+rotating encrypted journals with keys kept only in memory.
 
 Provider input EOF requests completion, rather than cancellation. Local segment
 queues, translated playback and file writers drain their accepted input. There is
 no blanket 15/30-second deadline for finalization. Per-request provider failures
 never acknowledge completion. Transcription buffers results until whole-window
 success, retries the same original PCM on failure, then advances its capture clock.
+Gemini normal windows, history, and recovery all use the configured Live
+Transcribe model. A failed window is replayed to that same model; no hidden
+file-transcription model or alternate API is selected. Active capture keeps retrying transient failures with a longer cooldown
+after the initial budget. Stop wakes that cooldown and bounds failed attempts
+for finalization; permanent Gemini failures pause immediately. Processing status
+retains the sanitized failure per feature.
+Once automatic attempts are exhausted, originals remain available for explicit
+recovery, allowing the finalizer to finish without an endless paid request loop.
 File writers retry the same buffered bytes at an absolute confirmed offset after
 partial I/O. These consumers backpressure their own readers, never original routing.
 Translation defaults to recent speech after failure, reporting skipped work while
@@ -466,6 +475,11 @@ all originals stay available to transcription and recording. An explicit per-rou
 checkpoints and 1.5x PCM playback while behind. A playback failure can repeat the
 unconfirmed window; previously completed windows remain committed. Translation
 routes already completed are not repeated during file recovery.
+Catch-up moves only forward; a drained reader never jumps back into the final
+second after capture EOF. Recovery checks endpoint selection before inference.
+An active session waits
+locally for reselection; a stopped session retains unselected translation for
+explicit recovery without spending another request.
 
 All of this runs outside original audio callbacks and the original routing
 executor. Native device shutdown still has bounded failure detection, and capture

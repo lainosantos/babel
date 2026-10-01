@@ -5,6 +5,9 @@ The STT recognizer does not depend on the speech-to-speech (STS) translator or
 its native audio generation. For example, you can translate with Gemini and
 transcribe with Deepgram, or use only whisper.cpp to transcribe without
 translation. The microphone and incoming output can use different recognizers.
+They are submitted separately, without mixing their PCM or using generated audio.
+For example, use `pt-BR` for an original Portuguese microphone and `en-US` for
+original incoming English, regardless of the translation targets.
 
 ## Configuring the dashboard
 
@@ -28,8 +31,11 @@ per source would require additional profiles, which are not yet available.
 Session settings take effect at startup; changing the physical device during
 a session remains available through routing and the tray.
 
-Keys entered in the dashboard remain only in process memory and are erased on
-exit. The TOML file stores the **reference** (`api_key_env`), never the key.
+Temporary keys entered in the dashboard remain only in process memory and are
+erased on exit. An explicitly permanent key is stored with the user configuration.
+Profiles keep the key **reference** (`api_key_env`); temporary values override
+permanent values, which override the environment. Each scope has its own remove
+action.
 By default, STT and translation may reference the same account variable. To
 separate credentials, use different names, such as `GEMINI_STT_API_KEY` and
 `GEMINI_TRANSLATION_API_KEY`. Changing the STT profile's reference does not change
@@ -69,8 +75,9 @@ No history is sent to transcription before explicit inclusion. The same controls
 on Linux, macOS, and Windows. See [retention and inclusion in recordings](recording.md#include-audio-from-before-session-start).
 
 History recognition uses a separate STT connection from live transcription.
-Gemini history and explicit session recovery use `gemini-3.5-transcribe` finite
-requests, so the key needs access to that model as well as Live Transcribe.
+Gemini history and explicit session recovery use the same configured Live
+Transcribe model as normal transcription. Babel never switches to an unconfigured
+file-transcription model.
 Provider quotas, costs, and session limits still apply. If a connection expires
 or a request fails before completion, Babel reports that history is incomplete;
 Stop alone does not cancel it. Babel does not present a failed result as full
@@ -107,40 +114,41 @@ same PCM and capture timeline with exponential backoff from 250 ms to five
 seconds. Partial text from unsuccessful attempts is discarded; confirmed windows
 are not submitted again. Transcription preserves all original speech while
 translation may independently jump to recent audio. Stop ends capture; pending
-transcription continues until successful completion while Babel remains open.
+transcription continues while Babel remains open. During active capture, transient
+failures keep retrying the same window, slowing to one attempt every 30 seconds
+after the initial reconnect budget. After Stop, that budget bounds failed
+attempts for each window, with a minimum of three transient retries;
+successful windows can keep finalizing without a blanket time limit. Permanent
+Gemini authentication or protocol errors pause immediately. The sanitized cause
+is shown in processing status; unfinished originals remain available for explicit
+recovery. Successful recovery clears only this source's transcription error.
 
-For these finite windows Gemini uses `gemini-3.5-transcribe`, the file-transcription
-model, through the Interactions API. Requests contain an inline WAV, `store:false`
-and verbatim mode; they create no Files API resource or temporary plaintext audio
-file. Only an explicitly completed response commits text or an empty result.
-An identified, completed `gemini-3.5-transcribe` response may omit its empty `steps`
-array when no words were recognized. Malformed result containers, unidentified
-responses and the obsolete `outputs` schema are not accepted as completion.
-The STT profile remains separate from translation and must grant access to the
-finite model. This processing introduces per-window request latency and charges.
+Every window, including history and explicit session recovery, uses the selected
+`transcription.providers.gemini.model` over the Live API. Recovery opens a new
+connection to that same model and replays the exact unconfirmed original window.
+Window boundaries limit retained processing work; they do not select a different
+model or upload a WAV to another API. There is no automatic provider/model fallback.
 
-The Live adapter still validates final `inputTranscription` rather than saving
-speculative `interimInputTranscription` hypotheses. Its internal recovery protocol
-is separate from the session's durable, finite-window processing. It is not used
-as the active session's persistence checkpoint.
+The Live adapter validates final `inputTranscription` rather than saving
+speculative `interimInputTranscription` hypotheses. A whole window must succeed
+before any text from that attempt is saved; a retry never persists speculative
+text or acknowledges missing originals.
 
 Original routing and capture do not wait for recognition. Network failures or
-invalid results display automatic recovery without stopping the session. If
-credentials or service access remain invalid, pending work stays in recovery
-until that condition is corrected. A hardware capture gap or exhausted original
-retention space is reported as incomplete capture; later recognition cannot
+invalid results report their cause without stopping original routing or recording.
+If retries cannot complete a window after Stop, pending work is paused for
+explicit recovery. A hardware capture gap or exhausted original retention space
+is reported as incomplete capture; later recognition cannot
 reconstruct audio that was never captured. The journal uses a RAM-only key, so
 keep Babel open until pending work finishes. See
 [session recovery](recording.md#recover-an-incomplete-session).
 
 `auto` omits the language restriction; an explicit code is sent in
-`languageCodes` (Live) or `language_codes` (recovery). This adapter provides
+`languageCodes` for normal transcription and recovery. This adapter provides
 submitted-turn alignment, not diarization or word-level timestamps. Live
 sessions have a documented ten-minute limit; that boundary also uses recovery.
 
-Sources: [Live Transcribe](https://ai.google.dev/gemini-api/docs/live-api/live-transcribe),
-[finite transcription](https://ai.google.dev/gemini-api/docs/transcribe) and
-[Interactions API](https://ai.google.dev/api/interactions-api).
+Source: [Live Transcribe](https://ai.google.dev/gemini-api/docs/live-api/live-transcribe).
 
 ### OpenAI Realtime Transcription
 

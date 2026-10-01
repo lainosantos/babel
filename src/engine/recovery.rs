@@ -474,6 +474,9 @@ async fn transcribe_window(
     cancel: CancellationToken,
 ) -> Result<()> {
     let mut attempts = 0u32;
+    let retries = settings.max_reconnect_attempts;
+    let mut settings = settings;
+    settings.max_reconnect_attempts = 0;
     let results = loop {
         tokio::select! {
             biased;
@@ -481,8 +484,9 @@ async fn transcribe_window(
             result = resilience::segment(provider.clone(), settings.clone(), pcm, true) => {
                 match result {
                     Ok(results) => break results,
-                    Err(_) => {
+                    Err(error) => {
                         attempts = attempts.saturating_add(1);
+                        resilience::retry(&error, attempts, retries)?;
                         tokio::select! {
                             _ = cancel.cancelled() => bail!("Original transcription stopped before completion"),
                             _ = tokio::time::sleep(resilience::delay(attempts)) => {},

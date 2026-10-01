@@ -21,7 +21,6 @@ use tokio_util::sync::CancellationToken;
 use super::{ProviderEvent, SessionConfig, SpeechProvider, TranscriptMetadata};
 
 mod languages;
-mod recovery;
 mod transcription;
 mod translation;
 pub(crate) use languages::target_language_code as translation_target_language;
@@ -69,25 +68,14 @@ impl SpeechProvider for GeminiTranscriptionProvider {
 
     async fn run_history(
         &self,
-        mut config: SessionConfig,
+        config: SessionConfig,
         audio: mpsc::Receiver<Vec<i16>>,
         events: mpsc::Sender<ProviderEvent>,
         cancel: CancellationToken,
     ) -> Result<()> {
-        config.model.clone_from(&self.model);
-        config.input_transcription = true;
-        config.output_transcription = false;
-        config.prompt.clear();
-        config.voice.clear();
-        config.target_language.clear();
-        validate_config(&config)?;
-        ensure!(
-            is_transcription_model(&config),
-            "historical audio requires Gemini Live Transcribe"
-        );
-        let key = crate::credentials::get(&config.api_key_env)?;
-        ensure!(!key.trim().is_empty(), "Gemini API key is empty");
-        transcription::history(&config, &key, audio, events, cancel).await
+        // Retained/history audio uses the same explicitly configured model.
+        // EOF still requires its final Live transcription acknowledgement.
+        self.run(config, audio, events, cancel).await
     }
 }
 
@@ -96,6 +84,19 @@ impl SpeechProvider for GeminiTranscriptionProvider {
 struct Failure {
     message: Cow<'static, str>,
     retryable: bool,
+}
+
+impl std::fmt::Display for Failure {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.message)
+    }
+}
+impl std::error::Error for Failure {}
+
+pub(super) fn retryable_error(error: &anyhow::Error) -> Option<bool> {
+    error
+        .downcast_ref::<Failure>()
+        .map(|failure| failure.retryable)
 }
 
 impl Failure {
@@ -135,16 +136,8 @@ impl SpeechProvider for GeminiProvider {
         // This private endpoint argument is only injected by local socket tests.
         // User configuration cannot redirect the authenticated connection.
         if is_transcription_model(&config) {
-            return transcription::session(
-                &config,
-                &api_key,
-                ENDPOINT,
-                recovery::ENDPOINT,
-                audio,
-                events,
-                cancel,
-            )
-            .await;
+            return transcription::session(&config, &api_key, ENDPOINT, audio, events, cancel)
+                .await;
         }
         run_sessions(&config, &api_key, ENDPOINT, audio, events, cancel).await
     }
@@ -311,12 +304,12 @@ async fn run_sessions(
             Err(failure) => failure,
         };
         if !failure.retryable {
-            bail!("{}", failure.message);
+            return Err(anyhow::Error::new(failure));
         }
         // EOF starts a finite drain. A failed acknowledgement cannot become a
         // successful empty connection after retrying already-consumed input.
         if audio.is_closed() {
-            bail!("{}", failure.message);
+            return Err(anyhow::Error::new(failure));
         }
         // A healthy minute replenishes the budget, allowing normal long-running
         // session rotation while bounding rapid failure/reconnect loops.
@@ -324,7 +317,7 @@ async fn run_sessions(
             attempts = 0;
         }
         if attempts >= config.max_reconnect_attempts {
-            bail!("{}; reconnect budget exhausted", failure.message);
+            return Err(anyhow::Error::new(failure).context("Gemini reconnect budget exhausted"));
         }
         attempts += 1;
         tokio::select! {
@@ -333,7 +326,7 @@ async fn run_sessions(
             result = async {
                 emit(&events, ProviderEvent::Interrupted).await?;
                 emit(&events, ProviderEvent::Reconnecting { attempt: attempts }).await
-            } => result.map_err(|e| anyhow::anyhow!(e.message))?,
+            } => result.map_err(anyhow::Error::new)?,
         }
         let delay = Duration::from_millis((250u64 << (attempts - 1).min(5)).min(5_000));
         tokio::select! {

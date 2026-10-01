@@ -109,10 +109,25 @@ struct RouteMetrics {
     input_level: AtomicU32,
     output_level: AtomicU32,
     activity_error: StdMutex<Option<String>>,
+    recovery_errors: StdMutex<std::collections::BTreeMap<String, String>>,
     original_mode: AtomicBool,
     translated_audio: StdMutex<Option<Arc<AudioStats>>>,
 }
 impl RouteMetrics {
+    fn recovery_error(&self, feature: &str, error: Option<&str>) {
+        let mut errors = self
+            .recovery_errors
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        match error {
+            Some(error) => {
+                errors.insert(feature.to_owned(), error.chars().take(2048).collect());
+            }
+            None => {
+                errors.remove(feature);
+            }
+        }
+    }
     fn recovery(&self, feature: &str, active: bool) {
         let mut view = self.view.lock().unwrap_or_else(|e| e.into_inner());
         view.recovering.retain(|value| value != feature);
@@ -187,6 +202,20 @@ impl RouteMetrics {
     }
     fn snapshot(&self) -> RouteStatus {
         let mut status = self.view.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        let recovery_errors = self
+            .recovery_errors
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        if !recovery_errors.is_empty() {
+            let mut errors = status.processing_error.into_iter().collect::<Vec<_>>();
+            errors.extend(
+                recovery_errors
+                    .iter()
+                    .map(|(feature, error)| format!("{feature}: {error}")),
+            );
+            status.processing_error = Some(errors.join("; "));
+        }
+        drop(recovery_errors);
         let translated = self
             .translated_audio
             .lock()

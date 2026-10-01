@@ -215,6 +215,18 @@ impl RetainedSession {
     pub(super) fn origin(&self) -> Instant {
         self.inner.origin
     }
+    pub(super) async fn wait_capture_closed(&self) {
+        let mut changes = self.inner.updates.subscribe();
+        loop {
+            changes.borrow_and_update();
+            if self.status().capture_closed {
+                return;
+            }
+            if changes.changed().await.is_err() {
+                return;
+            }
+        }
+    }
     pub(super) fn latest_capture(&self, origin: TranscriptOrigin) -> Option<Instant> {
         self.inner
             .state
@@ -670,6 +682,11 @@ impl Reader {
             .chain(lane.pending.iter())
             .find(|frame| frame.captured_at >= cutoff)
             .unwrap_or(latest);
+        // Catch-up may only advance. An exhausted or already recent reader
+        // must never replay the tail indefinitely after capture EOF.
+        if frame.sequence <= self.next_sequence {
+            return None;
+        }
         self.next_sequence = frame.sequence;
         self.decoded.clear();
         Some(frame.captured_at)
@@ -894,6 +911,10 @@ mod tests {
         let recent = reader.resume_recent().unwrap();
         assert!(recent >= origin + Duration::from_millis(4900));
         assert_eq!(reader.next().await.unwrap().unwrap().captured_at, recent);
+        assert!(reader.resume_recent().is_none());
+        while reader.next().await.unwrap().is_some() {}
+        assert!(reader.resume_recent().is_none());
+        assert!(reader.next().await.unwrap().is_none());
         let all = collect(retained.snapshot().unwrap()).await;
         assert_eq!(all.len(), 60);
         assert_eq!(all[0].samples, vec![0; 16]);

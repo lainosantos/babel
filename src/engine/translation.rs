@@ -33,9 +33,43 @@ pub(super) async fn run(
     mirror_metrics: Option<Arc<RouteMetrics>>,
     usage: watch::Receiver<audio::activity::EndpointUse>,
 ) -> Result<()> {
+    let result = run_inner(
+        cfg,
+        route,
+        origin,
+        retained,
+        metrics.clone(),
+        playback,
+        mirror_metrics,
+        usage,
+    )
+    .await;
+    metrics.recovery("translation", false);
+    metrics.recovery_error(
+        "translation",
+        result
+            .as_ref()
+            .err()
+            .map(|error| format!("{error:#}"))
+            .as_deref(),
+    );
+    result
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn run_inner(
+    cfg: AppConfig,
+    route: RouteConfig,
+    origin: TranscriptOrigin,
+    retained: Arc<retained::RetainedSession>,
+    metrics: Arc<RouteMetrics>,
+    playback: watch::Receiver<String>,
+    mirror_metrics: Option<Arc<RouteMetrics>>,
+    usage: watch::Receiver<audio::activity::EndpointUse>,
+) -> Result<()> {
     let mut reader = retained.reader(origin);
     if !route.replay_translation_backlog {
-        if streaming(
+        let result = streaming(
             cfg.clone(),
             route.clone(),
             origin,
@@ -45,10 +79,18 @@ pub(super) async fn run(
             mirror_metrics.clone(),
             usage.clone(),
         )
-        .await
-        .is_ok()
-        {
-            return Ok(());
+        .await;
+        match result {
+            Ok(()) => return Ok(()),
+            Err(error) => {
+                metrics.recovery_error("translation", Some(&format!("{error:#}")));
+                resilience::retry_live(
+                    &error,
+                    1,
+                    cfg.profile(&route.provider).max_reconnect_attempts,
+                    retained.status().capture_closed,
+                )?;
+            }
         }
         metrics.recovery("translation", true);
         if let Some(at) = reader.resume_recent() {
@@ -100,7 +142,25 @@ pub(super) async fn run(
         if samples.iter().all(|sample| *sample == 0) {
             continue;
         }
+        if wait_for_selection(&retained, origin, usage.clone()).await?
+            && !route.replay_translation_backlog
+        {
+            reader.rewind(checkpoint);
+            if let Some(at) = reader.resume_recent() {
+                metrics.recovery_notice(format!(
+                    "Translation skipped +{:.1}–{:.1} s while its output was unselected. Original transcription and recording preserve the full audio.",
+                    start.saturating_duration_since(retained.origin()).as_secs_f64(),
+                    at.saturating_duration_since(retained.origin()).as_secs_f64()));
+                continue;
+            }
+            // Re-read this window after rewind when no forward skip exists.
+            reader.rewind(checkpoint);
+            continue;
+        }
         let result = async {
+            // No inference when delivery is already unauthorized. Stopped
+            // sessions retain this work for recovery after endpoint selection.
+            playback_selection(&usage.borrow(), origin)?;
             let results =
                 resilience::segment(provider.clone(), settings.clone(), &samples, false).await?;
             let lag = retained
@@ -125,6 +185,7 @@ pub(super) async fn run(
         match result {
             Ok(()) => {
                 attempts = 0;
+                metrics.recovery_error("translation", None);
                 if !route.replay_translation_backlog
                     && retained
                         .latest_capture(origin)
@@ -141,12 +202,25 @@ pub(super) async fn run(
                 metrics.recovery("translation", false);
                 metrics.state("running");
             }
-            Err(_) => {
+            Err(error) => {
                 attempts = attempts.saturating_add(1);
+                metrics.recovery_error("translation", Some(&format!("{error:#}")));
+                resilience::retry_live(
+                    &error,
+                    attempts,
+                    profile.max_reconnect_attempts,
+                    retained.status().capture_closed,
+                )?;
                 metrics.recovery("translation", true);
                 metrics.reconnects.fetch_add(1, Ordering::Relaxed);
                 reader.rewind(checkpoint);
-                tokio::time::sleep(resilience::delay(attempts)).await;
+                resilience::backoff(&retained, attempts, profile.max_reconnect_attempts).await;
+                resilience::retry_live(
+                    &error,
+                    attempts,
+                    profile.max_reconnect_attempts,
+                    retained.status().capture_closed,
+                )?;
                 if !route.replay_translation_backlog
                     && let Some(at) = reader.resume_recent()
                 {
@@ -572,6 +646,29 @@ where
     }
 }
 
+/// Wait locally during an open session. After Stop, a missing destination parks
+/// translation for explicit recovery without creating another provider request.
+async fn wait_for_selection(
+    retained: &retained::RetainedSession,
+    origin: TranscriptOrigin,
+    mut usage: watch::Receiver<audio::activity::EndpointUse>,
+) -> Result<bool> {
+    let mut waited = false;
+    loop {
+        usage.borrow_and_update();
+        match playback_selection(&usage.borrow(), origin) {
+            Ok(_) => return Ok(waited),
+            Err(error) if retained.status().capture_closed => return Err(error),
+            Err(_) => {}
+        }
+        waited = true;
+        tokio::select! {
+            result = usage.changed() => { result.context("Translation output selection observer closed; original audio remains retained")?; }
+            _ = retained.wait_capture_closed() => {}
+        }
+    }
+}
+
 fn playback_selection(
     usage: &audio::activity::EndpointUse,
     origin: TranscriptOrigin,
@@ -712,6 +809,119 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn active_translation_waits_for_reselection_and_stop_parks_an_unselected_output() {
+        let directory = tempfile::tempdir().unwrap();
+        let origin = Instant::now();
+        let store =
+            crate::retention::SessionRetention::create_in(directory.path(), "waiting-selection")
+                .await
+                .unwrap();
+        let originals =
+            retained::RetainedSession::new(store, origin, &tokio::runtime::Handle::current());
+        let (selection, usage) = watch::channel(audio::activity::EndpointUse::default());
+        let waiting = wait_for_selection(&originals, TranscriptOrigin::Microphone, usage.clone());
+        tokio::pin!(waiting);
+        assert!(futures_util::poll!(&mut waiting).is_pending());
+        selection.send_modify(|state| {
+            state.microphone = true;
+            state.microphone_epoch += 1;
+        });
+        assert!(waiting.await.unwrap());
+        selection.send_modify(|state| {
+            state.microphone = false;
+            state.microphone_epoch += 1;
+        });
+        let waiting = wait_for_selection(&originals, TranscriptOrigin::Microphone, usage);
+        tokio::pin!(waiting);
+        assert!(futures_util::poll!(&mut waiting).is_pending());
+        originals.close_capture();
+        assert!(
+            waiting
+                .await
+                .unwrap_err()
+                .to_string()
+                .contains("no longer selected or in use")
+        );
+    }
+
+    #[tokio::test]
+    async fn deselected_outputs_park_both_recovery_modes_without_provider_requests() {
+        let requests = Arc::new(AtomicU64::new(0));
+        let counted = requests.clone();
+        let app = axum::Router::new().fallback(move || {
+            let counted = counted.clone();
+            async move {
+                counted.fetch_add(1, Ordering::Relaxed);
+                axum::http::StatusCode::SERVICE_UNAVAILABLE
+            }
+        });
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio_util::task::AbortOnDropHandle::new(tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        }));
+        let directory = tempfile::tempdir().unwrap();
+        let origin = Instant::now();
+        let store = crate::retention::SessionRetention::create_in(
+            directory.path(),
+            "deselected-translation",
+        )
+        .await
+        .unwrap();
+        let originals =
+            retained::RetainedSession::new(store, origin, &tokio::runtime::Handle::current());
+        for source in [TranscriptOrigin::Microphone, TranscriptOrigin::Speaker] {
+            originals
+                .capture(
+                    &crate::audio::PcmFrame {
+                        samples: vec![42; 16000],
+                        sample_rate: INPUT_RATE,
+                        captured_at: origin + Duration::from_secs(1),
+                    },
+                    source,
+                )
+                .unwrap();
+        }
+        originals.close_capture();
+        let mut cfg = AppConfig::default();
+        cfg.providers.local.whisper_endpoint = format!("{endpoint}/inference");
+        cfg.providers.local.ollama_endpoint.clone_from(&endpoint);
+        cfg.providers.local.piper_endpoint.clone_from(&endpoint);
+        let (_, playback) = watch::channel("unused-device".to_owned());
+        let (_, usage) = watch::channel(audio::activity::EndpointUse::default());
+        for replay in [false, true] {
+            for source in [TranscriptOrigin::Microphone, TranscriptOrigin::Speaker] {
+                let mut route = cfg.microphone.clone();
+                route.provider = "local".into();
+                route.replay_translation_backlog = replay;
+                let metrics = Arc::new(RouteMetrics::default());
+                let error = tokio::time::timeout(
+                    Duration::from_secs(2),
+                    run(
+                        cfg.clone(),
+                        route,
+                        source,
+                        originals.clone(),
+                        metrics.clone(),
+                        playback.clone(),
+                        None,
+                        usage.clone(),
+                    ),
+                )
+                .await
+                .unwrap()
+                .unwrap_err();
+                assert!(error.to_string().contains("no longer selected or in use"));
+                assert!(metrics.snapshot().recovering.is_empty());
+                assert!(metrics.snapshot().processing_error.is_some());
+            }
+        }
+        assert_eq!(requests.load(Ordering::Relaxed), 0);
+        assert_eq!(originals.status().frames, 2);
+        drop(server);
+    }
 
     #[test]
     fn accelerated_pcm_shortens_backlog_without_changing_transport_rate() {

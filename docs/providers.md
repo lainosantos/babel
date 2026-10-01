@@ -104,12 +104,12 @@ See the [official Live Transcribe guide](https://ai.google.dev/gemini-api/docs/l
 The adapter ignores partial hypotheses to avoid duplicating TXT content. It
 bounds explicit Live turns to five seconds plus at most one input chunk and
 waits up to five seconds for a final result, including a valid empty result.
-If Live stalls, disconnects or requests rotation, Babel retains all uncommitted
-original PCM and recovers it through `gemini-3.5-transcribe` using the same key.
-The finite request contains inline WAV audio and `store:false`; it does not
-upload a Files API resource. The source then uses finite recognition for the
-rest of the session. This automatic fallback requires access to that additional
-model and may add cost and latency. Microphone and output recover independently.
+If Live stalls, disconnects or requests rotation, Babel retains all unconfirmed
+original PCM and retries the affected window through the same configured Live
+Transcribe model. Normal transcription, retained history, and explicit session
+recovery use `transcription.providers.gemini.model`; no other model is selected
+implicitly. Microphone and output recover independently. No file-transcription
+request or Files API upload is made by this adapter.
 
 A successful recovery preserves timestamps and produces no gap marker. Only
 explicitly completed requests commit recovered text; real recovery failure or
@@ -117,6 +117,17 @@ buffer exhaustion remains an incomplete-transcript error. Stopping capture
 drains already captured originals while original routing can restart
 independently. WAV recording remains a separate path. See
 [recovery bounds and behavior](transcription.md#gemini-live-transcribe).
+
+During active capture, transient window failures keep retrying with a 30-second
+cooldown after the initial reconnect budget. After Stop, failed attempts are
+bounded by the profile's reconnect budget (at least three retries). Permanent
+Gemini authentication and protocol failures pause immediately. The dashboard
+reports the sanitized cause, and incomplete originals
+remain retained for explicit recovery rather than generating endless requests.
+Translation checks output selection before retry inference. During capture it
+waits locally for reselection; after Stop it pauses unselected work for explicit
+recovery. Neither case makes paid requests while unselected. Catch-up only
+advances its cursor.
 
 ## Participants, timestamps and voice identity
 
@@ -134,10 +145,9 @@ speaker identification.
 The presence of `diarization` and `wordTimestamp` in the shared
 `AudioTranscriptionConfig` schema does not confirm model compatibility. The
 `gemini-3.5-transcribe-live` documentation excludes streaming diarization and
-word timestamps; file transcription offers those features. The provider
+word timestamps. The provider
 therefore neither sends those options nor invents speakers/timing alignments.
-[Live Transcribe guide](https://ai.google.dev/gemini-api/docs/live-api/live-transcribe#limitations),
-[capability table](https://ai.google.dev/gemini-api/docs/models/gemini-3.5-transcribe).
+[Live Transcribe guide](https://ai.google.dev/gemini-api/docs/live-api/live-transcribe#limitations).
 
 The abstraction preserves authentic metadata when supplied: `speakerLabel`
 and offsets of the first/last entries in `words` are exposed through

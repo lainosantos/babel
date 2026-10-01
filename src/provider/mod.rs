@@ -11,6 +11,12 @@ pub mod stt;
 
 pub(crate) use gemini::translation_target_language as gemini_translation_target_language;
 
+/// Unknown provider failures use the supervisor's bounded retry policy.
+/// A known permanent failure must not be retried as a network interruption.
+pub(crate) fn retryable_error(error: &anyhow::Error) -> bool {
+    gemini::retryable_error(error).unwrap_or(true)
+}
+
 use std::sync::Arc;
 
 use anyhow::{Result, bail};

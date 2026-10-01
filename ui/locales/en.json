@@ -507,7 +507,7 @@
   "stt.model": "Transcription model",
   "stt.help": "Transcription guide",
   "stt.independent_hint": "Choose a recognizer and original language for each source. These settings are independent from translation. Use auto to detect the language.",
-  "stt.gemini_hint": "Gemini Live Transcribe saves original words. If Live stalls, pending audio is recovered with gemini-3.5-transcribe using the same key; that source then uses finite requests until the session ends. Both models require access and may incur charges. Separate from translation; official endpoints only.",
+  "stt.gemini_hint": "Gemini Live Transcribe saves original speech. Transcription and recovery use the model configured here. Microphone and incoming audio are processed separately, independently from translation.",
   "stt.openai_hint": "Recognizes original speech without translation or voice synthesis. An empty endpoint uses the provider default.",
   "stt.deepgram_hint": "Use auto for the multilingual mode supported by the selected model. Speaker labels and speech timestamps are saved when supplied by Deepgram; labels identify speakers within that connection, not real-world identities.",
   "stt.whisper_hint": "Built-in Whisper uses multilingual models. Compact Base is the default balance; Tiny uses less CPU with a greater risk of recognition errors; Small may improve recognition at higher cost. Sizes are model downloads, not RAM. External mode uses your server’s model. Timing and transcription remain independent from translation.",

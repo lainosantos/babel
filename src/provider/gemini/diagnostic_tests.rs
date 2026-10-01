@@ -8,6 +8,22 @@ use tokio_tungstenite::{
 const PRIVATE_REASON: &str = "fake-api-key / private source speech / server payload";
 
 #[test]
+fn safe_failure_retains_its_retry_classification_through_context() {
+    use anyhow::Context;
+    for retryable in [false, true] {
+        let failure = if retryable {
+            Failure::retry("Synthetic service outage")
+        } else {
+            Failure::fatal("Synthetic authentication failure")
+        };
+        let result: Result<()> = Err(anyhow::Error::new(failure));
+        let error = result.context("Original speech transcription").unwrap_err();
+        assert_eq!(retryable_error(&error), Some(retryable));
+        assert_eq!(crate::provider::retryable_error(&error), retryable);
+    }
+}
+
+#[test]
 fn close_codes_keep_safe_categories_and_retry_classification() {
     for (code, category, retryable) in [
         (1000, "session ended normally", true),

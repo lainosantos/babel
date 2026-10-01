@@ -507,7 +507,7 @@
   "stt.model": "Modelo de transcrição",
   "stt.help": "Guia de transcrição",
   "stt.independent_hint": "Escolha um reconhecedor e o idioma original de cada fonte. Estes ajustes são independentes da tradução. Use auto para detectar o idioma.",
-  "stt.gemini_hint": "O Gemini Live Transcribe salva a fala original. Se o Live travar, o áudio pendente é recuperado com gemini-3.5-transcribe usando a mesma chave; essa fonte passa a usar requisições finitas até o fim da sessão. É necessário acesso aos dois modelos, que podem gerar cobranças. Separado da tradução; somente endpoints oficiais.",
+  "stt.gemini_hint": "O Gemini Live Transcribe salva a fala original. A transcrição e a recuperação usam o modelo configurado aqui. Microfone e áudio recebido são processados separadamente, de forma independente da tradução.",
   "stt.openai_hint": "Reconhece a fala original sem tradução ou síntese de voz. O endpoint vazio usa o padrão do provedor.",
   "stt.deepgram_hint": "Use auto para o modo multilíngue compatível com o modelo escolhido. Rótulos de falantes e tempos de fala são salvos quando fornecidos pelo Deepgram; os rótulos identificam falantes nessa conexão, não pessoas pelo nome.",
   "stt.whisper_hint": "O Whisper integrado usa modelos multilíngues. O Base compacto é o padrão equilibrado; Tiny usa menos CPU com maior risco de erros; Small pode melhorar o reconhecimento com custo maior. Os tamanhos indicam download, não RAM. O modo externo usa o modelo do seu servidor. Tempos e transcrição são independentes da tradução.",

@@ -2,6 +2,337 @@ use super::*;
 use crate::{audio::activity::EndpointUse, provider::TranscriptMetadata};
 use async_trait::async_trait;
 
+#[derive(Default)]
+struct RetainedRecognizer {
+    inputs: StdMutex<Vec<(String, Vec<i16>)>>,
+    unavailable: bool,
+    retry_started: Notify,
+    finish_retry: Notify,
+}
+
+#[async_trait]
+impl SpeechProvider for RetainedRecognizer {
+    fn id(&self) -> &'static str {
+        "gemini"
+    }
+    async fn run_history(
+        &self,
+        config: SessionConfig,
+        audio: mpsc::Receiver<Vec<i16>>,
+        events: mpsc::Sender<ProviderEvent>,
+        cancel: CancellationToken,
+    ) -> Result<()> {
+        self.run(config, audio, events, cancel).await
+    }
+    async fn run(
+        &self,
+        config: SessionConfig,
+        mut audio: mpsc::Receiver<Vec<i16>>,
+        events: mpsc::Sender<ProviderEvent>,
+        _: CancellationToken,
+    ) -> Result<()> {
+        assert!(config.target_language.is_empty());
+        assert!(!config.output_transcription);
+        assert_eq!(config.max_reconnect_attempts, 0);
+        let mut pcm = Vec::new();
+        while let Some(samples) = audio.recv().await {
+            pcm.extend(samples);
+        }
+        let first = {
+            let mut inputs = self.inputs.lock().unwrap();
+            let first = !inputs
+                .iter()
+                .any(|(language, _)| *language == config.source_language);
+            inputs.push((config.source_language.clone(), pcm.clone()));
+            first
+        };
+        if self.unavailable || config.source_language == "pt-BR" && first {
+            events
+                .send(ProviderEvent::Transcript {
+                    input: true,
+                    text: "Unconfirmed partial result".into(),
+                    metadata: Default::default(),
+                })
+                .await?;
+            bail!("Synthetic original recognizer unavailable");
+        }
+        if config.source_language == "pt-BR" {
+            self.retry_started.notify_one();
+            self.finish_retry.notified().await;
+        }
+        let value = if config.source_language == "pt-BR" {
+            42
+        } else {
+            -42
+        };
+        assert_eq!(pcm, vec![value; 16000]);
+        events
+            .send(ProviderEvent::Transcript {
+                input: false,
+                text: "Generated speech must not enter the TXT".into(),
+                metadata: Default::default(),
+            })
+            .await?;
+        events
+            .send(ProviderEvent::Audio {
+                samples: vec![999; 240],
+                sample_rate: 24000,
+            })
+            .await?;
+        events
+            .send(ProviderEvent::Transcript {
+                input: true,
+                text: if value == 42 {
+                    "Minha fala original."
+                } else {
+                    "Original incoming speech."
+                }
+                .into(),
+                metadata: TranscriptMetadata {
+                    alignment_ms: Some(0),
+                    ..Default::default()
+                },
+            })
+            .await?;
+        events.send(ProviderEvent::TurnComplete).await?;
+        Ok(())
+    }
+}
+
+#[tokio::test]
+async fn retained_live_transcription_recovers_exact_pcm_and_keeps_both_originals_separate() {
+    let directory = tempfile::tempdir().unwrap();
+    let store =
+        crate::retention::SessionRetention::create_in(directory.path(), "separate-originals")
+            .await
+            .unwrap();
+    let origin = Instant::now();
+    let originals =
+        retained::RetainedSession::new(store, origin, &tokio::runtime::Handle::current());
+    originals
+        .capture(
+            &frame(origin, 1000, 16000, 42),
+            TranscriptOrigin::Microphone,
+        )
+        .unwrap();
+    originals
+        .capture(&frame(origin, 1000, 16000, -42), TranscriptOrigin::Speaker)
+        .unwrap();
+    originals.close_capture();
+    let provider = Arc::new(RetainedRecognizer::default());
+    let (text, mut records) = mpsc::channel(16);
+    let mut config = AppConfig::default();
+    config.transcription.microphone_recognition.provider = "gemini".into();
+    config.transcription.microphone_recognition.language = "pt-BR".into();
+    config.transcription.speaker_recognition.provider = "gemini".into();
+    config.transcription.speaker_recognition.language = "en-US".into();
+    let metrics = [
+        Arc::new(RouteMetrics::default()),
+        Arc::new(RouteMetrics::default()),
+    ];
+    let mut tasks = Vec::new();
+    for (index, source, route) in [
+        (
+            0,
+            TranscriptOrigin::Microphone,
+            &config.transcription.microphone_recognition,
+        ),
+        (
+            1,
+            TranscriptOrigin::Speaker,
+            &config.transcription.speaker_recognition,
+        ),
+    ] {
+        tasks.push(tokio::spawn(run_retained(
+            provider.clone(),
+            provider::stt::session_config(route, &config.transcription.providers).unwrap(),
+            TranscriptSink {
+                retained: Some(originals.clone()),
+                sender: text.clone(),
+                origin: source,
+            },
+            metrics[index].clone(),
+            origin,
+            originals.clone(),
+        )));
+    }
+    drop(text);
+    tokio::time::timeout(Duration::from_secs(5), provider.retry_started.notified())
+        .await
+        .unwrap();
+    assert!(
+        metrics[0]
+            .snapshot()
+            .processing_error
+            .unwrap()
+            .contains("Synthetic original recognizer unavailable")
+    );
+    assert!(
+        metrics[0]
+            .snapshot()
+            .recovering
+            .contains(&"transcription".to_owned())
+    );
+    assert!(metrics[1].snapshot().processing_error.is_none());
+    provider.finish_retry.notify_one();
+    for task in tasks {
+        task.await.unwrap().unwrap();
+    }
+    let mut texts = Vec::new();
+    while let Some(record) = records.recv().await {
+        if let TranscriptRecord::Routed { origin, record } = record
+            && let TranscriptRecord::Text { text, metadata, .. } = *record
+        {
+            assert_eq!(metadata.alignment_ms, Some(0));
+            texts.push((origin, text));
+        }
+    }
+    assert_eq!(texts.len(), 2);
+    assert!(texts.contains(&(TranscriptOrigin::Microphone, "Minha fala original.".into())));
+    assert!(texts.contains(&(
+        TranscriptOrigin::Speaker,
+        "Original incoming speech.".into()
+    )));
+    let inputs = provider.inputs.lock().unwrap();
+    assert_eq!(
+        inputs
+            .iter()
+            .filter(|(language, pcm)| language == "pt-BR" && *pcm == vec![42; 16000])
+            .count(),
+        2
+    );
+    assert_eq!(
+        inputs
+            .iter()
+            .filter(|(language, pcm)| language == "en-US" && *pcm == vec![-42; 16000])
+            .count(),
+        1
+    );
+    assert!(
+        metrics
+            .iter()
+            .all(|metrics| metrics.snapshot().processing_error.is_none())
+    );
+    assert_eq!(originals.status().frames, 2);
+}
+
+#[tokio::test]
+async fn retained_transcription_failure_stops_retrying_without_acknowledging_or_releasing_originals()
+ {
+    let directory = tempfile::tempdir().unwrap();
+    let store =
+        crate::retention::SessionRetention::create_in(directory.path(), "bounded-originals")
+            .await
+            .unwrap();
+    let origin = Instant::now();
+    let originals =
+        retained::RetainedSession::new(store, origin, &tokio::runtime::Handle::current());
+    originals
+        .capture(
+            &frame(origin, 1000, 16000, 42),
+            TranscriptOrigin::Microphone,
+        )
+        .unwrap();
+    originals.close_capture();
+    let processor = Arc::new(RetainedRecognizer {
+        unavailable: true,
+        ..Default::default()
+    });
+    let config = AppConfig::default();
+    let mut settings = provider::stt::session_config(
+        &config.transcription.microphone_recognition,
+        &config.transcription.providers,
+    )
+    .unwrap();
+    settings.max_reconnect_attempts = 0;
+    let (text, mut records) = mpsc::channel(1);
+    let metrics = Arc::new(RouteMetrics::default());
+    let error = tokio::time::timeout(
+        Duration::from_secs(5),
+        run_retained(
+            processor.clone(),
+            settings,
+            TranscriptSink {
+                retained: Some(originals.clone()),
+                sender: text,
+                origin: TranscriptOrigin::Microphone,
+            },
+            metrics.clone(),
+            origin,
+            originals.clone(),
+        ),
+    )
+    .await
+    .unwrap()
+    .unwrap_err();
+    assert!(error.to_string().contains("Automatic recovery paused"));
+    assert_eq!(processor.inputs.lock().unwrap().len(), 4);
+    assert!(records.recv().await.is_none());
+    assert_eq!(originals.status().frames, 1);
+    assert!(!originals.status().completed);
+    assert!(metrics.snapshot().processing_error.is_some());
+}
+
+#[tokio::test]
+async fn active_transcription_keeps_retrying_and_stop_wakes_its_cooldown_without_another_request() {
+    let directory = tempfile::tempdir().unwrap();
+    let store =
+        crate::retention::SessionRetention::create_in(directory.path(), "active-original-retry")
+            .await
+            .unwrap();
+    let origin = Instant::now();
+    let originals =
+        retained::RetainedSession::new(store, origin, &tokio::runtime::Handle::current());
+    originals
+        .capture(
+            &frame(origin, 1000, 16000, 42),
+            TranscriptOrigin::Microphone,
+        )
+        .unwrap();
+    let processor = Arc::new(RetainedRecognizer {
+        unavailable: true,
+        ..Default::default()
+    });
+    let config = AppConfig::default();
+    let mut settings = provider::stt::session_config(
+        &config.transcription.microphone_recognition,
+        &config.transcription.providers,
+    )
+    .unwrap();
+    settings.max_reconnect_attempts = 0;
+    let (text, _records) = mpsc::channel(1);
+    let metrics = Arc::new(RouteMetrics::default());
+    let task = tokio::spawn(run_retained(
+        processor.clone(),
+        settings,
+        TranscriptSink {
+            retained: Some(originals.clone()),
+            sender: text,
+            origin: TranscriptOrigin::Microphone,
+        },
+        metrics.clone(),
+        origin,
+        originals.clone(),
+    ));
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while metrics.reconnects.load(Ordering::Relaxed) < 4 {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    assert!(!task.is_finished());
+    originals.close_capture();
+    let error = tokio::time::timeout(Duration::from_secs(2), task)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap_err();
+    assert!(error.to_string().contains("Automatic recovery paused"));
+    assert_eq!(processor.inputs.lock().unwrap().len(), 4);
+    assert_eq!(originals.status().frames, 1);
+}
+
 struct Recognizer {
     first: i16,
     finalize_at_eof: bool,
