@@ -75,6 +75,11 @@ pub(super) async fn stop_routing(state: &mut State) -> Result<()> {
 }
 
 pub(super) async fn maintain_routing(state: &mut State) {
+    // The physical volume control is useful before virtual drivers exist too.
+    // Observing selection does not open an audio stream or require a session.
+    if state.routing_enabled && !state.config.speaker.playback_device.is_empty() {
+        let _ = endpoint_usage(state);
+    }
     if !state.routing_enabled
         || state
             .finalizing

@@ -8,6 +8,7 @@
 #include <mach/mach_time.h>
 #include <stdatomic.h>
 #include <stdbool.h>
+#include <math.h>
 #include <string.h>
 #include "abi.h"
 
@@ -16,6 +17,10 @@ _Static_assert(kAudioPlugInClassID == 0x61706c67, "Rust plugin class");
 _Static_assert(kAudioBoxClassID == 0x61626f78, "Rust box class");
 _Static_assert(kAudioDeviceClassID == 0x61646576, "Rust device class");
 _Static_assert(kAudioStreamClassID == 0x61737472, "Rust stream class");
+_Static_assert(kAudioVolumeControlClassID == 0x766c6d65, "Rust volume class");
+_Static_assert(kAudioMuteControlClassID == 0x6d757465, "Rust mute class");
+_Static_assert(kAudioLevelControlClassID == 0x6c65766c, "Rust level base class");
+_Static_assert(kAudioBooleanControlClassID == 0x746f676c, "Rust boolean base class");
 
 static AudioServerPlugInDriverInterface interface;
 static AudioServerPlugInDriverInterface *interface_pointer = &interface;
@@ -53,6 +58,20 @@ static void notify(AudioObjectID object, AudioObjectPropertySelector selector) {
         const AudioObjectPropertyAddress address = {selector, kAudioObjectPropertyScopeGlobal, kAudioObjectPropertyElementMain};
         host->PropertiesChanged(host, object, 1, &address);
     }
+}
+static void notify_output_control(bool mute) {
+    AudioServerPlugInHostRef host = atomic_load_explicit(&host_reference, memory_order_acquire);
+    if(!host) return;
+    const AudioObjectPropertyAddress control[] = {
+        {mute ? kAudioBooleanControlPropertyValue : kAudioLevelControlPropertyScalarValue, kAudioObjectPropertyScopeGlobal, 0},
+        {kAudioLevelControlPropertyDecibelValue, kAudioObjectPropertyScopeGlobal, 0}
+    };
+    const AudioObjectPropertyAddress device[] = {
+        {mute ? kAudioDevicePropertyMute : kAudioDevicePropertyVolumeScalar, kAudioObjectPropertyScopeOutput, 0},
+        {kAudioDevicePropertyVolumeDecibels, kAudioObjectPropertyScopeOutput, 0}
+    };
+    host->PropertiesChanged(host, mute ? 24 : 23, mute ? 1 : 2, control);
+    host->PropertiesChanged(host, 20, mute ? 1 : 2, device);
 }
 static HRESULT query(void *driver, REFIID uuid, LPVOID *result) {
     if(driver != driver_reference || !result) return E_NOINTERFACE;
@@ -127,6 +146,8 @@ static OSStatus get_value(AudioServerPlugInDriverRef driver, AudioObjectID objec
             for(uint32_t i = 0; i < qualifier_size / sizeof(AudioClassID); ++i) {
                 AudioClassID filter; memcpy(&filter,(const uint8_t *)qualifier+i*sizeof(filter),sizeof(filter));
                 if(filter == child.values[0] || filter == kAudioObjectClassID) included = true;
+                if(child.values[0] == kAudioVolumeControlClassID && (filter == kAudioLevelControlClassID || filter == kAudioControlClassID)) included = true;
+                if(child.values[0] == kAudioMuteControlClassID && (filter == kAudioBooleanControlClassID || filter == kAudioControlClassID)) included = true;
             }
             if(included) value->values[count++] = value->values[item];
         }
@@ -136,11 +157,12 @@ static OSStatus get_value(AudioServerPlugInDriverRef driver, AudioObjectID objec
 }
 static UInt32 value_size(const BabelProperty *value) {
     switch(value->kind) {
-        case 1: case 9: case 10: return sizeof(UInt32);
+        case 1: case 9: case 10: case 13: return sizeof(UInt32);
         case 2: return value->count * sizeof(UInt32);
         case 3: return sizeof(Float64);
         case 4: return sizeof(CFStringRef);
-        case 5: return sizeof(AudioValueRange);
+        case 5: case 12: return sizeof(AudioValueRange);
+        case 11: case 14: return sizeof(Float32);
         case 6: return sizeof(AudioStreamBasicDescription);
         case 7: return sizeof(AudioStreamRangedDescription);
         case 8: return offsetof(AudioChannelLayout,mChannelDescriptions) + 2*sizeof(AudioChannelDescription);
@@ -189,6 +211,15 @@ static OSStatus get_data(AudioServerPlugInDriverRef driver, AudioObjectID object
         }
         case 9: { const UInt32 transport=kAudioDeviceTransportTypeVirtual; memcpy(data,&transport,sizeof(transport)); break; }
         case 10: { const UInt32 terminal=kAudioStreamTerminalTypeLine; memcpy(data,&terminal,sizeof(terminal)); break; }
+        case 11: { const Float32 scalar=(Float32)value.number; memcpy(data,&scalar,sizeof(scalar)); break; }
+        case 12: { const AudioValueRange range={-96.0,0.0}; memcpy(data,&range,sizeof(range)); break; }
+        case 13: { const UInt32 scope=kAudioObjectPropertyScopeOutput; memcpy(data,&scope,sizeof(scope)); break; }
+        case 14: {
+            Float32 scalar; memcpy(&scalar,data,sizeof(scalar));
+            if(!isfinite(scalar)) return kAudioHardwareIllegalOperationError;
+            scalar=BabelConvertLevel(address->mSelector == kAudioLevelControlPropertyConvertScalarToDecibels,scalar);
+            memcpy(data,&scalar,sizeof(scalar)); break;
+        }
         default: return kAudioHardwareUnknownPropertyError;
     }
     *size=required; return noErr;
@@ -205,6 +236,22 @@ static OSStatus set_data(AudioServerPlugInDriverRef driver, AudioObjectID object
     uint32_t property=property_id(object,address);
     if(!property) return kAudioHardwareUnknownPropertyError;
     if(!BabelIsSettable(object,property)) return kAudioHardwareUnsupportedOperationError;
+    if(property == BABEL_PROP_LEVEL_SCALAR || property == BABEL_PROP_LEVEL_DECIBELS || property == BABEL_PROP_DEVICE_VOLUME || property == BABEL_PROP_DEVICE_DECIBELS) {
+        if(size != sizeof(Float32)) return kAudioHardwareBadPropertySizeError;
+        Float32 value; memcpy(&value,data,sizeof(value));
+        int32_t result=BabelSetLevel(object,property,value);
+        if(result<0) return status(result);
+        if(result>0) notify_output_control(false);
+        return noErr;
+    }
+    if(property == BABEL_PROP_BOOLEAN_VALUE || property == BABEL_PROP_DEVICE_MUTE) {
+        if(size != sizeof(UInt32)) return kAudioHardwareBadPropertySizeError;
+        UInt32 value; memcpy(&value,data,sizeof(value));
+        int32_t result=BabelSetMute(object,value);
+        if(result<0) return status(result);
+        if(result>0) notify_output_control(true);
+        return noErr;
+    }
     if(property == BABEL_PROP_SAMPLE_RATE) {
         if(size!=sizeof(Float64)) return kAudioHardwareBadPropertySizeError;
         Float64 rate; memcpy(&rate,data,sizeof(rate)); return rate==48000.0 ? noErr : kAudioHardwareIllegalOperationError;

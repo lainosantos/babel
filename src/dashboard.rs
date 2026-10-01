@@ -135,6 +135,7 @@ fn router(state: DashboardState) -> Router {
         .route("/retention", get(retained_sessions))
         .route("/retention/recover", post(recover_retained_session))
         .route("/devices", get(devices))
+        .route("/output-volume", post(set_output_volume))
         .route("/start", post(start))
         .route("/stop", post(stop))
         .route("/virtual/install", post(install))
@@ -635,6 +636,32 @@ async fn status(State(state): State<DashboardState>) -> impl IntoResponse {
     Json(status)
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct OutputVolumeRequest {
+    device: String,
+    level: f32,
+    muted: bool,
+}
+
+async fn set_output_volume(
+    State(state): State<DashboardState>,
+    Json(request): Json<OutputVolumeRequest>,
+) -> Response {
+    operation_result(
+        state
+            .controller
+            .set_output_volume(
+                request.device,
+                crate::audio::volume::VolumeState {
+                    level: request.level,
+                    muted: request.muted,
+                },
+            )
+            .await,
+    )
+}
+
 async fn devices() -> Response {
     match crate::audio::devices().await {
         Ok(devices) => Json(devices).into_response(),
@@ -1074,6 +1101,7 @@ mod tests {
             ("PUT", "/api/interface"),
             ("GET", "/api/status"),
             ("GET", "/api/devices"),
+            ("POST", "/api/output-volume"),
             ("PUT", "/api/config"),
             ("POST", "/api/start"),
             ("POST", "/api/stop"),

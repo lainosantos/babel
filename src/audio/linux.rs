@@ -65,7 +65,7 @@ const MODULES: [ModuleSpec; 3] = [
             "format=float32le",
             "channels=2",
             "channel_map=front-left,front-right",
-            "sink_properties='device.description=Babel_Speaker babel.owner=org.babel.audio.v1'",
+            "sink_properties='device.description=Babel_Speaker babel.owner=org.babel.audio.v1 monitor.channel-volumes=false'",
         ],
     },
 ];
@@ -90,7 +90,7 @@ fn owned_by(module: &Module, spec: ModuleSpec) -> bool {
         && words.contains(&format!("{}={}", spec.key, spec.endpoint).as_str())
 }
 
-async fn pactl(args: &[&str]) -> Result<String> {
+pub(super) async fn pactl(args: &[&str]) -> Result<String> {
     let mut command = Command::new("pactl");
     command.args(args).kill_on_drop(true).stdin(Stdio::null());
     let output = tokio::time::timeout(Duration::from_secs(5), command.output())
@@ -118,6 +118,14 @@ async fn modules() -> Result<Vec<Module>> {
     Ok(parse_short_modules(
         &pactl(&["list", "short", "modules"]).await?,
     ))
+}
+
+pub(super) async fn owned_speaker_module() -> Result<Option<u32>> {
+    Ok(modules()
+        .await?
+        .into_iter()
+        .find(|module| owned_by(module, MODULES[2]))
+        .map(|module| module.index))
 }
 
 fn parse_short_modules(text: &str) -> Vec<Module> {
@@ -242,6 +250,23 @@ fn format_upgrade_needed(module: &Module, spec: ModuleSpec) -> bool {
         .any(|argument| !words.contains(argument))
 }
 
+fn speaker_volume_upgrade_needed(module: &Module, pipewire: bool) -> bool {
+    pipewire
+        && owned_by(module, MODULES[2])
+        && !module
+            .argument
+            .split(|c: char| c.is_whitespace() || c == '\'' || c == '"')
+            .any(|word| word == "monitor.channel-volumes=false")
+}
+
+fn speaker_monitor_bypasses_volume(sinks: &[Value]) -> bool {
+    sinks.iter().any(|sink| {
+        sink["name"].as_str() == Some("babel_speaker")
+            && (sink["properties"]["monitor.channel-volumes"].as_bool() == Some(false)
+                || sink["properties"]["monitor.channel-volumes"].as_str() == Some("false"))
+    })
+}
+
 fn numeric_id(value: &Value) -> Option<u64> {
     value
         .as_u64()
@@ -315,7 +340,7 @@ async fn ensure_virtual_devices_idle(existing: &[Module]) -> Result<()> {
             "source",
             existing
         ),
-        "Babel audio devices need a stereo/float format upgrade. Close apps using the Babel devices and try installing again; active apps were not moved or disconnected."
+        "Babel audio devices need an audio format or speaker volume upgrade. Close apps using the Babel devices and try installing again; active apps were not moved or disconnected."
     );
     Ok(())
 }
@@ -355,6 +380,10 @@ pub async fn install_virtual_devices() -> Result<String> {
     let _guard = MODULE_LOCK.lock().await;
     let found = devices().await?;
     let existing = modules().await?;
+    let server: Value = serde_json::from_str(&pactl(&["--format=json", "info"]).await?)?;
+    let pipewire = server["server_name"]
+        .as_str()
+        .is_some_and(|name| name.contains("PipeWire"));
     for spec in MODULES {
         if found.iter().any(|device| device.id == spec.endpoint) {
             ensure!(
@@ -364,14 +393,21 @@ pub async fn install_virtual_devices() -> Result<String> {
             );
         }
     }
-    let upgrade = existing.iter().any(|module| {
-        MODULES
-            .iter()
-            .any(|spec| format_upgrade_needed(module, *spec))
-    });
+    let speaker_volume_missing = pipewire
+        && existing.iter().any(|module| owned_by(module, MODULES[2]))
+        && !speaker_monitor_bypasses_volume(&serde_json::from_str::<Vec<Value>>(
+            &pactl(&["--format=json", "list", "sinks"]).await?,
+        )?);
+    let upgrade = speaker_volume_missing
+        || existing.iter().any(|module| {
+            speaker_volume_upgrade_needed(module, pipewire)
+                || MODULES
+                    .iter()
+                    .any(|spec| format_upgrade_needed(module, *spec))
+        });
     let defaults = if upgrade {
         ensure_virtual_devices_idle(&existing).await?;
-        serde_json::from_str::<Value>(&pactl(&["--format=json", "info"]).await?)?
+        server
     } else {
         Value::Null
     };
@@ -416,6 +452,14 @@ pub async fn install_virtual_devices() -> Result<String> {
                 spec.endpoint
             );
         }
+        if pipewire {
+            ensure!(
+                speaker_monitor_bypasses_volume(&serde_json::from_str::<Vec<Value>>(
+                    &pactl(&["--format=json", "list", "sinks"]).await?,
+                )?),
+                "PipeWire did not expose a speaker monitor independent of its volume. Use the physical speaker volume control; automatic synchronization is unavailable."
+            );
+        }
         if upgrade {
             restore_babel_defaults(&defaults).await?;
         }
@@ -435,7 +479,7 @@ pub async fn install_virtual_devices() -> Result<String> {
         }
         return Err(error);
     }
-    Ok(if upgrade { "Babel virtual devices upgraded to stereo/float audio. Existing Babel default selections were restored." } else { "Babel_Microphone and Babel_Speaker are available. Select them in your calling app; system defaults were not changed." }.to_owned())
+    Ok(if upgrade { "Babel virtual devices upgraded for stereo/float audio and supported speaker volume control. Existing Babel default selections were restored." } else { "Babel_Microphone and Babel_Speaker are available. Select them in your calling app; system defaults were not changed." }.to_owned())
 }
 
 pub async fn uninstall_virtual_devices() -> Result<String> {
@@ -965,6 +1009,62 @@ mod tests {
         };
         assert!(!format_upgrade_needed(&external, MODULES[0]));
         assert!(!format_upgrade_needed(&current, MODULES[2]));
+    }
+
+    #[test]
+    fn speaker_volume_upgrade_is_pipewire_only_and_requires_exact_owned_module() {
+        let current = Module {
+            index: 42,
+            name: MODULES[2].kind.into(),
+            argument: MODULES[2].arguments.join(" "),
+        };
+        assert!(!speaker_volume_upgrade_needed(&current, true));
+        let old = Module {
+            argument: current
+                .argument
+                .replace(" monitor.channel-volumes=false", ""),
+            ..current.clone()
+        };
+        assert!(speaker_volume_upgrade_needed(&old, true));
+        assert!(!speaker_volume_upgrade_needed(&old, false));
+        let external = Module {
+            argument: old.argument.replace(OWNER, "another.owner=external"),
+            ..old
+        };
+        assert!(!speaker_volume_upgrade_needed(&external, true));
+        let mic = Module {
+            argument: MODULES[0].arguments.join(" "),
+            ..current
+        };
+        assert!(!speaker_volume_upgrade_needed(&mic, true));
+        assert!(
+            !MODULES[0]
+                .arguments
+                .iter()
+                .any(|arg| arg.contains("monitor.channel-volumes"))
+        );
+    }
+
+    #[test]
+    fn speaker_volume_install_checks_actual_loaded_property() {
+        assert!(!speaker_monitor_bypasses_volume(&[]));
+        for value in [
+            Value::Null,
+            serde_json::json!(true),
+            serde_json::json!("true"),
+        ] {
+            assert!(!speaker_monitor_bypasses_volume(&[serde_json::json!({
+                "name":"babel_speaker", "properties":{"monitor.channel-volumes":value}
+            })]));
+        }
+        for value in [serde_json::json!(false), serde_json::json!("false")] {
+            assert!(speaker_monitor_bypasses_volume(&[serde_json::json!({
+                "name":"babel_speaker", "properties":{"monitor.channel-volumes":value}
+            })]));
+        }
+        assert!(!speaker_monitor_bypasses_volume(&[serde_json::json!({
+            "name":"another_sink", "properties":{"monitor.channel-volumes":false}
+        })]));
     }
 
     #[test]

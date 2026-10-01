@@ -72,6 +72,7 @@ tray-icon = { version = "0.25", default-features = false, features = ["ksni"] }
 affinity = "0.1.2"
 
 [target.'cfg(target_os = "windows")'.dependencies]
+babel-windows-volume = { path = "native/windows/volume-control" }
 winreg = "0.56"
 wasapi = "0.24"
 windows = { version = "0.62", features = ["UI_ViewManagement"] }

@@ -668,5 +668,11 @@
   "session.finalizing": "Finalizando sessão",
   "session.finalizing_title": "Sessões em finalização",
   "session.finalizing_hint": "O trabalho pendente continua em segundo plano. Mantenha o Babel aberto até a conclusão. Você pode iniciar outra sessão.",
-  "session.capture_stopped": "Captura da sessão encerrada. O trabalho pendente continua em segundo plano."
+  "session.capture_stopped": "Captura da sessão encerrada. O trabalho pendente continua em segundo plano.",
+  "volume.title": "Volume da saída",
+  "volume.mute": "Silenciar",
+  "volume.unmute": "Ativar som",
+  "volume.synchronized": "Sincronizado com o volume do sistema.",
+  "volume.physical_hint": "Volume da saída física. Disponível durante as sessões.",
+  "volume.details": "Detalhes do controle de volume"
 }

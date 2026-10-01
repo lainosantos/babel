@@ -74,6 +74,7 @@ pub struct EngineStatus {
     pub finalizing_sessions: Vec<FinalizingSessionStatus>,
     pub routing_active: bool,
     pub routing_error: Option<String>,
+    pub output_volume: audio::volume::Status,
     pub config_revision: u64,
     pub session_name: Option<String>,
     pub session_id: Option<String>,
@@ -293,6 +294,7 @@ impl Running {
                     ) && route.device_error.is_none()
                 }),
             routing_error: None,
+            output_volume: Default::default(),
             config_revision: 0,
             session_name: Some(self.session.name.clone()),
             session_id: Some(self.session.id.clone()),
@@ -339,6 +341,7 @@ struct EndpointObserver {
     _speaker: watch::Sender<String>,
     _cancel: tokio_util::sync::DropGuard,
     usage: watch::Receiver<audio::activity::EndpointUse>,
+    volume: Option<audio::volume::Service>,
 }
 
 fn endpoint_usage(state: &mut State) -> watch::Receiver<audio::activity::EndpointUse> {
@@ -348,6 +351,9 @@ fn endpoint_usage(state: &mut State) -> watch::Receiver<audio::activity::Endpoin
         && observer.microphone == *microphone
         && observer.speaker == *speaker
     {
+        if let Some(volume) = &observer.volume {
+            volume.select(state.config.speaker.playback_device.clone());
+        }
         return observer.usage.clone();
     }
     // Replacing the actual virtual endpoints revokes observers of the old pair.
@@ -357,6 +363,11 @@ fn endpoint_usage(state: &mut State) -> watch::Receiver<audio::activity::Endpoin
     let (speaker_tx, speaker_rx) = watch::channel(speaker.clone());
     let cancel = CancellationToken::new();
     let usage = audio::activity::monitor_initializing(mic_rx, speaker_rx, cancel.clone());
+    let volume = audio::volume::Service::start(
+        speaker.clone(),
+        state.config.speaker.playback_device.clone(),
+        usage.clone(),
+    );
     state.endpoint_observer = Some(EndpointObserver {
         microphone: microphone.clone(),
         speaker: speaker.clone(),
@@ -364,6 +375,7 @@ fn endpoint_usage(state: &mut State) -> watch::Receiver<audio::activity::Endpoin
         _speaker: speaker_tx,
         _cancel: cancel.drop_guard(),
         usage: usage.clone(),
+        volume: Some(volume),
     });
     usage
 }
@@ -488,6 +500,7 @@ impl Controller {
             "Wait for sessions to finish before creating virtual devices"
         );
         stop_routing(&mut state).await?;
+        state.endpoint_observer.take();
         let result = audio::install_virtual_devices().await;
         state.routing_enabled = state.routing_monitor_started;
         state.routing_retry_at = Instant::now();
@@ -503,6 +516,7 @@ impl Controller {
         );
         stop_routing(&mut state).await?;
         state.routing_enabled = false;
+        state.endpoint_observer.take();
         audio::uninstall_virtual_devices().await
     }
     pub async fn report_error(&self, error: String) {
@@ -559,12 +573,33 @@ impl Controller {
             .collect();
         status.finalizing = !status.finalizing_sessions.is_empty();
         status.config_revision = state.config_revision;
+        status.output_volume = state
+            .endpoint_observer
+            .as_ref()
+            .and_then(|observer| observer.volume.as_ref())
+            .map_or_else(Default::default, audio::volume::Service::status);
         status.local_runtime = self.local_runtime.status();
         status.history = state.history.status(Instant::now());
         if status.running && status.last_error.is_none() {
             status.last_error = state.last.last_error.clone();
         }
         status
+    }
+    pub async fn set_output_volume(
+        &self,
+        device: String,
+        value: audio::volume::VolumeState,
+    ) -> Result<()> {
+        let reply = {
+            let state = self.state.lock().await;
+            state
+                .endpoint_observer
+                .as_ref()
+                .and_then(|observer| observer.volume.as_ref())
+                .context("Output volume control is not ready")?
+                .request(device, value)?
+        };
+        reply.await.context("Output volume control stopped")?
     }
     pub async fn set_config(&self, config: AppConfig) -> Result<()> {
         self.set_config_if_revision(config, None).await
@@ -616,6 +651,24 @@ impl Controller {
             return Err(error);
         }
         state.history.configure(&config.history);
+        if state.config.speaker.playback_device != config.speaker.playback_device {
+            for pending in &state.finalizing {
+                pending
+                    .physical_output
+                    .send_replace(config.speaker.playback_device.clone());
+            }
+        }
+        if state.config.speaker.capture_device != config.speaker.capture_device
+            || state.config.microphone.playback_device != config.microphone.playback_device
+        {
+            state.endpoint_observer.take();
+        } else if let Some(volume) = state
+            .endpoint_observer
+            .as_ref()
+            .and_then(|observer| observer.volume.as_ref())
+        {
+            volume.select(config.speaker.playback_device.clone());
+        }
         state.config = config;
         cancel_pending_start(&mut state);
         self.local_runtime.reconcile(&state.config);
@@ -645,6 +698,13 @@ impl Controller {
         cancel_pending_start(&mut state);
         state.config_revision = state.config_revision.wrapping_add(1);
         state.last.last_error = None;
+        if let Some(volume) = state
+            .endpoint_observer
+            .as_ref()
+            .and_then(|observer| observer.volume.as_ref())
+        {
+            volume.select(state.config.speaker.playback_device.clone());
+        }
         if direction == DeviceDirection::Input && state.config.microphone_uses_speaker() {
             // Remember the physical selection for a later source change. The
             // active mirror is independent and must not restart speaker capture.
@@ -2046,6 +2106,7 @@ mod tests {
                 _speaker: speaker_tx,
                 _cancel: observer_cancel.clone().drop_guard(),
                 usage: shared_usage.clone(),
+                volume: None,
             });
         }
         let mut releases = Vec::new();

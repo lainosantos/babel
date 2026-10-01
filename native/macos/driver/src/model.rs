@@ -1,6 +1,7 @@
 //! HAL property values; all CoreAudio layouts/constant lookups live in the SDK shim.
 use crate::{MICROPHONE, SPEAKER};
 use babel_hal_core::{LATENCY_FRAMES, SAMPLE_RATE as RATE, TIMESTAMP_PERIOD};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering::Relaxed};
 pub mod property {
     include!(concat!(env!("OUT_DIR"), "/properties.rs"));
 }
@@ -9,15 +10,61 @@ pub const PLUGIN: u32 = 1;
 pub const BOX: u32 = 2;
 pub const MIC: u32 = 10;
 pub const SPEAKER_DEVICE: u32 = 20;
+pub const SPEAKER_VOLUME: u32 = 23;
+pub const SPEAKER_MUTE: u32 = 24;
 pub const INPUT_SCOPE: u32 = 1;
 pub const OUTPUT_SCOPE: u32 = 2;
 pub const GLOBAL_SCOPE: u32 = 0;
 pub const BOX_UID_VALUE: &str = "org.babel.audio.box.v1";
+// Control state only: downstream hardware applies the volume exactly once.
+// Neither the cable nor its original-audio capture consults these atomics.
+static OUTPUT_VOLUME: AtomicU32 = AtomicU32::new(1.0_f32.to_bits());
+static OUTPUT_MUTED: AtomicBool = AtomicBool::new(false);
+pub const MIN_DECIBELS: f32 = -96.0;
+
+pub fn scalar_to_decibels(value: f32) -> f32 {
+    MIN_DECIBELS + value.clamp(0.0, 1.0) * -MIN_DECIBELS
+}
+pub fn decibels_to_scalar(value: f32) -> f32 {
+    ((value - MIN_DECIBELS) / -MIN_DECIBELS).clamp(0.0, 1.0)
+}
+pub fn set_level(object: u32, selector: u32, value: f32) -> i32 {
+    if !value.is_finite() {
+        return -3;
+    }
+    let scalar = match (object, selector) {
+        (SPEAKER_VOLUME, LEVEL_SCALAR) | (SPEAKER_DEVICE, DEVICE_VOLUME) => value,
+        (SPEAKER_VOLUME, LEVEL_DECIBELS) | (SPEAKER_DEVICE, DEVICE_DECIBELS) => {
+            if !(MIN_DECIBELS..=0.0).contains(&value) {
+                return -3;
+            }
+            decibels_to_scalar(value)
+        }
+        _ => return -2,
+    };
+    if !(0.0..=1.0).contains(&scalar) {
+        return -3;
+    }
+    i32::from(OUTPUT_VOLUME.swap(scalar.to_bits(), Relaxed) != scalar.to_bits())
+}
+pub fn set_mute(object: u32, value: u32) -> i32 {
+    if !matches!(object, SPEAKER_DEVICE | SPEAKER_MUTE) {
+        return -1;
+    }
+    if value > 1 {
+        return -3;
+    }
+    i32::from(OUTPUT_MUTED.swap(value != 0, Relaxed) != (value != 0))
+}
 
 pub enum Value {
     U32(u32),
     List(&'static [u32]),
     Number(f64),
+    Scalar(f32),
+    DecibelRange,
+    OutputScope,
+    ScalarConversion,
     Text(&'static str),
     RateRange,
     Format,
@@ -29,7 +76,7 @@ pub enum Value {
 pub fn valid_object(object: u32) -> bool {
     matches!(
         object,
-        PLUGIN | BOX | MIC | 11 | 12 | SPEAKER_DEVICE | 21 | 22
+        PLUGIN | BOX | MIC | 11 | 12 | SPEAKER_DEVICE | 21 | 22 | SPEAKER_VOLUME | SPEAKER_MUTE
     )
 }
 pub fn device(object: u32) -> Option<&'static babel_hal_core::Cable> {
@@ -53,6 +100,8 @@ pub fn class(object: u32) -> u32 {
         PLUGIN => *b"aplg",
         BOX => *b"abox",
         MIC | SPEAKER_DEVICE => *b"adev",
+        SPEAKER_VOLUME => *b"vlme",
+        SPEAKER_MUTE => *b"mute",
         _ => *b"astr",
     })
 }
@@ -61,6 +110,10 @@ pub fn settable(object: u32, selector: u32) -> bool {
         || (stream(object).is_some()
             && matches!(selector, STREAM_ACTIVE | VIRTUAL_FORMAT | PHYSICAL_FORMAT))
         || (object == BOX && selector == ACQUIRED)
+        || (object == SPEAKER_VOLUME && matches!(selector, LEVEL_SCALAR | LEVEL_DECIBELS))
+        || (object == SPEAKER_MUTE && selector == BOOLEAN_VALUE)
+        || (object == SPEAKER_DEVICE
+            && matches!(selector, DEVICE_VOLUME | DEVICE_DECIBELS | DEVICE_MUTE))
 }
 pub fn value(
     object: u32,
@@ -83,13 +136,23 @@ pub fn value(
         return None;
     }
     match selector {
-        BASE_CLASS => return Some(Value::U32(u32::from_be_bytes(*b"aobj"))),
+        BASE_CLASS => {
+            return Some(Value::U32(u32::from_be_bytes(match object {
+                SPEAKER_VOLUME => *b"levl",
+                SPEAKER_MUTE => *b"togl",
+                _ => *b"aobj",
+            })));
+        }
         CLASS => return Some(Value::U32(class(object))),
         OWNER => {
             return Some(Value::U32(if object == PLUGIN {
                 0
             } else {
-                stream(object).map_or(PLUGIN, |(device, _)| device)
+                if matches!(object, SPEAKER_VOLUME | SPEAKER_MUTE) {
+                    SPEAKER_DEVICE
+                } else {
+                    stream(object).map_or(PLUGIN, |(device, _)| device)
+                }
             }));
         }
         MANUFACTURER => return Some(Value::Text("Babel")),
@@ -99,11 +162,21 @@ pub fn value(
                 BOX => "Babel Virtual Audio",
                 MIC => "Babel Microphone",
                 SPEAKER_DEVICE => "Babel Speaker",
+                SPEAKER_VOLUME => "Output volume",
+                SPEAKER_MUTE => "Output mute",
                 11 | 21 => "Input",
                 _ => "Output",
             }));
         }
-        CONTROLS => return Some(Value::List(&[])),
+        CONTROLS => {
+            return Some(Value::List(
+                if object == SPEAKER_DEVICE && scope != INPUT_SCOPE {
+                    &[SPEAKER_VOLUME, SPEAKER_MUTE]
+                } else {
+                    &[]
+                },
+            ));
+        }
         OWNED_OBJECTS => {
             return Some(Value::List(match (object, scope) {
                 (PLUGIN, _) => &[BOX, MIC, SPEAKER_DEVICE],
@@ -111,12 +184,32 @@ pub fn value(
                 (MIC, OUTPUT_SCOPE) => &[12],
                 (MIC, _) => &[11, 12],
                 (SPEAKER_DEVICE, INPUT_SCOPE) => &[21],
-                (SPEAKER_DEVICE, OUTPUT_SCOPE) => &[22],
-                (SPEAKER_DEVICE, _) => &[21, 22],
+                (SPEAKER_DEVICE, OUTPUT_SCOPE) => &[22, SPEAKER_VOLUME, SPEAKER_MUTE],
+                (SPEAKER_DEVICE, _) => &[21, 22, SPEAKER_VOLUME, SPEAKER_MUTE],
                 _ => &[],
             }));
         }
         _ => {}
+    }
+    if matches!(object, SPEAKER_VOLUME | SPEAKER_MUTE) && scope == GLOBAL_SCOPE {
+        return Some(match selector {
+            CONTROL_SCOPE => Value::OutputScope,
+            CONTROL_ELEMENT => Value::U32(0),
+            LEVEL_SCALAR if object == SPEAKER_VOLUME => {
+                Value::Scalar(f32::from_bits(OUTPUT_VOLUME.load(Relaxed)))
+            }
+            LEVEL_DECIBELS if object == SPEAKER_VOLUME => Value::Scalar(scalar_to_decibels(
+                f32::from_bits(OUTPUT_VOLUME.load(Relaxed)),
+            )),
+            LEVEL_RANGE if object == SPEAKER_VOLUME => Value::DecibelRange,
+            LEVEL_TO_DECIBELS | LEVEL_TO_SCALAR if object == SPEAKER_VOLUME => {
+                Value::ScalarConversion
+            }
+            BOOLEAN_VALUE if object == SPEAKER_MUTE => {
+                Value::U32(u32::from(OUTPUT_MUTED.load(Relaxed)))
+            }
+            _ => return None,
+        });
     }
     if object == PLUGIN {
         return Some(match selector {
@@ -144,6 +237,18 @@ pub fn value(
     }
     if let Some(cable) = device(object) {
         return Some(match selector {
+            DEVICE_VOLUME if object == SPEAKER_DEVICE && scope == OUTPUT_SCOPE => {
+                Value::Scalar(f32::from_bits(OUTPUT_VOLUME.load(Relaxed)))
+            }
+            DEVICE_DECIBELS if object == SPEAKER_DEVICE && scope == OUTPUT_SCOPE => Value::Scalar(
+                scalar_to_decibels(f32::from_bits(OUTPUT_VOLUME.load(Relaxed))),
+            ),
+            DEVICE_VOLUME_RANGE if object == SPEAKER_DEVICE && scope == OUTPUT_SCOPE => {
+                Value::DecibelRange
+            }
+            DEVICE_MUTE if object == SPEAKER_DEVICE && scope == OUTPUT_SCOPE => {
+                Value::U32(u32::from(OUTPUT_MUTED.load(Relaxed)))
+            }
             DEVICE_UID => Value::Text(if object == MIC {
                 babel_hal_core::MICROPHONE_UID
             } else {

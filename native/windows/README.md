@@ -74,6 +74,24 @@ and limits DMA buffers to 100 ms and event periods to at least 1 ms. Rendering
 and capture clocks can start at different times; an initial underrun is silence.
 No voice processing or AI runs in the kernel.
 
+The `0.1.0.1` driver package gives each topology endpoint independent stereo
+volume and mute state. Babel Speaker publishes the
+`control-only-volume-v1` endpoint capability. Its controls do not multiply or
+mute the cable's PCM: the application mirrors this master control to the selected
+physical output, so original and translated playback share one effective volume.
+The application requires the exact role, driver identity and capability on both
+Speaker endpoints. Older drivers and other virtual cables retain their existing
+behavior and expose the separate physical output control instead.
+
+`volume-control` is a small safe API over Windows endpoint-volume COM calls.
+Each operation initializes and releases its own COM apartment on a blocking
+control worker, preserves physical channel balance by changing only the master,
+and checks cancellation immediately before each write. It never opens audio
+streams, elevates, installs drivers, or performs work in PCM callbacks. Windows
+provides no read-only master-volume writability probe; interface/range failures
+and actual write failures are reported. Hardware buttons, device disconnects and
+driver-specific controls still need native validation.
+
 ## Reproducible build
 
 Use **GitHub Actions `windows-2022`** or a Windows development machine with
@@ -189,6 +207,8 @@ python3 -m unittest discover -s native/windows/tests -v
 # Include the generated-source checks using the pinned official checkout:
 BABEL_WDK_SOURCE=/path/to/Windows-driver-samples python3 -m unittest discover -s native/windows/tests -v
 python3 native/windows/tests/test_shim.py
+cargo test --manifest-path native/windows/volume-control/Cargo.toml
+cargo check --manifest-path native/windows/volume-control/Cargo.toml --target x86_64-pc-windows-gnu
 ```
 
 The host harness compiles the **actual** Rust static library and C++ shim, with
@@ -196,6 +216,9 @@ host mutex stand-ins for the WDK spin-lock APIs. It verifies two-cable isolation
 bit-exact transfer across chunks, stale-audio flushing and concurrent write/read/
 pause calls. It does not validate Windows ABI headers, IRQL, the scheduler or
 kernel lifetime rules. Never treat it as a successful driver install.
+With `BABEL_WDK_SOURCE`, the generated-source test also compiles and runs the
+actual transformed volume/mute property handlers against host type substitutes,
+including all-channel updates, channel balance and endpoint isolation.
 
 On a disposable Windows test target, validate all four endpoint properties,
 shared WASAPI full duplex, two simultaneous different test signals with no

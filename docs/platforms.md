@@ -319,6 +319,46 @@ WAV; this needs no AI provider. Cross-compilation confirms types and APIs but do
 not replace device, permission, suspension/resumption, and disconnection tests
 on real macOS and Windows machines.
 
+### Speaker volume
+
+Supported Babel speaker endpoints expose one output volume control: changing
+Babel's volume in the operating system changes the selected physical speaker's
+master volume and mute. Connecting or switching speakers adopts the new physical
+device's current level. Babel does not force hardware volume to 100%. Changes
+made with a physical volume knob are reflected back to the virtual control.
+Original and translated playback therefore share the same physical master.
+Microphone gain is independent and is not changed by this feature.
+
+The controller observes volume outside the audio executor; PCM callbacks never
+query or set system volume. The source PCM is not multiplied by this control,
+so transcription and recording still receive original audio. Muting playback
+does not pause original capture, transcription or recording.
+
+- **Linux with PipeWire:** the Babel-owned speaker monitor uses
+  `monitor.channel-volumes=false`. Older virtual devices require an explicit
+  reinstall after sessions finish and apps release the Babel devices. Reinstall
+  adopts the physical speaker's current level; check that level before resuming
+  playback, because the old virtual attenuation is removed. Existing devices
+  are not silently replaced while apps use them.
+- **Native PulseAudio and third-party virtual cables:** their monitor can
+  already contain virtual attenuation, so automatic mirroring is disabled to
+  avoid applying volume twice. The **Speaker volume** control in Audio routing
+  adjusts the physical device directly, including during a session. Set the
+  virtual control to 100% if you want only the physical control to attenuate
+  playback. PulseAudio amplification above 100% also disables automatic mirroring.
+- **macOS:** requires the updated Babel Audio driver with control-only speaker
+  volume and mute properties and a physical endpoint with writable controls.
+  Read-only digital outputs and older drivers can require hardware volume keys.
+- **Windows:** requires the updated Babel driver advertising the control-only
+  volume capability. Older Babel drivers and VB-CABLE keep the separate physical
+  control. This native path requires validation on Windows hardware; compiling
+  it is not an end-to-end driver test.
+
+The routing page shows synchronization failures and unsupported endpoint details.
+A failed physical volume write does not stop original routing; Babel attempts to
+restore the virtual display to the observed physical state instead of silently
+claiming that a rejected mute succeeded.
+
 A real Linux test is also available, ignored by the normal suite. It requires
 PulseAudio clients on `PATH` and an accessible audio session, refuses to run if
 Babel devices already exist, creates endpoints, tests tones in both routes,

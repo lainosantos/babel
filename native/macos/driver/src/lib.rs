@@ -52,6 +52,13 @@ impl BabelProperty {
                 out.kind = 3;
                 out.number = value;
             }
+            Value::Scalar(value) => {
+                out.kind = 11;
+                out.number = f64::from(value);
+            }
+            Value::DecibelRange => out.kind = 12,
+            Value::OutputScope => out.kind = 13,
+            Value::ScalarConversion => out.kind = 14,
             Value::Text(text) => {
                 out.kind = 4;
                 out.count = text.len() as u32;
@@ -174,6 +181,22 @@ pub extern "C" fn BabelSetActive(stream: u32, active: u32) -> i32 {
     i32::from(cable.set_active(input, active != 0))
 }
 #[unsafe(no_mangle)]
+pub extern "C" fn BabelSetLevel(object: u32, property: u32, value: f32) -> i32 {
+    model::set_level(object, property, value)
+}
+#[unsafe(no_mangle)]
+pub extern "C" fn BabelSetMute(object: u32, value: u32) -> i32 {
+    model::set_mute(object, value)
+}
+#[unsafe(no_mangle)]
+pub extern "C" fn BabelConvertLevel(to_decibels: u32, value: f32) -> f32 {
+    if to_decibels != 0 {
+        model::scalar_to_decibels(value)
+    } else {
+        model::decibels_to_scalar(value)
+    }
+}
+#[unsafe(no_mangle)]
 pub extern "C" fn BabelDeviceAction(device: u32, client: u32, action: u32) -> i32 {
     let Some(cable) = model::device(device) else {
         return -1;
@@ -276,6 +299,65 @@ pub unsafe extern "C" fn BabelProcess(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn output_controls_are_writable_metadata_and_never_attenuate_original_pcm() {
+        use model::{Value, property::*};
+        assert!(matches!(
+            model::value(20, CONTROLS, 2, 0, ""),
+            Some(Value::List(&[23, 24]))
+        ));
+        assert!(matches!(
+            model::value(20, CONTROLS, 1, 0, ""),
+            Some(Value::List(&[]))
+        ));
+        assert!(matches!(
+            model::value(23, OWNER, 0, 0, ""),
+            Some(Value::U32(20))
+        ));
+        assert!(matches!(
+            model::value(24, CONTROL_ELEMENT, 0, 0, ""),
+            Some(Value::U32(0))
+        ));
+        assert!(model::value(10, DEVICE_VOLUME, 2, 0, "").is_none());
+        assert!(model::value(20, DEVICE_VOLUME, 1, 0, "").is_none());
+        assert!(model::value(23, LEVEL_SCALAR, 2, 0, "").is_none());
+        assert!(model::value(23, BOOLEAN_VALUE, 0, 0, "").is_none());
+        assert_eq!(BabelSetLevel(23, LEVEL_SCALAR, f32::NAN), -3);
+        assert_eq!(BabelSetLevel(23, LEVEL_SCALAR, 1.5), -3);
+        assert_eq!(BabelSetLevel(23, LEVEL_DECIBELS, -97.0), -3);
+        assert_eq!(BabelSetMute(24, 2), -3);
+        assert_eq!(BabelSetMute(10, 1), -1);
+        assert!(BabelSetLevel(23, LEVEL_SCALAR, 0.25) >= 0);
+        assert_eq!(BabelSetLevel(23, LEVEL_SCALAR, 0.25), 0);
+        assert!(matches!(
+            model::value(20, DEVICE_VOLUME, 2, 0, ""),
+            Some(Value::Scalar(0.25))
+        ));
+        assert!(BabelSetMute(20, 1) >= 0);
+        assert!(matches!(
+            model::value(24, BOOLEAN_VALUE, 0, 0, ""),
+            Some(Value::U32(1))
+        ));
+        assert_eq!(BabelConvertLevel(1, 0.5), -48.0);
+        assert_eq!(BabelConvertLevel(0, -48.0), 0.5);
+        assert_eq!(BabelDeviceAction(20, 200, 0), 0);
+        assert_eq!(BabelDeviceAction(20, 200, 2), 0);
+        let mut written = [0.8, -0.7, 0.6, -0.5];
+        let mut captured = [0.0; 4];
+        // SAFETY: these fixed f32 arrays contain the stated stereo frame count.
+        unsafe {
+            assert_eq!(BabelProcess(20, 22, 0, 100.0, 2, written.as_mut_ptr()), 0);
+            assert_eq!(BabelProcess(20, 21, 1, 4196.0, 2, captured.as_mut_ptr()), 0);
+        }
+        assert_eq!(
+            captured, written,
+            "volume and mute belong to the physical endpoint"
+        );
+        assert_eq!(BabelDeviceAction(20, 200, 3), 0);
+        assert_eq!(BabelDeviceAction(20, 200, 1), 0);
+        assert!(BabelSetLevel(20, DEVICE_VOLUME, 1.0) >= 0);
+        assert!(BabelSetMute(20, 0) >= 0);
+    }
     #[test]
     fn ffi_private_layout_and_audio_buffer_contract() {
         assert_eq!(std::mem::size_of::<BabelProperty>(), 56);

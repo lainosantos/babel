@@ -18,6 +18,19 @@ default devices.
 
 ## Implementation and limits
 
+- Babel Speaker exposes output volume and mute controls in the macOS device
+  interface. These controls carry state only: Babel mirrors them to the selected
+  physical output, adopting its existing volume on connection. The driver never
+  attenuates PCM, so the original recording/transcription capture remains intact
+  and translated playback uses the same hardware level. Babel Microphone has no
+  added gain controls. Older installed Babel drivers and third-party cables do
+  not support this synchronization; upgrade the driver or use the physical
+  output control in Babel. Hardware without writable volume/mute controls still
+  requires its own hardware controls. Devices without a master volume control
+  must expose volume for every output channel (up to 32); channel balance is
+  preserved, including when raising the level after zero. Actual macOS hardware
+  behavior remains to be validated; the SDK contract test checks property
+  behavior in-process.
 - Native 32-bit float PCM, interleaved stereo, fixed at 48,000 Hz. Rate/format
   conversion is handled by the HAL and clients; the driver rejects other
   physical or virtual stream configurations.

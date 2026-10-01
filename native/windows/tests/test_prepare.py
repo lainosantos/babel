@@ -1,4 +1,4 @@
-import importlib.util, json, os, tempfile, unittest, hashlib, zipfile, subprocess
+import importlib.util, json, os, tempfile, unittest, hashlib, zipfile, subprocess, re, shutil
 from unittest import mock
 import xml.etree.ElementTree as ET
 from pathlib import Path
@@ -53,6 +53,8 @@ class PackageTests(unittest.TestCase):
         self.assertIn('ROOT\\BabelAudio',text)
         self.assertIn('AddService=BabelAudio,',text)
         self.assertNotIn('SignatureAttributes.DRM',text)
+        self.assertEqual(text.count('%PKEY_Babel_VolumeControl%,,"control-only-volume-v1"'),2)
+        self.assertIn('DriverVer=09/30/2026,0.1.0.1',text)
     def test_inputs_have_pinned_hashes(self):
         manifest=json.loads((ROOT/'upstream.json').read_text())
         self.assertEqual(len(manifest['commit']),40)
@@ -130,6 +132,26 @@ class PackageTests(unittest.TestCase):
             self.assertIn('ServiceBinary=%13%\\BabelAudio.sys',inf)
             self.assertIn('NT$ARCH$.10.0...19041',inf) # stampinf expands the WDK architecture
             self.assertNotIn('SimpleAudioSample.sys',inf)
+            topology=(out/'Source/Main/basetopo.cpp').read_text()
+            self.assertEqual(topology.count('&m_BabelVolume,'),2)
+            helpers=(out/'Source/Utilities/kshelper.cpp').read_text()
+            self.assertNotIn('for (ULONG i=0; i<ulChannel; ++i)',helpers)
+            compiler=shutil.which('c++')
+            if compiler:
+                # Compile the actual transformed WDK handler bodies with only
+                # host substitutes for property validation and OS scalar types.
+                handlers=[]
+                for name in ['Volume','Mute']:
+                    match=re.search(r'NTSTATUS\s+PropertyHandler_'+name+r'\s*\(.*?\n\} // PropertyHandler'+name+r'\b',helpers,re.S)
+                    self.assertIsNotNone(match)
+                    self.assertEqual(match.group().count('for (ULONG i=0; i<MaxChannels; ++i)'),1)
+                    handlers.append(match.group())
+                host=Path(temp)/'volume_handlers.inc';host.write_text('\n'.join(handlers))
+                executable=Path(temp)/'volume-properties'
+                subprocess.run([compiler,'-std=c++17','-I',str(ROOT/'tests/wdk_stub'),
+                                '-I',str(ROOT/'shim'),'-I',temp,
+                                str(ROOT/'tests/volume_properties_host.cpp'),'-o',str(executable)],check=True)
+                subprocess.run([str(executable)],check=True,timeout=5)
             with self.assertRaises(ValueError):prepare.prepare(out,source)
 
 if __name__=='__main__':unittest.main()

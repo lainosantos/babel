@@ -4,7 +4,7 @@ Signature="$Windows NT$"
 Class=MEDIA
 ClassGUID={4d36e96c-e325-11ce-bfc1-08002be10318}
 Provider=%ProviderName%
-DriverVer=09/29/2026,0.1.0.0
+DriverVer=09/30/2026,0.1.0.1
 CatalogFile=BabelAudio.cat
 PnpLockdown=1
 
@@ -132,6 +132,7 @@ HKR,EP\0,%PKEY_Device_FriendlyName%,,"Babel Speaker"
 HKR,EP\0,%PKEY_DeviceInterface_FriendlyName%,,"Babel Audio v1"
 HKR,EP\0,%PKEY_Babel_Role%,,"babel:speaker:render:v1"
 HKR,EP\0,%PKEY_Babel_Driver%,,"org.babel.audio.driver.v1"
+HKR,EP\0,%PKEY_Babel_VolumeControl%,,"control-only-volume-v1"
 
 [Babel.WaveBabelSpeakerCapture]
 AddReg=Babel.WaveBabelSpeakerCapture.Properties
@@ -151,6 +152,7 @@ HKR,EP\0,%PKEY_Device_FriendlyName%,,"Babel Speaker Monitor"
 HKR,EP\0,%PKEY_DeviceInterface_FriendlyName%,,"Babel Audio v1"
 HKR,EP\0,%PKEY_Babel_Role%,,"babel:speaker:capture:v1"
 HKR,EP\0,%PKEY_Babel_Driver%,,"org.babel.audio.driver.v1"
+HKR,EP\0,%PKEY_Babel_VolumeControl%,,"control-only-volume-v1"
 
 [Strings]
 ProviderName="Babel"
@@ -170,3 +172,4 @@ PKEY_Device_FriendlyName="{A45C254E-DF1C-4EFD-8020-67D146A850E0},14"
 PKEY_DeviceInterface_FriendlyName="{026E516E-B814-414B-83CD-856D6FEF4822},2"
 PKEY_Babel_Role="{76AD3C42-65B7-4DA0-A823-907A8E5AC6C1},1"
 PKEY_Babel_Driver="{76AD3C42-65B7-4DA0-A823-907A8E5AC6C1},2"
+PKEY_Babel_VolumeControl="{76AD3C42-65B7-4DA0-A823-907A8E5AC6C1},3"

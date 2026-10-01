@@ -12,6 +12,8 @@
   const microphoneSources = Object.freeze({ speaker_original: 'babel-source:speaker_original', speaker_output: 'babel-source:speaker_output' });
   const retention = { sessions: [], fresh: false, error: '', polling: false, generation: 0, recovering: new Set(), errors: new Map(), nodes: new Map() };
   const finalizingNodes = new Map();
+  const volumeControl = { draft: null, queued: null, writing: false, revision: 0, sequence: 0, appliedSequence: 0 };
+  const volumeSnapshots = new WeakMap();
   let translationSelection = [...routeNames];
   let token = new URLSearchParams(location.hash.slice(1)).get('token');
   try {
@@ -33,6 +35,7 @@
   }
 
   async function api(path, options = {}) {
+    const volumeSnapshot = path === '/status' ? { revision: volumeControl.revision, sequence: ++volumeControl.sequence } : null;
     const response = await fetch(`/api${path}`, {
       method: options.method || 'GET',
       headers: { Authorization: `Bearer ${token || ''}`, ...(options.body ? { 'Content-Type': 'application/json' } : {}), ...(options.revision != null ? { 'If-Match': `"${options.revision}"` } : {}) },
@@ -43,6 +46,7 @@
     });
     const contentType = response.headers.get('content-type') || '';
     const body = contentType.includes('application/json') ? await response.json() : { error: await response.text() };
+    if (volumeSnapshot && body && typeof body === 'object') volumeSnapshots.set(body, volumeSnapshot);
     if (!response.ok) {
       if (response.status === 401 || response.status === 403) {
         state.authenticated = false;
@@ -423,6 +427,7 @@
         option.dataset.deviceUnavailable = String(Boolean(option.value && !device));
       }
     }
+    renderOutputVolume();
   }
 
   async function refreshDevices() { state.devices = await api('/devices'); renderDevices(); renderPlatformEndpoints(); }
@@ -712,6 +717,7 @@
     updateHistoryControls(unavailable, running);
     byId('interface-language').disabled = state.busy || state.syncing || !state.authenticated;
     byId('settings').disabled = running || unavailable;
+    for (const id of ['microphone-device-fields', 'speaker-device-fields', 'routing-tuning-fields']) byId(id).disabled = running || unavailable;
     byId('session-name').disabled = running || unavailable;
     byId('save').disabled = running || unavailable || (!state.dirty && state.status?.local_runtime?.phase !== 'error') || state.configConflict;
     byId('start').disabled = running || unavailable || state.configConflict || !processingSelected;
@@ -849,9 +855,20 @@
     }
   }
 
+  function confirmedOutputVolume(status) {
+    const snapshot = volumeSnapshots.get(status);
+    if (snapshot) {
+      // A status request started before a volume edit must not undo its result.
+      if (snapshot.revision !== volumeControl.revision || snapshot.sequence < volumeControl.appliedSequence) return state.status?.output_volume;
+      volumeControl.appliedSequence = snapshot.sequence;
+    }
+    return status.output_volume;
+  }
+
   function renderStatus(status, fresh = true) {
-    state.status = status;
+    state.status = { ...status, output_volume: confirmedOutputVolume(status) };
     state.statusFresh = fresh;
+    renderOutputVolume();
     renderLocalRuntime();
     renderFinalizing();
     const sessionIdentity = status.session_name || status.session_id;
@@ -892,6 +909,86 @@
     renderSignalPaths();
     updateControls();
   }
+
+  function renderOutputVolume() {
+    const actual = state.status?.output_volume;
+    if (volumeControl.draft && actual?.device !== volumeControl.draft.device) volumeControl.draft = null;
+    const volume = volumeControl.draft ? { ...actual, ...volumeControl.draft } : actual;
+    const slider = byId('output-volume');
+    if (!slider) return;
+    const available = state.authenticated && state.statusFresh && Number.isFinite(actual?.level);
+    slider.disabled = !available;
+    slider.closest('.output-volume-control').setAttribute('aria-busy', String(volumeControl.writing));
+    // Amplification above unity is outside this control's range. A mute click
+    // must not silently replace that level with 100%.
+    byId('output-mute').disabled = !available || volume.level > 1;
+    slider.value = String(Math.round((volume?.level || 0) * 100));
+    byId('output-volume-value').textContent = available ? `${Math.round((volume?.level || 0) * 100)}%` : '—';
+    slider.style.setProperty('--volume-position', `${Math.max(0, Math.min(100, Number(slider.value)))}%`);
+    byId('output-mute-label').textContent = t(volume?.muted ? 'volume.unmute' : 'volume.mute');
+    byId('output-mute').setAttribute('aria-pressed', String(Boolean(volume?.muted)));
+    const device = state.devices.find(device => device.id === volume?.device);
+    byId('output-volume-device').textContent = device?.name || volume?.device || '';
+    byId('output-volume-device').hidden = !volume?.device || volume.device === byId('speaker-playback_device').value;
+    byId('output-volume-hint').textContent = t(volume?.synchronized ? 'volume.synchronized' : 'volume.physical_hint');
+    byId('output-volume-error').textContent = volume?.error || '';
+    byId('output-volume-error').hidden = !volume?.error;
+    byId('output-volume-details').hidden = !volume?.limitation;
+    byId('output-volume-limitation').textContent = volume?.limitation || '';
+  }
+
+  async function changeOutputVolume(level, muted) {
+    const volume = state.status?.output_volume;
+    if (!volume?.device || !state.statusFresh || !state.authenticated) return;
+    volumeControl.draft = { device: volume.device, level, muted };
+    volumeControl.queued = volumeControl.draft;
+    volumeControl.revision++;
+    renderOutputVolume();
+    if (volumeControl.writing) return;
+    volumeControl.writing = true;
+    renderOutputVolume();
+    try {
+      // Serialize writes and keep only the latest unsent value. Dragging and
+      // keyboard adjustments remain responsive while the endpoint is updating.
+      while (volumeControl.queued) {
+        const request = volumeControl.queued;
+        volumeControl.queued = null;
+        let failure;
+        try { await api('/output-volume', { method: 'POST', body: request }); }
+        catch (error) { failure = error; }
+        volumeControl.revision++;
+        if (volumeControl.queued) {
+          if (failure) showError(failure.message);
+          continue;
+        }
+        try {
+          const status = await api('/status');
+          // Volume requests can overlap Start/Stop. Their readback must never
+          // overwrite newer session state or unlock its configuration fields.
+          state.status = { ...state.status, output_volume: confirmedOutputVolume(status) };
+          state.statusFresh = true;
+        }
+        catch (error) { state.statusFresh = false; failure ||= error; }
+        if (volumeControl.draft === request) volumeControl.draft = null;
+        if (failure) showError(failure.message);
+        renderOutputVolume();
+      }
+    } finally { volumeControl.writing = false; renderOutputVolume(); }
+  }
+
+  byId('output-volume').addEventListener('input', event => {
+    const volume = volumeControl.draft || state.status?.output_volume;
+    if (!volume?.device || event.target.disabled) return;
+    volumeControl.draft = { device: volume.device, level: Number(event.target.value) / 100, muted: Boolean(volume.muted) };
+    renderOutputVolume();
+  });
+  byId('output-volume').addEventListener('change', event => {
+    void changeOutputVolume(Number(event.target.value) / 100, Boolean((volumeControl.draft || state.status?.output_volume)?.muted));
+  });
+  byId('output-mute').addEventListener('click', () => {
+    const volume = volumeControl.draft || state.status?.output_volume;
+    void changeOutputVolume(Math.min(1, volume?.level || 0), !volume?.muted);
+  });
 
   async function pollStatus() {
     if (!state.authenticated || state.polling || (state.busy && !state.starting) || state.syncing || document.hidden) return;
@@ -972,6 +1069,7 @@
     if (['provider', 'enabled', 'engine', 'model', 'microphone_source'].includes(event.target.dataset.field) || event.target.dataset.section === 'transcription' || event.target.dataset.transcriptionProfile || event.target.dataset.profile === 'local') updateProviderControls();
     if (event.target.dataset.section === 'local_runtime') validateLocalDirectory();
     if (event.target.id === 'audio-quality') updateQualityHint();
+    if (event.target.id === 'speaker-playback_device') renderOutputVolume();
     if (['files-base_path', 'transcription-directory', 'recording-directory'].includes(event.target.id)) scheduleFilePathPreview();
     updateControls();
   });

@@ -668,5 +668,11 @@
   "session.finalizing": "Finalizing session",
   "session.finalizing_title": "Finalizing sessions",
   "session.finalizing_hint": "Pending work continues in the background. Keep Babel open until it finishes. You can start another session.",
-  "session.capture_stopped": "Session capture stopped. Any pending work continues in the background."
+  "session.capture_stopped": "Session capture stopped. Any pending work continues in the background.",
+  "volume.title": "Speaker volume",
+  "volume.mute": "Mute",
+  "volume.unmute": "Unmute",
+  "volume.synchronized": "Synced with the system volume.",
+  "volume.physical_hint": "Physical speaker volume. Available during sessions.",
+  "volume.details": "Volume control details"
 }

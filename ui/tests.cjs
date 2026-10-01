@@ -73,6 +73,9 @@ async function page(t, options = {}) {
   let recoveryRequest = options.recoveryRequest;
   let routingActive = true;
   let routingError = null;
+  let outputVolume = options.outputVolume;
+  const outputVolumeRequest = options.outputVolumeRequest;
+  let statusResponse = options.statusResponse;
   let sessionName = null;
   let sessionId = null;
   let autostart = false;
@@ -126,7 +129,12 @@ async function page(t, options = {}) {
       if (firstStatus && initialChange) { initialChange(config); revision++; }
       firstStatus = false;
       const route = name => ({ ...metrics, state: running && config[name].enabled ? 'streaming' : routingActive || running ? 'passthrough' : 'stopped', ...routeStatuses[name] });
-      value = { ...historySession, history: audioHistory, local_runtime: localRuntime, running, finalizing: finalizingSessions.length > 0, finalizing_sessions: finalizingSessions, routing_active: routingActive, routing_error: routingError, config_revision: revision, session_name: sessionName, session_id: sessionId, microphone: route('microphone'), speaker: route('speaker'), last_error: null };
+      value = { ...historySession, history: audioHistory, local_runtime: localRuntime, running, finalizing: finalizingSessions.length > 0, finalizing_sessions: finalizingSessions, routing_active: routingActive, routing_error: routingError, output_volume: outputVolume, config_revision: revision, session_name: sessionName, session_id: sessionId, microphone: route('microphone'), speaker: route('speaker'), last_error: null };
+      if (statusResponse) await statusResponse(value);
+    }
+    else if (parsed.pathname === '/api/output-volume') {
+      if (outputVolumeRequest) { const response = await outputVolumeRequest(body); if (response instanceof Response) return response; }
+      outputVolume = { ...outputVolume, ...body };
     }
     else if (parsed.pathname === '/api/start') { if (startRequest) { const response = await startRequest(); if (response instanceof Response) return response; } running = true; sessionName = body?.name || 'Automatic session'; sessionSequence++; sessionId = `fixture-session-id${sessionSequence > 1 ? `-${sessionSequence}` : ''}`; }
     else if (parsed.pathname === '/api/stop') {
@@ -144,7 +152,7 @@ async function page(t, options = {}) {
   window.eval(fs.readFileSync(path.join(__dirname, 'workspace.js'), 'utf8'));
   await settle(() => !byId('start').disabled && calls.some(call => call.path === '/api/platform'), 'dashboard did not initialize');
   const set = (id, value) => { const input = byId(id); if (input.type === 'checkbox') input.checked = value; else input.value = value; input.dispatchEvent(new window.Event('input', { bubbles: true })); };
-  return { window, doc, byId, calls, set, history: status => { audioHistory = status; }, historySession: status => { historySession = status; }, finalizing: sessions => { finalizingSessions = sessions; }, retention: sessions => { retainedSessions = sessions; }, retentionRequest: handler => { retentionRequest = handler; }, recoveryRequest: handler => { recoveryRequest = handler; }, runtime: status => { localRuntime = status; }, config: () => config, poll: () => interval(), externalChange: callback => { callback(config); revision++; }, filePaths: handler => { filePathsHandler = handler; }, platformFailure: failure => { platformFailure = failure; }, routing: (active, error = null) => { routingActive = active; routingError = error; }, routeStatus: (route, status) => { routeStatuses[route] = status; } };
+  return { window, doc, byId, calls, set, volume: value => { outputVolume = value; }, statusResponse: handler => { statusResponse = handler; }, history: status => { audioHistory = status; }, historySession: status => { historySession = status; }, finalizing: sessions => { finalizingSessions = sessions; }, retention: sessions => { retainedSessions = sessions; }, retentionRequest: handler => { retentionRequest = handler; }, recoveryRequest: handler => { recoveryRequest = handler; }, runtime: status => { localRuntime = status; }, config: () => config, poll: () => interval(), externalChange: callback => { callback(config); revision++; }, filePaths: handler => { filePathsHandler = handler; }, platformFailure: failure => { platformFailure = failure; }, routing: (active, error = null) => { routingActive = active; routingError = error; }, routeStatus: (route, status) => { routeStatuses[route] = status; } };
 }
 
 test('stopped captures finalize in the background while a new session starts independently', async t => {
@@ -2261,4 +2269,161 @@ test('a stale retained-session snapshot cannot restore an already recovered sess
   await polling;
   assert.equal(p.byId('retention-card').hidden, true);
   assert.equal(p.byId('retention-sessions').children.length, 0);
+});
+
+
+test('physical output volume remains usable during a session without saving configuration', async t => {
+  const p = await page(t, { language: 'en', outputVolume: { device: 'physical-speaker', level: 0.5, muted: false, synchronized: true } });
+  p.byId('start').click();
+  await settle(() => !p.byId('stop').hidden);
+  assert.equal(p.byId('settings').disabled, true);
+  assert.equal(p.byId('output-volume').matches(':disabled'), false);
+  assert.ok(p.byId('output-volume').closest('.speaker.routing-channel'));
+  assert.equal(p.byId('output-volume').closest('#settings'), null);
+  for (const id of ['microphone-capture_device', 'microphone-playback_device', 'speaker-capture_device', 'speaker-playback_device', 'audio-quality', 'audio-capture_queue_ms', 'audio-playback_queue_ms', 'audio-device_latency_ms']) assert.equal(p.byId(id).matches(':disabled'), true, id);
+  assert.equal(p.byId('output-volume').value, '50');
+  const before = p.calls.length;
+  p.byId('output-volume').value = '100';
+  p.byId('output-volume').dispatchEvent(new p.window.Event('change', { bubbles: true }));
+  await settle(() => p.byId('output-volume-value').textContent === '100%' && !p.byId('output-volume').disabled);
+  assert.deepEqual(p.calls.slice(before).filter(call => call.options.method === 'POST').map(call => [call.path, call.body]), [
+    ['/api/output-volume', { device: 'physical-speaker', level: 1, muted: false }],
+  ]);
+  assert.equal(p.calls.slice(before).some(call => ['/api/start', '/api/stop', '/api/config'].includes(call.path)), false);
+  p.byId('output-mute').click();
+  await settle(() => p.byId('output-mute').getAttribute('aria-pressed') === 'true');
+  assert.equal(p.byId('output-mute-label').textContent, 'Unmute');
+  p.byId('stop').click();
+  await settle(() => p.byId('stop').hidden);
+  for (const id of ['microphone-capture_device', 'speaker-playback_device', 'audio-quality']) assert.equal(p.byId(id).matches(':disabled'), false, id);
+});
+
+test('unsupported virtual volume exposes the physical control and diagnostic limitation', async t => {
+  const p = await page(t, { language: 'en', outputVolume: { device: 'physical-speaker', level: 0.5, muted: false, synchronized: false, limitation: 'This virtual cable already applies gain.' } });
+  assert.equal(p.byId('output-volume').disabled, false);
+  assert.equal(p.byId('output-volume-details').hidden, false);
+  assert.equal(p.byId('output-volume-limitation').textContent, 'This virtual cable already applies gain.');
+  assert.match(p.byId('output-volume-hint').textContent, /physical speaker/i);
+});
+
+test('an unsaved speaker selection immediately identifies the actual volume target', async t => {
+  const p = await page(t, { language: 'en', outputVolume: { device: 'physical-speaker', level: 0.5, muted: false, synchronized: true } });
+  const selector = p.byId('speaker-playback_device');
+  assert.equal(p.byId('output-volume-device').hidden, true);
+  selector.add(new p.window.Option('Other headphones', 'other-headphones'));
+  selector.value = 'other-headphones';
+  selector.dispatchEvent(new p.window.Event('change', { bubbles: true }));
+  assert.equal(p.byId('output-volume-device').hidden, false);
+  assert.ok(p.byId('output-volume-device').textContent);
+  assert.notEqual(p.byId('output-volume-device').textContent, 'Other headphones');
+  p.byId('output-mute').click();
+  await settle(() => p.calls.some(call => call.path === '/api/output-volume'));
+  assert.equal(p.calls.find(call => call.path === '/api/output-volume').body.device, 'physical-speaker');
+  selector.value = 'physical-speaker';
+  selector.dispatchEvent(new p.window.Event('input', { bubbles: true }));
+  assert.equal(p.byId('output-volume-device').hidden, true);
+});
+
+
+test('an amplified speaker keeps its true reading and mute cannot normalize it', async t => {
+  const p = await page(t, { language: 'en', outputVolume: { device: 'physical-speaker', level: 1.2, muted: false, synchronized: false, limitation: 'Lower amplified endpoint volumes before enabling synchronization.' } });
+  assert.equal(p.byId('output-volume-value').textContent, '120%');
+  assert.equal(p.byId('output-mute').disabled, true);
+  assert.equal(p.byId('output-volume').disabled, false);
+  p.byId('output-mute').click();
+  assert.equal(p.calls.some(call => call.path === '/api/output-volume'), false);
+});
+
+test('volume edits stay visible through dragging, delayed writes and status polling', async t => {
+  let release;
+  const volume = { device: 'physical-speaker', level: 0.5, muted: false, synchronized: true };
+  const p = await page(t, { language: 'en', outputVolume: volume, outputVolumeRequest: () => new Promise(resolve => { release = resolve; }) });
+  const slider = p.byId('output-volume');
+  const control = slider.closest('.output-volume-control');
+  p.set('output-volume', '80');
+  await p.poll();
+  assert.equal(slider.value, '80');
+  assert.equal(p.byId('output-volume-value').textContent, '80%');
+  slider.dispatchEvent(new p.window.Event('change', { bubbles: true }));
+  slider.blur();
+  await settle(() => release);
+  await p.poll();
+  assert.equal(slider.disabled, false);
+  assert.equal(slider.value, '80');
+  assert.equal(p.byId('output-volume-value').textContent, '80%');
+  release();
+  await settle(() => control.getAttribute('aria-busy') === 'false');
+  assert.equal(slider.value, '80');
+  slider.focus();
+  p.volume({ ...volume, level: 0.3 });
+  await p.poll();
+  assert.equal(slider.value, '30', 'hardware changes must resume after confirmation, even while focused');
+});
+
+test('a status response captured before a volume edit cannot undo its confirmation', async t => {
+  const p = await page(t, { language: 'en', outputVolume: { device: 'physical-speaker', level: 0.5, muted: false, synchronized: true } });
+  let release;
+  p.statusResponse(() => new Promise(resolve => { release = resolve; }));
+  const oldPoll = p.poll();
+  await settle(() => release);
+  p.statusResponse(null);
+  p.set('output-volume', '80');
+  p.byId('output-volume').dispatchEvent(new p.window.Event('change', { bubbles: true }));
+  await settle(() => p.byId('output-volume').closest('.output-volume-control').getAttribute('aria-busy') === 'false');
+  release();
+  await oldPoll;
+  assert.equal(p.byId('output-volume').value, '80');
+  assert.equal(p.byId('output-volume-value').textContent, '80%');
+});
+
+test('rapid volume edits serialize writes and retain only the latest unsent value', async t => {
+  const writes = [];
+  const p = await page(t, { language: 'en', outputVolume: { device: 'physical-speaker', level: 0.5, muted: false, synchronized: true }, outputVolumeRequest: body => new Promise(resolve => writes.push({ body, resolve })) });
+  const before = p.calls.length;
+  for (const value of ['60', '70', '80']) {
+    p.set('output-volume', value);
+    p.byId('output-volume').dispatchEvent(new p.window.Event('change', { bubbles: true }));
+  }
+  assert.equal(writes.length, 1);
+  writes[0].resolve();
+  await settle(() => writes.length === 2);
+  assert.deepEqual(writes.map(write => write.body.level), [0.6, 0.8]);
+  assert.equal(p.byId('output-volume').value, '80');
+  assert.equal(p.byId('output-volume-value').textContent, '80%');
+  writes[1].resolve();
+  await settle(() => p.byId('output-volume').closest('.output-volume-control').getAttribute('aria-busy') === 'false');
+  assert.equal(p.byId('output-volume').value, '80');
+  assert.equal(p.calls.slice(before).filter(call => call.path === '/api/status').length, 1, 'read back only after the latest queued update');
+});
+
+test('a rejected volume write restores the confirmed level and reports the failure', async t => {
+  let release;
+  const p = await page(t, { language: 'en', outputVolume: { device: 'physical-speaker', level: 0.5, muted: false, synchronized: true }, outputVolumeRequest: () => new Promise(resolve => { release = resolve; }) });
+  p.set('output-volume', '80');
+  p.byId('output-volume').dispatchEvent(new p.window.Event('change', { bubbles: true }));
+  assert.equal(p.byId('output-volume-value').textContent, '80%');
+  release(new Response(JSON.stringify({ error: 'The device rejected the volume update' }), { status: 500, headers: { 'Content-Type': 'application/json' } }));
+  await settle(() => p.byId('output-volume').closest('.output-volume-control').getAttribute('aria-busy') === 'false');
+  assert.equal(p.byId('output-volume').value, '50');
+  assert.equal(p.byId('output-volume-value').textContent, '50%');
+  assert.match(p.byId('error').textContent, /device rejected/);
+});
+
+test('delayed volume readback cannot undo a concurrent session start or stop', async t => {
+  const p = await page(t, { language: 'en', outputVolume: { device: 'physical-speaker', level: 0.5, muted: false, synchronized: true } });
+  for (const [action, value, running] of [['start', '60', true], ['stop', '70', false]]) {
+    let release;
+    p.statusResponse(() => new Promise(resolve => { release = resolve; }));
+    p.set('output-volume', value);
+    p.byId('output-volume').dispatchEvent(new p.window.Event('change', { bubbles: true }));
+    await settle(() => release);
+    p.statusResponse(null);
+    p.byId(action).click();
+    await settle(() => p.byId('settings').disabled === running && p.byId(action === 'start' ? 'stop' : 'start').disabled === false);
+    release();
+    await settle(() => p.byId('output-volume').closest('.output-volume-control').getAttribute('aria-busy') === 'false');
+    assert.equal(p.byId('settings').disabled, running);
+    assert.equal(p.byId('stop').hidden, !running);
+    assert.equal(p.byId('output-volume').value, value);
+  }
 });

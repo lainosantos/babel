@@ -22,6 +22,7 @@ pub mod passthrough;
 pub(crate) mod resample;
 pub mod speech;
 pub mod switching;
+pub(crate) mod volume;
 
 #[cfg(target_os = "linux")]
 pub use linux::{

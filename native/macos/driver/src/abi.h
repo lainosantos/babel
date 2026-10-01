@@ -27,6 +27,9 @@ uint8_t BabelIsSettable(uint32_t object, uint32_t property);
 int32_t BabelGetProperty(uint32_t object, uint32_t property, uint32_t scope, uint32_t element,
                          const uint8_t *qualifier, uint32_t qualifier_size, BabelProperty *result);
 int32_t BabelSetActive(uint32_t stream, uint32_t active);
+int32_t BabelSetLevel(uint32_t object, uint32_t property, float value);
+int32_t BabelSetMute(uint32_t object, uint32_t value);
+float BabelConvertLevel(uint32_t to_decibels, float value);
 int32_t BabelDeviceAction(uint32_t device, uint32_t client, uint32_t action);
 int32_t BabelZeroTimestamp(uint32_t device, uint64_t now, double *sample, uint64_t *host, uint64_t *seed);
 int32_t BabelProcess(uint32_t device, uint32_t stream, uint32_t read_input,

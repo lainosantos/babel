@@ -9,7 +9,16 @@
 #include <string.h>
 #include <unistd.h>
 
-static OSStatus changed(AudioServerPlugInHostRef host, AudioObjectID object, UInt32 count, const AudioObjectPropertyAddress *addresses) { return noErr; }
+static UInt32 volume_notifications=0,mute_notifications=0;
+static OSStatus changed(AudioServerPlugInHostRef host, AudioObjectID object, UInt32 count, const AudioObjectPropertyAddress *addresses) {
+    for(UInt32 i=0;i<count;i++) {
+        if(object==20 && addresses[i].mScope==kAudioObjectPropertyScopeOutput) {
+            if(addresses[i].mSelector==kAudioDevicePropertyVolumeScalar) volume_notifications++;
+            if(addresses[i].mSelector==kAudioDevicePropertyMute) mute_notifications++;
+        }
+    }
+    return noErr;
+}
 static void get(AudioServerPlugInDriverRef driver, AudioObjectID object, AudioObjectPropertySelector selector, AudioObjectPropertyScope scope, UInt32 bytes, void *data) {
     AudioObjectPropertyAddress address={selector,scope,kAudioObjectPropertyElementMain}; UInt32 size=0;
     assert((*driver)->HasProperty(driver,object,getpid(),&address));
@@ -70,6 +79,25 @@ int main(int argc,char **argv) {
     }
     memset(read,1,sizeof(read));assert((*driver)->DoIOOperation(driver,20,21,101,kAudioServerPlugInIOOperationReadInput,7,&cycle,read,NULL)==noErr);
     for(int i=0;i<14;i++)assert(read[i]==0);
+    UInt32 controls[2];get(driver,20,kAudioObjectPropertyControlList,kAudioObjectPropertyScopeOutput,sizeof(controls),controls);
+    assert(controls[0]==23 && controls[1]==24);
+    AudioClassID control_class;
+    get(driver,23,kAudioObjectPropertyClass,kAudioObjectPropertyScopeGlobal,sizeof(control_class),&control_class);assert(control_class==kAudioVolumeControlClassID);
+    get(driver,24,kAudioObjectPropertyClass,kAudioObjectPropertyScopeGlobal,sizeof(control_class),&control_class);assert(control_class==kAudioMuteControlClassID);
+    AudioObjectPropertyAddress volume_address={kAudioLevelControlPropertyScalarValue,kAudioObjectPropertyScopeGlobal,0};
+    Boolean settable=false;assert((*driver)->IsPropertySettable(driver,23,getpid(),&volume_address,&settable)==noErr && settable);
+    Float32 volume=.25f;
+    assert((*driver)->SetPropertyData(driver,23,getpid(),&volume_address,0,NULL,sizeof(volume),&volume)==noErr);
+    volume=0;get(driver,20,kAudioDevicePropertyVolumeScalar,kAudioObjectPropertyScopeOutput,sizeof(volume),&volume);assert(volume==.25f && volume_notifications==1);
+    AudioObjectPropertyAddress mute_address={kAudioDevicePropertyMute,kAudioObjectPropertyScopeOutput,0};UInt32 muted=1;
+    assert((*driver)->SetPropertyData(driver,20,getpid(),&mute_address,0,NULL,sizeof(muted),&muted)==noErr);
+    muted=0;get(driver,24,kAudioBooleanControlPropertyValue,kAudioObjectPropertyScopeGlobal,sizeof(muted),&muted);assert(muted==1 && mute_notifications==1);
+    assert((*driver)->DoIOOperation(driver,20,22,101,kAudioServerPlugInIOOperationWriteMix,7,&cycle,written,NULL)==noErr);
+    assert((*driver)->DoIOOperation(driver,20,21,101,kAudioServerPlugInIOOperationReadInput,7,&cycle,read,NULL)==noErr);
+    assert(memcmp(read,written,sizeof(read))==0); /* Control-only: preserve original capture. */
+    volume=NAN;assert((*driver)->SetPropertyData(driver,23,getpid(),&volume_address,0,NULL,sizeof(volume),&volume)!=noErr);
+    volume=.5f;AudioObjectPropertyAddress conversion={kAudioLevelControlPropertyConvertScalarToDecibels,kAudioObjectPropertyScopeGlobal,0};UInt32 converted_size=0;
+    assert((*driver)->GetPropertyData(driver,23,getpid(),&conversion,0,NULL,sizeof(volume),&converted_size,&volume)==noErr && converted_size==sizeof(volume) && volume==-48.f);
     assert((*driver)->StopIO(driver,10,100)==noErr);assert((*driver)->StartIO(driver,10,100)==noErr);
     assert((*driver)->DoIOOperation(driver,10,11,100,kAudioServerPlugInIOOperationReadInput,7,&cycle,read,NULL)==noErr);
     for(int i=0;i<14;i++)assert(read[i]==0);

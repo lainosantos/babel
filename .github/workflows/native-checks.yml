@@ -28,12 +28,15 @@ jobs:
           cargo fmt --manifest-path native/macos/Cargo.toml --all -- --check
           cargo fmt --manifest-path native/windows/transport/Cargo.toml -- --check
           cargo fmt --manifest-path native/windows/installer/Cargo.toml -- --check
+          cargo fmt --manifest-path native/windows/volume-control/Cargo.toml -- --check
           cargo test --locked --manifest-path native/macos/Cargo.toml
           cargo test --locked --manifest-path native/windows/transport/Cargo.toml --lib
           cargo test --locked --manifest-path native/windows/installer/Cargo.toml
+          cargo test --locked --manifest-path native/windows/volume-control/Cargo.toml
           cargo clippy --locked --manifest-path native/macos/Cargo.toml --all-targets -- -D warnings
           cargo clippy --locked --manifest-path native/windows/transport/Cargo.toml --all-targets -- -D warnings
           cargo clippy --locked --manifest-path native/windows/installer/Cargo.toml --all-targets --target x86_64-pc-windows-gnu -- -D warnings
+          cargo clippy --locked --manifest-path native/windows/volume-control/Cargo.toml --all-targets --target x86_64-pc-windows-gnu -- -D warnings
       - name: Rust and C++ transport integration outside the kernel
         run: python3 native/windows/tests/test_shim.py
       - name: Verify pinned Microsoft sources and generate WaveRT project

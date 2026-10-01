@@ -117,6 +117,34 @@ def transform(base):
     edit('Main/adapter.cpp',adapter)
     # A failed adapter allocation must release the sample's singleton claim.
     edit('Main/common.cpp',lambda t:replace(t,'        DPF(D_ERROR, ("NewAdapterCommon failed, 0x%x", ntStatus));','        InterlockedExchange(&CAdapterCommon::m_AdapterInstances, 0);\n        DPF(D_ERROR, ("NewAdapterCommon failed, 0x%x", ntStatus));'))
+    # The sample stores mixer values in one adapter-wide node array. Each of
+    # Babel's four topology endpoints instead owns isolated stereo controls.
+    # They remain control-only: the app mirrors Speaker master volume to the
+    # physical endpoint, avoiding a second attenuation of the unchanged PCM.
+    edit('Inc/basetopo.h',lambda t:replace(replace(t,
+        '#define _SIMPLEAUDIOSAMPLE_BASETOPO_H_',
+        '#define _SIMPLEAUDIOSAMPLE_BASETOPO_H_\n#include "BabelVolume.h"'),
+        '    PADAPTERCOMMON              m_AdapterCommon;',
+        '    BabelVolumeState            m_BabelVolume;\n    PADAPTERCOMMON              m_AdapterCommon;'))
+    def topology_volume(t):
+        for name in ['Volume','Mute']:
+            t=replace(t,f'ntStatus = PropertyHandler_{name}(\n                                m_AdapterCommon,',
+                        f'ntStatus = PropertyHandler_{name}(\n                                &m_BabelVolume,')
+        return t
+    edit('Main/basetopo.cpp',topology_volume)
+    def volume_helpers(t):
+        for name in ['Volume','Mute']:
+            pattern=r'(PropertyHandler_'+name+r'\s*\(\s*_In_\s+)PADAPTERCOMMON(\s+AdapterCommon,)'
+            t,count=re.subn(pattern,r'\1BabelVolumeState*\2',t)
+            if count!=1:raise ValueError('Pinned volume handler signature mismatch: '+name)
+        # ALL_CHANNELS_ID is UINT32_MAX, never an iteration bound.
+        return replace(t,'for (ULONG i=0; i<ulChannel; ++i)',
+                         'for (ULONG i=0; i<MaxChannels; ++i)',count=2) if 'for (ULONG i=0; i<ulChannel; ++i)' in t else t
+    edit('Inc/kshelper.h',lambda t:volume_helpers(replace(t,
+        '#define _SIMPLEAUDIOSAMPLE_KSHELPER_H_',
+        '#define _SIMPLEAUDIOSAMPLE_KSHELPER_H_\n#include "BabelVolume.h"')))
+    edit('Utilities/kshelper.cpp',volume_helpers)
+    shutil.copy2(ROOT/'shim/BabelVolume.h',base/'Source/Inc/BabelVolume.h')
     for name in ['BabelTransport.h','BabelTransport.cpp']:
         shutil.copy2(ROOT/'shim'/name,base/'Source/Main'/name)
     shutil.copy2(ROOT/'BabelAudio.inx',base/'Source/Main/BabelAudio.inx')
