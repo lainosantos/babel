@@ -140,13 +140,29 @@ fn completed_text(value: &Value) -> SessionResult<String> {
             "Gemini recovery transcription is incomplete",
         ));
     }
-    // An explicit completed response with an empty result is authoritative
-    // completion without recognized words. Absence of a valid result container
-    // is not interpreted as silence. Legacy `outputs` is deliberately rejected.
-    let steps = value
-        .get("steps")
-        .and_then(Value::as_array)
-        .ok_or_else(|| Failure::fatal("Gemini recovery returned invalid transcription results"))?;
+    // An empty repeated field can be omitted by the service's JSON serializer.
+    // Accept that no-speech completion only on an identified response from our
+    // finite recognizer. A partial lifecycle object, a malformed container or
+    // the obsolete `outputs` schema must never silently acknowledge audio.
+    let steps = match value.get("steps") {
+        Some(steps) => steps.as_array().ok_or_else(|| {
+            Failure::fatal("Gemini recovery returned invalid transcription results")
+        })?,
+        None if value.get("outputs").is_none()
+            && value.get("model").and_then(Value::as_str) == Some(MODEL)
+            && value
+                .get("id")
+                .and_then(Value::as_str)
+                .is_some_and(|id| !id.is_empty()) =>
+        {
+            return Ok(String::new());
+        }
+        None => {
+            return Err(Failure::fatal(
+                "Gemini recovery returned invalid transcription results (missing steps in an unidentified or unsupported response)",
+            ));
+        }
+    };
     let mut text = String::new();
     for step in steps {
         // Interactions can include the original request in its step timeline.
@@ -277,6 +293,27 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn identified_completed_response_can_omit_empty_steps() {
+        let app = Router::new().route(
+            "/interactions",
+            post(|| async {
+                Json(json!({
+                    "id":"synthetic-no-speech",
+                    "model":MODEL,
+                    "status":"completed"
+                }))
+            }),
+        );
+        let (endpoint, _server) = serve(app).await;
+        assert_eq!(
+            recover(&client(), &endpoint, "synthetic-key", "auto", &[1; 1600])
+                .await
+                .unwrap(),
+            ""
+        );
+    }
+
     #[test]
     fn echoed_user_input_never_becomes_a_recognized_transcript() {
         let value = json!({
@@ -294,6 +331,12 @@ mod tests {
         for value in [
             json!({}),
             json!({"status":"completed"}),
+            json!({"status":"completed","id":"synthetic","model":MODEL,"steps":null}),
+            json!({"status":"completed","id":"synthetic","model":MODEL,"steps":{}}),
+            json!({"status":"completed","id":"synthetic","model":"other-model"}),
+            json!({"status":"completed","id":"","model":MODEL}),
+            json!({"status":"completed","id":"synthetic","model":MODEL,"outputs":[]}),
+            json!({"status":"incomplete","id":"synthetic","model":MODEL}),
             json!({"status":"incomplete","steps":[]}),
             json!({"status":"failed","steps":[]}),
             json!({"status":"in_progress","steps":[]}),

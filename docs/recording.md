@@ -92,7 +92,7 @@ and choose how many minutes to include. The default is ten minutes, bounded
 by configured capacity. The option starts unchecked and resets after every
 successful start.
 
-The dashboard shows the combined duration of original audio available in memory. Only sources
+The dashboard shows the combined duration of recent original audio available. Only sources
 selected in **Recording** enter the WAV; **Transcription** selections remain
 independent. If available history is shorter than requested, Babel includes
 only what remains. With no history in any selected source, the option is
@@ -108,10 +108,11 @@ Retention follows active routes. Microphone history builds while Babel is the
 system default microphone or an app uses its virtual microphone; output history
 builds only while an app sends audio to Babel. Selecting the physical microphone
 as default pauses microphone capture if no app still uses Babel. Retention
-creates no files and does not send that history to transcription until you
-explicitly include it in a session. Audio remains in memory across session
+uses rotating encrypted temporary journals, with keys held only in memory.
+It does not send history to transcription or add it to recording files until
+you explicitly include it in a session. History remains available across session
 start/stop and device switches; capture gaps cannot be recovered. Quitting
-Babel loses all history. This works on Linux, macOS and Windows.
+Babel makes all retained history unrecoverable. This works on Linux, macOS and Windows.
 
 ```toml
 [history]
@@ -119,13 +120,40 @@ enabled = true
 duration_secs = 600
 ```
 
-PCM uses up to 38.4 MB for ten minutes of both sources (mono PCM16 at 16 kHz),
-plus metadata. During inclusion, selected history is shared with writers/recognizers
-without copying all audio. If retention keeps advancing during processing,
-those references can temporarily retain another PCM window. A selected prefix
-also remains shared with session recovery until the selected files complete.
+Ten minutes of both sources use about 38.4 MB of encrypted PCM on disk
+(mono PCM16 at 16 kHz), plus metadata and encryption framing. Plaintext staging
+is capped at 8 MiB independently of the selected duration; replay decrypts at
+most two 256 KiB batches per consumer. Encryption and file I/O run on the
+retention executor, independent of original routing. Failed writes retry the
+same accepted originals. If disk trouble exhausts staging capacity, the dashboard
+reports missing history rather than silently claiming complete coverage;
+original routing continues. Expired journals are released after their last
+snapshot or reader finishes. Selected prefixes remain available for session
+recovery until the selected files complete, without retaining all PCM in RAM.
 
 ## Recover an incomplete session
+
+Transient failures recover automatically while the session remains active.
+Transcription retries only the unconfirmed original window; recording and TXT
+writers retry buffered bytes at the last confirmed file offset. A partial write
+cannot duplicate a WAV passage or a transcript line on retry. WAV header rewrites
+and the final filesystem sync also retry. These waits run on processing workers,
+independently of capture and original routing. Stop closes capture while accepted
+work continues in the background. The dashboard identifies the recovering feature.
+
+Translation resumes from recent speech by default and reports skipped unconfirmed
+translation. Older originals remain available to transcription and recording.
+In **Translation → Recovery after a failure**, each direction offers an unchecked
+**Replay all pending translation with accelerated audio** option. Selecting it
+sets `replay_translation_backlog = true` for that route. The route then processes
+bounded two-second windows and acknowledges a window only after complete playback.
+It retries the same unconfirmed window on failure, preserving all pending speech,
+and plays at 1.5× when more than two seconds behind the source. The resampling also
+raises pitch. Window inference and output drain introduce additional latency;
+acceleration reduces backlog only when provider throughput allows it. A mid-window
+playback interruption can repeat that unconfirmed window. Completed windows are
+not replayed. Without this explicit opt-in, delayed recovery returns to the recent
+one-second tail instead of narrating the full backlog.
 
 Sessions using recording, transcription or translation retain accepted original
 sources independently of processing queues. If a session-file writer, recognizer
@@ -137,7 +165,7 @@ timestamps and enter recognition separately; mixing happens only in the WAV.
 Recovery uses the session's original source selections, folders, mixing settings
 and STT profiles. It creates new uniquely named files with a shared stem, leaving
 the previous partial files untouched. Cloud recognition can incur additional
-charges. A failed retry keeps the originals available for another attempt;
+charges. Unconfirmed recognition windows retry automatically; terminal setup failures keep originals available for another attempt;
 closing the dashboard does not cancel recovery. Original live routing continues.
 Recognition uses bounded windows of about thirty seconds, preserving cumulative
 source timestamps. Empty sources do not open a model connection; digital-silence
@@ -170,7 +198,7 @@ Pending originals are not evicted by age or by a failed provider. Final files
 must complete successfully, including their filesystem sync, before their
 retained originals are released. Journal staging is bounded to 64 MiB of live
 retention memory. A storage failure keeps accepted staging data in memory and
-reports failure; reaching the ceiling reports an incomplete capture instead of
+reports automatic recovery while retrying; reaching the ceiling reports an incomplete capture instead of
 silently overwriting retained data. The ceiling excludes the separately configured
 rolling/history prefix and small in-flight encryption/decryption buffers.
 The optional pre-session history prefix remains shared in RAM; enabling rolling
@@ -217,7 +245,7 @@ inaudible under louder music even though both original signals are present.
   detection, not speech recognition: loud noise at the microphone can activate it.
 
 These settings apply to the next session. They never change the physical device
-volume, original live routing, translated voice gain, STT input, or in-memory
+volume, original live routing, translated voice gain, STT input, or recent audio
 history. History included at session start uses the same recording mix exactly
 once, followed by live originals without resetting the mix state. Speaker-only
 recording never ducks itself, and microphone-only recording cannot attenuate an

@@ -264,7 +264,7 @@
   }
   function renderCredentials() {
     const previousReference = byId('agent-credential-ref')?.value;
-    const previousSecret = byId('agent-credential-value')?.value || '';
+    const previousSecrets = [byId('agent-credential-value')?.value || '', byId('agent-credential-permanent')?.value || ''];
     byId('agent-credentials')?.remove();
     const section = element('section', 'agent-credentials'); section.id = 'agent-credentials';
     section.append(localized('h3', 'agent.credentials'), localized('p', 'agent.credentials_hint', 'field-hint'));
@@ -273,28 +273,39 @@
     for (const ref of references()) select.add(new Option(ref, ref));
     if ([...select.options].some(option => option.value === previousReference)) select.value = previousReference;
     label.append(select); section.append(label);
-    const row = element('div', 'credential-row'); const valueLabel = element('label'); valueLabel.append(localized('span', 'agent.credential_value'));
-    const input = element('input'); input.id = 'agent-credential-value'; input.type = 'password'; input.autocomplete = 'new-password'; input.dataset.agentCredential = ''; input.maxLength = 16384; if (select.value === previousReference) input.value = previousSecret; valueLabel.append(input);
-    const apply = localized('button', 'agent.credential_apply', 'button secondary'); apply.type = 'button'; apply.dataset.agentCredential = '';
-    apply.addEventListener('click', () => action(async () => {
-      if (!select.value || !input.value) throw new Error(t('agent.credential_missing'));
-      await request('/agent/credentials', { method: 'POST', body: { api_key_env: select.value, key: input.value } }); input.value = ''; await credentialStatus(); message('notice', t('agent.credential_applied'));
-    }));
-    const clear = localized('button', 'agent.credential_clear', 'button quiet'); clear.type = 'button'; clear.dataset.agentCredential = '';
-    clear.addEventListener('click', () => action(async () => {
-      if (!select.value) return;
-      await request('/agent/credentials/clear', { method: 'POST', body: { api_key_env: select.value } }); input.value = ''; await credentialStatus(); message('notice', t('agent.credential_cleared'));
-    }));
-    row.append(valueLabel, apply, clear); section.append(row);
+    const inputs = [];
+    for (const permanent of [false, true]) {
+      const row = element('div', 'credential-row'); const valueLabel = element('label'); valueLabel.append(localized('span', permanent ? 'credentials.permanent' : 'credentials.temporary'));
+      const input = element('input'); input.id = permanent ? 'agent-credential-permanent' : 'agent-credential-value'; input.type = 'password'; input.autocomplete = 'new-password'; input.dataset.agentCredential = ''; input.maxLength = 4096;
+      if (select.value === previousReference) input.value = previousSecrets[Number(permanent)];
+      inputs.push(input); valueLabel.append(input);
+      const apply = localized('button', permanent ? 'credentials.save' : 'agent.credential_apply', 'button secondary'); apply.type = 'button'; apply.dataset.agentCredential = '';
+      apply.addEventListener('click', () => action(async () => {
+        if (!select.value || !input.value) throw new Error(t('agent.credential_missing'));
+        await request('/agent/credentials', { method: 'POST', body: { api_key_env: select.value, key: input.value, ...(permanent ? { storage: 'permanent' } : {}) } }); input.value = ''; await credentialStatus(); window.dispatchEvent(new CustomEvent('babel:credentials-changed')); message('notice', t(permanent ? 'credentials.saved' : 'agent.credential_applied'));
+      }));
+      const clear = localized('button', permanent ? 'credentials.remove_saved' : 'agent.credential_clear', 'button quiet'); clear.type = 'button'; clear.dataset.agentCredential = '';
+      clear.addEventListener('click', () => action(async () => {
+        if (!select.value) return;
+        await request('/agent/credentials/clear', { method: 'POST', body: { api_key_env: select.value, ...(permanent ? { storage: 'permanent' } : {}) } }); input.value = ''; await credentialStatus(); window.dispatchEvent(new CustomEvent('babel:credentials-changed')); message('notice', t(permanent ? 'credentials.saved_removed' : 'agent.credential_cleared'));
+      }));
+      row.append(valueLabel, apply, clear); section.append(row);
+    }
+    const path = element('p', 'field-hint credential-path'); path.id = 'agent-credential-path'; section.append(path);
     const status = element('p', 'field-hint'); status.id = 'agent-credential-status'; status.setAttribute('role', 'status'); section.append(status);
-    select.addEventListener('change', () => { input.value = ''; credentialStatus().catch(error => message('error', error.message)); });
+    select.addEventListener('change', () => { inputs.forEach(input => { input.value = ''; }); credentialStatus().catch(error => message('error', error.message)); });
     byId('agent-form').after(section); credentialStatus().catch(error => message('error', error.message));
   }
+  window.addEventListener('babel:credentials-changed', () => { if (byId('agent-credential-status')) credentialStatus().catch(error => message('error', error.message)); });
   async function credentialStatus() {
     const name = byId('agent-credential-ref')?.value;
     if (!name) { byId('agent-credential-status').textContent = t('agent.no_references'); return; }
     const result = await request(`/credentials?${new URLSearchParams({ api_key_env: name })}`);
-    if (byId('agent-credential-ref').value === name) byId('agent-credential-status').textContent = t(result.configured ? 'agent.credential_configured' : 'agent.credential_absent');
+    if (byId('agent-credential-ref').value === name) {
+      const source = result.source || (result.configured ? 'temporary' : 'absent');
+      byId('agent-credential-status').textContent = t(`credentials.source_${source}`) + (result.permanent && source === 'temporary' ? ` ${t('credentials.saved_available')}` : '');
+      byId('agent-credential-path').textContent = result.config_path ? t('credentials.saved_path', { path: result.config_path }) : t('credentials.priority');
+    }
   }
   async function action(operation, row) {
     if (state.busy) return;

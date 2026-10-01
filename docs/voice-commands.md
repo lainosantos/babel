@@ -182,7 +182,8 @@ current run: do not copy those ports into managed configuration. TOML remains
 restarts and receives another port.
 
 The **Local services folder** field corresponds to `agent.services_directory`.
-An empty value uses the absolute directory of the loaded TOML file. For installation
+An empty value uses `services` inside Babel’s default user configuration folder
+(`~/.config/babel/services` on Linux). For installation
 elsewhere, enter the absolute Babel folder containing `scripts` and `.tools`;
 do not enter only the binary or model folder. Relative paths are not accepted
 in this field. This folder is independent of `files.base_path`, which controls
@@ -497,7 +498,7 @@ vad_threshold = 0.012
 - `whisper_model`: managed Whisper model; default `base-q5_1`, with the legacy fallback described above. Does not change an external server's model.
 - `local_threads`: 1–32, default 2, capped by available CPUs; only managed command Whisper.
 - `idle_unload_secs`: 1–3600 seconds, default 60. Releases helpers when the microphone becomes ineligible and, independently, Needle weights after the last command. The silence filter does not make an eligible microphone inactive for this policy.
-- `services_directory`: empty uses the absolute directory of the loaded TOML; a custom value must be absolute and contain the installation structure above. It does not depend on the application's starting folder.
+- `services_directory`: empty uses the `services` subfolder of the default user configuration folder; a custom value must be absolute and contain the installation structure above. It does not depend on the application's starting folder.
 - `min_confidence`: execution threshold from 0 to 1. Needle without numeric confidence, with `suppressed_calls`, with `validation.ungrounded`, with a negation flag, or without calls results in refusal. The 0–1 interval adjusts Babel's policy; the runtime has its own internal refusal, documented for confidence below 0.1 and grounding failures. `complete()` exposes no parameter to disable that refusal, and calls in `suppressed_calls` are not promoted to execution. A threshold is an application choice, not a correctness guarantee.
 - `max_calls`: one to eight calls per command. Default four.
 - `silence_ms`: silence ending an utterance, from 200 to 2000 ms. A shorter pause improves responsiveness but may split natural sentences.

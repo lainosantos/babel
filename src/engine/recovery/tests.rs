@@ -262,6 +262,8 @@ async fn failed_history_only_session_preserves_shared_originals_and_recovers_bot
     let captured_at = Instant::now();
     history.push(RecordingLane::Microphone, &[1000; 320], captured_at);
     history.push(RecordingLane::Speaker, &[3000; 320], captured_at);
+    history.flush().await;
+    assert_eq!(history.status(captured_at).buffered_bytes, 0);
     let prefix = history.snapshot(1, captured_at);
     assert_eq!(prefix.frames.len(), 2);
     let store =

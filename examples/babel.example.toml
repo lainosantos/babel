@@ -35,7 +35,7 @@ vad_threshold = 0.01
 request_timeout_secs = 30
 
 [local_runtime]
-# Empty uses the current account's application cache; explicit paths must be absolute.
+# Empty uses models inside the user's configuration folder; custom paths must be absolute.
 directory = ""
 threads = 2
 idle_unload_secs = 60 # Release session models from RAM after this idle interval.
@@ -59,6 +59,8 @@ source_language = "pt-BR"
 target_language = "en-US"
 prompt = ""
 gain = 1.0
+# Explicit opt-in: replay every pending translation at up to 1.5x after a failure.
+replay_translation_backlog = false
 
 [speaker]
 enabled = true
@@ -69,6 +71,8 @@ source_language = "en-US"
 target_language = "pt-BR"
 prompt = ""
 gain = 1.0
+# Explicit opt-in: replay every pending translation at up to 1.5x after a failure.
+replay_translation_backlog = false
 
 [transcription]
 enabled = false
@@ -125,7 +129,7 @@ speaker = true
 directory = "recordings"
 
 [recording.mix]
-# Saved WAV only: original live routing, STT and in-memory history stay unchanged.
+# Saved WAV only: original live routing, STT and recent audio history stay unchanged.
 microphone_gain_db = 0.0 # -24..24 dB
 speaker_gain_db = 0.0 # -24..24 dB
 microphone_priority = true

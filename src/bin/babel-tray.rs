@@ -37,12 +37,7 @@ fn main() -> Result<()> {
     }
     let path = match args.config {
         Some(path) => std::path::absolute(path)?,
-        None => {
-            let path = default_config_path()?;
-            std::fs::create_dir_all(path.parent().context("Configuration has no parent")?)
-                .context("Could not create the user's Babel configuration folder")?;
-            path
-        }
+        None => default_config_path()?,
     };
     #[cfg(any(target_os = "windows", target_os = "macos"))]
     {
@@ -88,36 +83,16 @@ fn main() -> Result<()> {
 }
 
 fn default_config_path() -> Result<PathBuf> {
-    let home = std::env::home_dir().context("User home directory is unavailable")?;
-    ensure!(home.is_absolute(), "User home directory must be absolute");
-    let base = user_config_directory(
-        std::env::consts::OS,
-        &home,
-        std::env::var_os("APPDATA").map(PathBuf::from).as_deref(),
-        std::env::var_os("XDG_CONFIG_HOME")
-            .map(PathBuf::from)
-            .as_deref(),
-    );
-    Ok(base.join("babel.toml"))
+    babel_audio::config::default_path()
 }
-
+#[cfg(test)]
 fn user_config_directory(
     os: &str,
     home: &std::path::Path,
     appdata: Option<&std::path::Path>,
     xdg: Option<&std::path::Path>,
 ) -> PathBuf {
-    match os {
-        "macos" => home.join("Library/Application Support/Babel"),
-        "windows" => appdata
-            .filter(|path| path.is_absolute())
-            .map_or_else(|| home.join("AppData/Roaming"), PathBuf::from)
-            .join("Babel"),
-        _ => xdg
-            .filter(|path| path.is_absolute())
-            .map_or_else(|| home.join(".config"), PathBuf::from)
-            .join("babel"),
-    }
+    babel_audio::config::user_config_directory(os, home, appdata, xdg)
 }
 
 #[cfg(test)]

@@ -778,6 +778,15 @@ fn virtual_result(result: anyhow::Result<String>) -> Response {
 #[serde(deny_unknown_fields)]
 struct CredentialQuery {
     api_key_env: String,
+    #[serde(default)]
+    storage: CredentialStorage,
+}
+#[derive(Clone, Copy, Default, Deserialize)]
+#[serde(rename_all = "lowercase")]
+enum CredentialStorage {
+    #[default]
+    Temporary,
+    Permanent,
 }
 
 // Never derive Debug or return this payload: it contains a secret.
@@ -785,6 +794,8 @@ struct CredentialQuery {
 #[serde(deny_unknown_fields)]
 struct CredentialInput {
     api_key_env: String,
+    #[serde(default)]
+    storage: CredentialStorage,
     key: String,
 }
 
@@ -794,8 +805,14 @@ impl Drop for CredentialInput {
     }
 }
 
-async fn credential_status(Query(query): Query<CredentialQuery>) -> Json<serde_json::Value> {
-    Json(json!({ "configured": crate::credentials::configured(&query.api_key_env) }))
+async fn credential_status(
+    State(state): State<DashboardState>,
+    Query(query): Query<CredentialQuery>,
+) -> Json<serde_json::Value> {
+    let mut result = serde_json::to_value(crate::credentials::status(&query.api_key_env))
+        .expect("Credential metadata is serializable");
+    result["config_path"] = json!(state.controller.config_path());
+    Json(result)
 }
 
 async fn set_credential(
@@ -809,10 +826,13 @@ async fn set_credential(
             "End the session before changing the API key.",
         );
     }
-    operation_result(crate::credentials::set(
-        &request.api_key_env,
-        std::mem::take(&mut request.key),
-    ))
+    let key = std::mem::take(&mut request.key);
+    operation_result(match request.storage {
+        CredentialStorage::Temporary => crate::credentials::set(&request.api_key_env, key),
+        CredentialStorage::Permanent => {
+            persist_credential(&state, request.api_key_env.clone(), Some(key)).await
+        }
+    })
 }
 
 async fn clear_credential(
@@ -823,10 +843,24 @@ async fn clear_credential(
     if state.controller.status().await.running {
         return api_error(
             StatusCode::CONFLICT,
-            "End the session before removing the temporary key.",
+            "End the session before removing the API key.",
         );
     }
-    operation_result(crate::credentials::clear(&request.api_key_env))
+    operation_result(match request.storage {
+        CredentialStorage::Temporary => crate::credentials::clear(&request.api_key_env),
+        CredentialStorage::Permanent => persist_credential(&state, request.api_key_env, None).await,
+    })
+}
+
+async fn persist_credential(
+    state: &DashboardState,
+    name: String,
+    key: Option<String>,
+) -> anyhow::Result<()> {
+    let config = state.controller.config().await;
+    let path = state.controller.config_path().to_owned();
+    tokio::task::spawn_blocking(move || crate::credentials::save(&config, &path, &name, key))
+        .await?
 }
 
 #[derive(Deserialize)]
@@ -1780,7 +1814,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             serde_json::from_slice::<serde_json::Value>(&body).unwrap(),
-            json!({"configured":true})
+            json!({"configured":true,"temporary":true,"permanent":false,"environment":false,"source":"temporary","config_path":config_path})
         );
         assert!(!config_path.exists());
         let request = Request::builder()
@@ -1793,5 +1827,103 @@ mod tests {
             .unwrap();
         assert_eq!(app.oneshot(request).await.unwrap().status(), StatusCode::OK);
         assert!(!crate::credentials::configured(&environment));
+    }
+    #[tokio::test]
+    async fn saved_credentials_are_private_preserved_by_settings_and_independently_removed() {
+        let directory = tempfile::tempdir().unwrap();
+        let config_path = directory.path().join("config.toml");
+        let controller =
+            Arc::new(Controller::new(AppConfig::default(), config_path.clone()).unwrap());
+        let app = router(DashboardState {
+            controller,
+            token: Arc::from("test-capability"),
+            port: 8765,
+            mutations: Arc::new(tokio::sync::Mutex::new(())),
+        });
+        let name = format!("BABEL_TEST_SAVED_HTTP_{}", rand::random::<u64>());
+        let request = |method: &str, path: &str, body: serde_json::Value| {
+            Request::builder()
+                .method(method)
+                .uri(path)
+                .header(header::HOST, "127.0.0.1:8765")
+                .header(header::AUTHORIZATION, "Bearer test-capability")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(body.to_string()))
+                .unwrap()
+        };
+        for storage in ["permanent", "temporary"] {
+            let response = app.clone().oneshot(request("POST", "/api/credentials", json!({"api_key_env":name,"storage":storage,"key":format!("synthetic-{storage}-key")}))).await.unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+        }
+        let status_path = format!("/api/credentials?api_key_env={name}");
+        let response = app
+            .clone()
+            .oneshot(request("GET", &status_path, json!(null)))
+            .await
+            .unwrap();
+        let bytes = axum::body::to_bytes(response.into_body(), 8192)
+            .await
+            .unwrap();
+        let metadata: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(metadata["temporary"], true);
+        assert_eq!(metadata["permanent"], true);
+        assert_eq!(metadata["source"], "temporary");
+        assert!(!String::from_utf8_lossy(&bytes).contains("synthetic-"));
+        let response = app
+            .clone()
+            .oneshot(request("GET", "/api/config", json!(null)))
+            .await
+            .unwrap();
+        let revision = response.headers()[header::ETAG].clone();
+        let bytes = axum::body::to_bytes(response.into_body(), 65536)
+            .await
+            .unwrap();
+        assert!(!String::from_utf8_lossy(&bytes).contains("synthetic-"));
+        let mut config: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert!(config.get("credentials").is_none());
+        config["interface"]["language"] = json!("pt");
+        let mut update = request("PUT", "/api/config", config);
+        update.headers_mut().insert(header::IF_MATCH, revision);
+        assert_eq!(
+            app.clone().oneshot(update).await.unwrap().status(),
+            StatusCode::OK
+        );
+        let disk = std::fs::read_to_string(&config_path).unwrap();
+        assert!(disk.contains("synthetic-permanent-key"));
+        assert!(!disk.contains("synthetic-temporary-key"));
+        for storage in ["temporary", "permanent"] {
+            let response = app
+                .clone()
+                .oneshot(request(
+                    "POST",
+                    "/api/credentials/clear",
+                    json!({"api_key_env":name,"storage":storage}),
+                ))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let status = crate::credentials::status(&name);
+            if storage == "temporary" {
+                assert!(status.permanent && !status.temporary);
+            } else {
+                assert!(!status.configured);
+            }
+        }
+        assert!(
+            !std::fs::read_to_string(config_path)
+                .unwrap()
+                .contains("synthetic-permanent-key")
+        );
+        assert_eq!(
+            app.oneshot(request(
+                "POST",
+                "/api/credentials/clear",
+                json!({"api_key_env":name,"storage":"both"})
+            ))
+            .await
+            .unwrap()
+            .status(),
+            StatusCode::UNPROCESSABLE_ENTITY
+        );
     }
 }

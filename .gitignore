@@ -1,5 +1,5 @@
 /target/
-/.tools/
+/.tools
 /babel.toml
 /.env
 *.log

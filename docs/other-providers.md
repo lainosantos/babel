@@ -97,9 +97,11 @@ do not replace `transcription.providers.*.model` after migration. See the
 
 The connection retains input during setup and releases it after confirmation.
 Setup failures have bounded retries. Once translation
-has consumed audio, a connection failure leaves the session incomplete with
-its originals retained for recovery; reconnecting an empty stream cannot claim
-that earlier speech was processed.
+has consumed audio, a connection failure triggers automatic recovery from retained
+originals. Translation resumes recent speech by default; explicitly opting in to
+accelerated backlog replay preserves every pending window. See the
+[recovery policy](recording.md#recover-an-incomplete-session). Reconnecting an empty
+stream cannot claim earlier speech was processed.
 
 Stop ends capture and closes the provider's input after queued audio drains.
 For continuous translation, Babel flushes the resampler tail, sends

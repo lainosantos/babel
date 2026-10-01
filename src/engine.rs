@@ -5,6 +5,7 @@ mod history;
 mod notifications;
 mod recognition;
 mod recovery;
+mod resilience;
 mod retained;
 mod route;
 mod routing;
@@ -66,10 +67,13 @@ pub struct RouteStatus {
     pub last_output_transcript: Option<String>,
     pub device_error: Option<String>,
     pub processing_error: Option<String>,
+    pub recovering: Vec<String>,
+    pub recovery_notice: Option<String>,
 }
 #[derive(Clone, Debug, Default, Serialize)]
 pub struct EngineStatus {
     pub running: bool,
+    pub session_elapsed_secs: Option<u64>,
     pub finalizing: bool,
     pub finalizing_sessions: Vec<FinalizingSessionStatus>,
     pub routing_active: bool,
@@ -109,6 +113,19 @@ struct RouteMetrics {
     translated_audio: StdMutex<Option<Arc<AudioStats>>>,
 }
 impl RouteMetrics {
+    fn recovery(&self, feature: &str, active: bool) {
+        let mut view = self.view.lock().unwrap_or_else(|e| e.into_inner());
+        view.recovering.retain(|value| value != feature);
+        if active {
+            view.recovering.push(feature.to_owned());
+        }
+    }
+    fn recovery_notice(&self, notice: String) {
+        self.view
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .recovery_notice = Some(notice);
+    }
     fn for_configuration(
         config: &AppConfig,
         commands: &Arc<crate::commands::CommandService>,
@@ -243,6 +260,7 @@ impl RoutesClosed {
     }
 }
 struct Running {
+    started_at: Instant,
     _cancel_on_drop: tokio_util::sync::DropGuard,
     _local_runtime: Option<crate::local_runtime::RuntimeLease>,
     session: crate::session::SessionIdentity,
@@ -284,6 +302,7 @@ impl Running {
         }
         EngineStatus {
             running: !self.task.is_finished(),
+            session_elapsed_secs: Some(self.started_at.elapsed().as_secs()),
             finalizing: false,
             finalizing_sessions: Vec::new(),
             routing_active: !self.task.is_finished()
@@ -409,6 +428,10 @@ impl Controller {
         crate::storage::resolve(base_path, transcription_directory, recording_directory)
     }
     pub fn new(config: AppConfig, path: PathBuf) -> Result<Self> {
+        let path = std::path::absolute(path)?;
+        if path.is_file() {
+            crate::credentials::load_saved(&path)?;
+        }
         let local_runtime = crate::local_runtime::RuntimeManager::new();
         local_runtime.reconcile(&config);
         let mcp = Arc::new(crate::mcp_client::McpClient::new());
@@ -416,11 +439,11 @@ impl Controller {
             mcp.clone(),
             config.agent.integrations.clone(),
         ));
-        let absolute_config = std::path::absolute(&path)?;
+        let services_root = crate::config::default_path()?.with_file_name("services");
         let commands = crate::commands::CommandService::with_services_root(
             config.agent.clone(),
             command_tools.clone(),
-            absolute_config.parent().map(ToOwned::to_owned),
+            Some(services_root),
         )?;
         Ok(Self {
             path,
@@ -933,6 +956,7 @@ impl Controller {
             },
         ));
         state.running = Some(Running {
+            started_at: Instant::now(),
             _local_runtime: local_runtime_lease,
             _cancel_on_drop: cancel.clone().drop_guard(),
             session,
@@ -1122,6 +1146,7 @@ struct TranscriptSink {
 
 #[derive(Clone)]
 struct RouteIo {
+    #[cfg(test)]
     recognition: Option<recognition::Sink>,
     audio: Option<mpsc::Sender<AudioRecord>>,
     origin: TranscriptOrigin,
@@ -1146,7 +1171,7 @@ async fn run_session(
     let mut writers = JoinSet::new();
     let committed_writers = Arc::new(AtomicU64::new(0));
     let mut expected_writers = 0;
-    let transcript_tx = if let Some(writer) = io.transcript {
+    let transcript_tx = if let Some(mut writer) = io.transcript {
         expected_writers += 1;
         let (tx, rx) = mpsc::channel(128);
         let recent = io.recent.clone();
@@ -1156,6 +1181,12 @@ async fn run_session(
             cfg.transcription.microphone.then(|| mic.clone()),
             cfg.transcription.speaker.then(|| speaker.clone()),
         ];
+        let recovering = affected.clone();
+        writer.observe_recovery(Arc::new(move |active| {
+            for metrics in recovering.iter().flatten() {
+                metrics.recovery("transcript file", active);
+            }
+        }));
         writers.spawn_on(
             count_committed_writer(
                 observe_session_writer(
@@ -1171,7 +1202,7 @@ async fn run_session(
     } else {
         None
     };
-    if let Some(writer) = io.audio {
+    if let Some(mut writer) = io.audio {
         expected_writers += 1;
         let originals = io
             .retained
@@ -1187,12 +1218,31 @@ async fn run_session(
             microphone.then(|| mic.clone()),
             speaker_enabled.then(|| speaker.clone()),
         ];
+        let recovering = affected.clone();
+        writer.observe_recovery(Arc::new(move |active| {
+            for metrics in recovering.iter().flatten() {
+                metrics.recovery("recording", active);
+            }
+        }));
         writers.spawn_on(
             count_committed_writer(
                 observe_session_writer(
                     async move {
                         let (tx, rx) = mpsc::channel(128);
                         let feed = async {
+                            let mut history_reader = crate::history::HistoryReader::default();
+                            for frame in frames {
+                                tx.send(AudioRecord {
+                                    lane: frame.lane,
+                                    samples: frame
+                                        .read_samples(&mut history_reader)
+                                        .await?
+                                        .to_vec(),
+                                    captured_at: frame.captured_at,
+                                })
+                                .await
+                                .context("Recording writer closed before history completion")?;
+                            }
                             let mut readers = [
                                 microphone.then(|| originals.reader(TranscriptOrigin::Microphone)),
                                 speaker_enabled
@@ -1231,14 +1281,7 @@ async fn run_session(
                             drop(tx);
                             Ok::<_, anyhow::Error>(())
                         };
-                        let write = writer.run_with_history(
-                            rx,
-                            frames.into_iter().map(|frame| AudioRecord {
-                                lane: frame.lane,
-                                samples: frame.samples().to_vec(),
-                                captured_at: frame.captured_at,
-                            }),
-                        );
+                        let write = writer.run(rx);
                         tokio::try_join!(feed, write)?;
                         Ok(())
                     },
@@ -1325,7 +1368,7 @@ async fn run_session(
             } else {
                 None
             };
-            let recognition = if let Some(transcript) = transcript {
+            if let Some(transcript) = transcript {
                 expected_writers += 1;
                 let originals = io
                     .retained
@@ -1349,10 +1392,7 @@ async fn run_session(
                     ),
                     &processing_handle,
                 );
-                None
-            } else {
-                None
-            };
+            }
             if route.enabled {
                 expected_writers += 1;
                 let originals = io
@@ -1377,17 +1417,11 @@ async fn run_session(
                     Some(mic.clone()),
                     usage.clone(),
                 );
-                let capture_stop = cancel.clone();
                 writers.spawn_on(
                     count_committed_writer(
                         observe_session_writer(
                             async move {
-                                if let Err(error) = translation.await {
-                                    // A translator failure must restore original audio,
-                                    // rather than leave the selected endpoint silent.
-                                    capture_stop.cancel();
-                                    return Err(error);
-                                }
+                                translation.await?;
                                 if let Some(committed) = committed {
                                     committed.store(true, Ordering::Release);
                                 }
@@ -1410,7 +1444,8 @@ async fn run_session(
                     cancel.child_token(),
                     usage.clone(),
                     RouteIo {
-                        recognition,
+                        #[cfg(test)]
+                        recognition: None,
                         audio: None,
                         origin,
                         capture_changes,
@@ -2013,6 +2048,7 @@ mod tests {
         let (physical_input, _) = watch::channel("synthetic microphone".into());
         let (physical_output, _) = watch::channel("synthetic speaker".into());
         controller.state.lock().await.running = Some(Running {
+            started_at: Instant::now() - Duration::from_secs(3661),
             _cancel_on_drop: cancel.clone().drop_guard(),
             _local_runtime: None,
             session: crate::session::SessionIdentity::new(Some("Writer error")).unwrap(),
@@ -2029,6 +2065,7 @@ mod tests {
         });
         let status = controller.status().await;
         assert!(status.running && status.routing_active);
+        assert!(status.session_elapsed_secs.unwrap() >= 3661);
         assert!(
             status
                 .last_error
@@ -2125,6 +2162,7 @@ mod tests {
             let (physical_input, _) = watch::channel(String::new());
             let (physical_output, _) = watch::channel(String::new());
             controller.state.lock().await.running = Some(Running {
+                started_at: Instant::now(),
                 _cancel_on_drop: cancel.clone().drop_guard(),
                 _local_runtime: None,
                 session: crate::session::SessionIdentity::new(Some(name)).unwrap(),
@@ -2541,6 +2579,7 @@ mod tests {
         let (input, _) = watch::channel("my-mic".into());
         let (output, _) = watch::channel("my-speakers".into());
         controller.state.lock().await.running = Some(Running {
+            started_at: Instant::now(),
             _local_runtime: None,
             _cancel_on_drop: cancel.clone().drop_guard(),
             session,

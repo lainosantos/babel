@@ -1,19 +1,26 @@
 //! Session-owned original STT. Device selection controls capture, never the
 //! lifetime of already captured speech or an in-flight transcription result.
 use super::*;
-use crate::{audio::PcmFrame, provider::SpeechProvider};
+use crate::audio::PcmFrame;
+#[cfg(test)]
+use crate::provider::SpeechProvider;
 use std::collections::VecDeque;
+#[cfg(test)]
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
+#[cfg(test)]
 const QUEUED_SAMPLES: usize = INPUT_RATE as usize * 20;
+#[cfg(test)]
 const QUEUED_FRAMES: usize = 2048;
 const MAX_TIMELINE_SPANS: usize = 4096;
 
+#[cfg(test)]
 struct Original {
     frame: PcmFrame,
     _budget: OwnedSemaphorePermit,
 }
 
+#[cfg(test)]
 #[derive(Clone)]
 pub(super) struct Sink {
     sender: mpsc::Sender<Original>,
@@ -22,6 +29,7 @@ pub(super) struct Sink {
     losses: Arc<AtomicU64>,
 }
 
+#[cfg(test)]
 impl Sink {
     pub(super) fn available(&self) -> bool {
         !self.sender.is_closed()
@@ -66,6 +74,7 @@ impl Sink {
     }
 }
 
+#[cfg(test)]
 pub(super) fn start(
     config: AppConfig,
     transcript: TranscriptSink,
@@ -120,53 +129,88 @@ pub(super) fn start(
 
 /// Replay the session-owned originals with backpressure on this processing
 /// worker only. Capture and routing never wait for inference to catch up.
-pub(super) fn start_retained(
+pub(super) async fn start_retained(
     config: AppConfig,
     transcript: TranscriptSink,
     metrics: Arc<RouteMetrics>,
     origin: Instant,
     originals: Arc<retained::RetainedSession>,
-) -> impl Future<Output = Result<()>> + Send + 'static {
+) -> Result<()> {
+    let recognition = match transcript.origin {
+        TranscriptOrigin::Microphone => &config.transcription.microphone_recognition,
+        TranscriptOrigin::Speaker => &config.transcription.speaker_recognition,
+    };
+    let selected =
+        provider::stt::create(recognition, &config.transcription.providers).and_then(|provider| {
+            Ok((
+                provider,
+                provider::stt::session_config(recognition, &config.transcription.providers)?,
+            ))
+        });
+    let (provider, settings) = match selected {
+        Ok(selected) => selected,
+        Err(error) => {
+            let _ = record(&Some(transcript), TranscriptRecord::Gap).await;
+            return Err(error);
+        }
+    };
     let mut reader = originals.reader(transcript.origin);
-    let (sink, worker) = start(config, transcript, metrics, origin);
-    async move {
-        let feed = async move {
-            while let Some(record) = reader.next().await? {
-                let count = record.samples.len();
-                ensure!(
-                    count <= INPUT_RATE as usize,
-                    "Retained original frame exceeds one second"
-                );
-                if count == 0 {
-                    continue;
-                }
-                let budget = sink
-                    .budget
-                    .clone()
-                    .acquire_many_owned(count as u32)
-                    .await
-                    .context("Original recognition budget closed")?;
-                sink.sender
-                    .send(Original {
-                        frame: PcmFrame {
-                            samples: record.samples,
-                            captured_at: record.captured_at,
+    loop {
+        let Some(first) = reader.next().await? else {
+            return Ok(());
+        };
+        let mut samples = first.samples.clone();
+        let mut timeline = Timeline::default();
+        timeline.push(
+            &PcmFrame {
+                samples: first.samples,
+                captured_at: first.captured_at,
+                sample_rate: INPUT_RATE,
+            },
+            origin,
+        );
+        while samples.len() < INPUT_RATE as usize * 5 {
+            match tokio::time::timeout(Duration::from_millis(400), reader.next()).await {
+                Ok(Ok(Some(frame))) => {
+                    timeline.push(
+                        &PcmFrame {
+                            samples: frame.samples.clone(),
+                            captured_at: frame.captured_at,
                             sample_rate: INPUT_RATE,
                         },
-                        _budget: budget,
-                    })
-                    .await
-                    .map_err(|_| {
-                        anyhow!("Recognizer closed before retained originals completed")
-                    })?;
+                        origin,
+                    );
+                    samples.extend_from_slice(&frame.samples);
+                }
+                Ok(Ok(None)) | Err(_) => break,
+                Ok(Err(error)) => return Err(error),
             }
-            Ok::<_, anyhow::Error>(())
+        }
+        if samples.iter().all(|sample| *sample == 0) {
+            continue;
+        }
+        let mut attempts = 0u32;
+        let results = loop {
+            match resilience::segment(provider.clone(), settings.clone(), &samples, true).await {
+                Ok(results) => break results,
+                Err(_) => {
+                    attempts = attempts.saturating_add(1);
+                    metrics.recovery("transcription", true);
+                    metrics.reconnects.fetch_add(1, Ordering::Relaxed);
+                    // Keep this exact segment and its timeline. No speculative
+                    // text or gap is persisted before successful completion.
+                    tokio::time::sleep(resilience::delay(attempts)).await;
+                }
+            }
         };
-        tokio::try_join!(feed, worker)?;
-        Ok(())
+        for event in results {
+            persist(event, &Some(transcript.clone()), &metrics, &timeline).await?;
+        }
+        metrics.recovery("transcription", false);
     }
 }
 
+#[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 async fn run(
     provider: Arc<dyn SpeechProvider>,

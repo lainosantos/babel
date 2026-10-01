@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, ensure};
 use serde::Serialize;
+pub(crate) mod resilient;
 
 #[derive(Clone, Debug, Serialize, PartialEq, Eq)]
 pub struct FilePaths {

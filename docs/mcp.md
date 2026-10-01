@@ -112,7 +112,7 @@ Transport headers (`Host`, `Content-Length`, `Content-Type`, `Accept`, `Mcp-*`, 
 
 The MCP URL does not accept embedded usernames/passwords, fragments, or query strings; provide tokens through credentials. The MCP connection does not follow HTTP redirects, preventing headers from being forwarded to another URL. Configure the correct final endpoint.
 
-Credentials entered in the dashboard remain only in the Babel process's memory; restarting the application requires entering them again. Alternatively, configure the user's environment variables before opening Babel. Never put the secret value in a field that asks for the credential name.
+Command credentials have independent temporary and saved dashboard fields and remove buttons. Temporary values remain only in process memory; saved values persist alongside settings in the private user configuration file. Priority is temporary, saved, then environment. See [Files and keys](configuration.md#files-and-keys) for platform paths and permissions. Never put the secret value in a field that asks for the credential name.
 
 ## OAuth: browser login
 

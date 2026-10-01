@@ -189,7 +189,11 @@ async fn credential(
     operation_result(
         state
             .controller
-            .set_agent_credential(&request.api_key_env, Some(std::mem::take(&mut request.key)))
+            .update_agent_dashboard_credential(
+                &request.api_key_env,
+                Some(std::mem::take(&mut request.key)),
+                request.storage,
+            )
             .await,
     )
 }
@@ -201,9 +205,23 @@ async fn clear_credential(
     operation_result(
         state
             .controller
-            .set_agent_credential(&request.api_key_env, None)
+            .update_agent_dashboard_credential(&request.api_key_env, None, request.storage)
             .await,
     )
+}
+
+impl crate::engine::Controller {
+    async fn update_agent_dashboard_credential(
+        &self,
+        name: &str,
+        key: Option<String>,
+        storage: super::CredentialStorage,
+    ) -> anyhow::Result<()> {
+        match storage {
+            super::CredentialStorage::Temporary => self.set_agent_credential(name, key).await,
+            super::CredentialStorage::Permanent => self.set_agent_saved_credential(name, key).await,
+        }
+    }
 }
 
 #[cfg(test)]

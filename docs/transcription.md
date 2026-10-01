@@ -60,11 +60,12 @@ live originals continue to completion. The historical prefix remains ahead of
 live results in the same file. A provider or storage failure is reported and
 retained originals remain available for session recovery.
 
-The default in-memory capacity is ten minutes, adjustable under **Settings →
+The default rolling capacity is ten minutes, adjustable under **Settings →
 Recent audio history**. The dashboard shows the combined audio available;
 if less than requested is available, it includes only that interval. History
-accumulates only while routing captures audio, is not persisted before explicit
-inclusion, and disappears when Babel closes. The same controls are available
+accumulates only while routing captures audio, uses encrypted temporary files
+with keys held only in memory, and becomes unrecoverable when Babel closes.
+No history is sent to transcription before explicit inclusion. The same controls are available
 on Linux, macOS, and Windows. See [retention and inclusion in recordings](recording.md#include-audio-from-before-session-start).
 
 History recognition uses a separate STT connection from live transcription.
@@ -99,41 +100,38 @@ separate from the translation model. Input is mono PCM16 at 16 kHz. The session
 requests text output and preserves the original speech, without a target language,
 translation prompt, or voice override.
 
-Babel saves final `inputTranscription` segments; speculative
-`interimInputTranscription` hypotheses are not saved as final text.
-Babel keeps one connection and uses manual activity boundaries, ending a turn
-when input pauses, reaches the configured interval of exact digital silence,
-or reaches five seconds of PCM (plus at most one input chunk). Quiet nonzero
-samples are retained. Each explicit boundary waits up to five seconds for its
-authoritative final result. This prevents continuous incoming speech from
-remaining only an unsaved hypothesis until the session stops.
-An empty final result (including an omitted `text` field) acknowledges a turn
-with no recognized words; it does not stop recognition. Missing Live results,
-transport interruptions and session rotation use finite recognition recovery:
-Babel retains the unacknowledged original PCM in memory and submits it to
-`gemini-3.5-transcribe`, the separate file-transcription model in the same Gemini
-service. The request contains an inline WAV, `store:false` and verbatim mode; it
-creates no Files API resource or temporary audio file. Only an explicitly
-completed response commits text (or an empty result). Neither an absent Live
-message nor a generic `turnComplete` is treated as successful transcription.
+Session-owned transcription reads accepted originals from the encrypted journal
+in windows of at most five seconds plus one capture chunk. It waits for a whole
+window to complete before saving its results. A failed request retries the exact
+same PCM and capture timeline with exponential backoff from 250 ms to five
+seconds. Partial text from unsuccessful attempts is discarded; confirmed windows
+are not submitted again. Transcription preserves all original speech while
+translation may independently jump to recent audio. Stop ends capture; pending
+transcription continues until successful completion while Babel remains open.
 
-After recovery, that source continues with finite requests for the rest of the
-session, avoiding repeated Live stalls on quiet/noisy input. The other source
-remains independent. This fallback is automatic and can add API charges and
-request latency; the key must have access to **both** Gemini transcription
-models. Original audio routing remains independent of both paths.
+For these finite windows Gemini uses `gemini-3.5-transcribe`, the file-transcription
+model, through the Interactions API. Requests contain an inline WAV, `store:false`
+and verbatim mode; they create no Files API resource or temporary plaintext audio
+file. Only an explicitly completed response commits text or an empty result.
+An identified, completed `gemini-3.5-transcribe` response may omit its empty `steps`
+array when no words were recognized. Malformed result containers, unidentified
+responses and the obsolete `outputs` schema are not accepted as completion.
+The STT profile remains separate from translation and must grant access to the
+finite model. This processing introduces per-window request latency and charges.
 
-Each source retains at most six seconds of in-flight PCM (192 KB), in addition
-to the existing bounded input queue. Recovery requests have an eight-second
-whole-request deadline and a bounded retry budget. EOF also drains retained
-originals until every accepted segment completes or a provider reports failure.
-There is no session-wide finalization stopwatch: a backlog may take longer than
-an individual request. A successful recovery keeps timestamps and writes no gap
-marker. Failed recovery still reports incomplete transcription. The session
-retains its original sources separately from provider queues and offers
-[session recovery](recording.md#recover-an-incomplete-session) if finalization
-cannot finish. Active sessions use an encrypted temporary journal with a RAM-only
-key; the ten-minute rolling history is a separate memory-only feature.
+The Live adapter still validates final `inputTranscription` rather than saving
+speculative `interimInputTranscription` hypotheses. Its internal recovery protocol
+is separate from the session's durable, finite-window processing. It is not used
+as the active session's persistence checkpoint.
+
+Original routing and capture do not wait for recognition. Network failures or
+invalid results display automatic recovery without stopping the session. If
+credentials or service access remain invalid, pending work stays in recovery
+until that condition is corrected. A hardware capture gap or exhausted original
+retention space is reported as incomplete capture; later recognition cannot
+reconstruct audio that was never captured. The journal uses a RAM-only key, so
+keep Babel open until pending work finishes. See
+[session recovery](recording.md#recover-an-incomplete-session).
 
 `auto` omits the language restriction; an explicit code is sent in
 `languageCodes` (Live) or `language_codes` (recovery). This adapter provides

@@ -79,7 +79,7 @@ on the first run, it builds if the binary does not exist. It also accepts
 subcommands, for example `./scripts/run.sh doctor`.
 
 1. In **Translation**, configure the profiles used for translation.
-   Cloud providers receive a temporary key through the dashboard or the named
+   Cloud providers receive a temporary or saved key through the dashboard or the named
    environment variable. Recording or routing originals alone skips this step.
 2. On the same page, select each direction's translator. One provider's settings
    do not overwrite another's. The default is Gemini Live Translate.
@@ -194,8 +194,12 @@ needed. External endpoints, including Ollama, remain optional for custom
 installations. The UI tracks preparation and lets you choose the absolute model
 folder and recognition/translation thread limits.
 
-Keys entered in the dashboard remain in memory until the process exits; TOML
-stores only the corresponding variable name.
+Keys have separate temporary and saved dashboard fields. Temporary keys remain
+in memory until Babel exits; saved keys persist alongside settings in the user
+configuration file. Priority is temporary, saved, then environment. Each value
+has its own remove button; APIs never return secrets. See [configuration](docs/configuration.md#files-and-keys)
+for platform paths and file permissions. The session dock also shows elapsed
+session time across views and dashboard reloads.
 
 ## Session files, participants and voices
 
@@ -227,7 +231,7 @@ devices, even if its translation is off. Recording originals needs no AI provide
 transcription needs speech recognition and may use cloud services according to
 the selected profile. See [filenames and recording options](docs/configuration.md#session-files).
 
-An optional bounded memory history keeps both original directions on the same
+An optional encrypted rolling history keeps both original directions on the same
 timeline. Its default retention is ten minutes and is configurable. Including
 recent history when starting a session is an explicit opt-in under the advanced
 start options; it applies to whichever file-producing features are enabled.
@@ -253,7 +257,7 @@ model's default voice. See [native translation voices](docs/voices.md).
 babel                         Local dashboard + tray
 babel serve --port 0           Dashboard on an OS-selected port (default)
 babel serve --no-tray          Local dashboard only
-babel init                    Create babel.toml without overwriting
+babel init                    Create the user config file without overwriting
 babel devices                 List actual capture/playback IDs
 babel setup                   Create Linux devices; show driver guidance elsewhere
 babel uninstall               Remove Linux devices; show native removal guidance

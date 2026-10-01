@@ -62,9 +62,16 @@ impl Archive {
                     .history
                     .frames
                     .iter()
-                    .map(|frame| frame.samples().len() * 2)
+                    .map(|frame| frame.memory_bytes())
                     .sum::<usize>(),
-            encrypted_bytes: status.encrypted_bytes,
+            encrypted_bytes: status.encrypted_bytes
+                + self
+                    .history
+                    .frames
+                    .iter()
+                    .filter(|frame| frame.memory_bytes() == 0)
+                    .map(|frame| (frame.sample_count() * 2) as u64)
+                    .sum::<u64>(),
             error: self
                 .error
                 .lock()
@@ -324,11 +331,12 @@ async fn replay(
     let mut next = [0u64; 2];
     let mut pending = Box::pin(async {
         let mut history = archive.history.frames.iter();
+        let mut history_reader = crate::history::HistoryReader::default();
         loop {
             let frame = match history.next() {
                 Some(frame) => AudioRecord {
                     lane: frame.lane,
-                    samples: frame.samples().to_vec(),
+                    samples: frame.read_samples(&mut history_reader).await?.to_vec(),
                     captured_at: frame.captured_at,
                 },
                 None => match originals.next().await? {
@@ -413,7 +421,7 @@ async fn feed(
     Ok(())
 }
 
-async fn transcribe(
+pub(super) async fn transcribe(
     provider: Arc<dyn provider::SpeechProvider>,
     settings: SessionConfig,
     mut received: mpsc::Receiver<Vec<i16>>,
@@ -465,59 +473,58 @@ async fn transcribe_window(
     offset: u64,
     cancel: CancellationToken,
 ) -> Result<()> {
-    let (audio, received) = mpsc::channel(8);
-    let (sender, mut events) = mpsc::channel(32);
-    let model = provider.run_history(settings, received, sender, cancel);
-    let feed = async {
-        for chunk in pcm.chunks(16_000) {
-            audio
-                .send(chunk.to_vec())
-                .await
-                .context("Recovery recognizer closed")?;
-        }
-        drop(audio);
-        Ok::<_, anyhow::Error>(())
-    };
-    let collect = async {
-        while let Some(event) = events.recv().await {
-            let record = match event {
-                ProviderEvent::Transcript {
-                    input: true,
-                    text,
-                    mut metadata,
-                } => {
-                    metadata.start_ms = metadata.start_ms.map(|ms| ms.saturating_add(offset));
-                    metadata.end_ms = metadata.end_ms.map(|ms| ms.saturating_add(offset));
-                    metadata.alignment_ms =
-                        metadata.alignment_ms.map(|ms| ms.saturating_add(offset));
-                    TranscriptRecord::Text {
-                        input: true,
-                        text,
-                        metadata,
-                        received_at: chrono::Utc::now().to_rfc3339(),
+    let mut attempts = 0u32;
+    let results = loop {
+        tokio::select! {
+            biased;
+            _ = cancel.cancelled() => bail!("Original transcription stopped before completion"),
+            result = resilience::segment(provider.clone(), settings.clone(), pcm, true) => {
+                match result {
+                    Ok(results) => break results,
+                    Err(_) => {
+                        attempts = attempts.saturating_add(1);
+                        tokio::select! {
+                            _ = cancel.cancelled() => bail!("Original transcription stopped before completion"),
+                            _ = tokio::time::sleep(resilience::delay(attempts)) => {},
+                        }
                     }
                 }
-                ProviderEvent::TurnComplete => TranscriptRecord::TurnComplete,
-                ProviderEvent::Interrupted
-                | ProviderEvent::Reconnecting { .. }
-                | ProviderEvent::Warning { .. } => {
-                    bail!(
-                        "Original transcription did not complete; retained audio is still available"
-                    )
-                }
-                _ => continue,
-            };
-            transcript
-                .send(TranscriptRecord::Routed {
-                    origin,
-                    record: Box::new(record),
-                })
-                .await
-                .context("Recovered transcript closed")?;
+            }
         }
-        Ok(())
     };
-    tokio::try_join!(feed, model, collect)?;
+    for event in results {
+        let record = match event {
+            ProviderEvent::Transcript {
+                input: true,
+                text,
+                mut metadata,
+            } => {
+                metadata.start_ms = metadata.start_ms.map(|ms| ms.saturating_add(offset));
+                metadata.end_ms = metadata.end_ms.map(|ms| ms.saturating_add(offset));
+                metadata.alignment_ms = metadata.alignment_ms.map(|ms| ms.saturating_add(offset));
+                TranscriptRecord::Text {
+                    input: true,
+                    text,
+                    metadata,
+                    received_at: chrono::Utc::now().to_rfc3339(),
+                }
+            }
+            ProviderEvent::TurnComplete => TranscriptRecord::TurnComplete,
+            ProviderEvent::Interrupted
+            | ProviderEvent::Reconnecting { .. }
+            | ProviderEvent::Warning { .. } => {
+                bail!("Original transcription did not complete; retained audio is still available")
+            }
+            _ => continue,
+        };
+        transcript
+            .send(TranscriptRecord::Routed {
+                origin,
+                record: Box::new(record),
+            })
+            .await
+            .context("Recovered transcript closed")?;
+    }
     Ok(())
 }
 

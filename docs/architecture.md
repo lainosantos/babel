@@ -7,7 +7,7 @@ For each direction, while Babel is selected/in use:
   capture → interleaved float32, source rate/channels → bounded queues
      ├─ translation off → audio executor → original playback
      └─ bounded copy → retention executor → PCM16 mono 16 kHz
-        ├─ in-memory history
+        ├─ encrypted rolling history
         └─ session originals → recent RAM + encrypted temporary journal
            ├─ recording cursor → mix original sources → one .wav file
            ├─ transcription cursors → STT → one .txt file with source labels
@@ -258,16 +258,16 @@ When a route's activity condition disappears, its supervisor cancels capture,
 original playback and voice-command activation. Translated playback has a separate
 selection fence that remains alive through session finalization. Losing the relevant
 OS output selection, an inspection failure, or a changed selection epoch interrupts
-translation and fences queued playback; originals remain available for explicit
-recovery. Speaker capture activity and accepted playback authorization are distinct:
+translation and fences queued playback; originals remain available for automatic
+recovery once that direction is selected again. Speaker capture activity and accepted playback authorization are distinct:
 an inactive speaker remains authorized when Babel is the default output. Linux
 also accepts an external app's retained corked stream; native platforms require
 an active app client or the system default. When an app uses Babel independently
 of the default and ceases observable endpoint use, Babel cannot reliably infer
-the app's persistent choice. Any interrupted tail then requires explicit
-reselection and recovery. A rapid off/on transition cannot let delayed
-provider output enter the next activation. A translation interruption ends that
-session's capture and restores original routing when selected. Original STT is
+the app's persistent choice. Any interrupted tail then requires explicit reselection before automatic
+recovery can play audio. A rapid off/on transition cannot let delayed
+provider output enter the next activation. A processing interruption does not cancel the session's capture; endpoint
+selection alone controls whether the capture route is active. Original STT is
 owned by the session,
 with one lazily opened recognizer per source and bounded pending PCM. It can
 finish a result after a device pauses, but has no playback handles and receives
@@ -279,8 +279,8 @@ even rapid off/on changes coalesced by the control channel. TXT/WAV writers fini
 under the original session identity, and WAV retains the session clock.
 An original-only pause does not create a spurious
 transcription interruption marker. Gemini original STT keeps unacknowledged PCM
-across Live failures and uses finite recognition; successful recovery preserves
-its clock without a gap marker. Other interruptions and processing losses remain
+in bounded finite windows and retries the same unconfirmed window; successful
+recovery preserves its clock without a gap marker. Other interruptions and processing losses remain
 visible. Inspection failure closes routes and appears in the dashboard.
 On Windows, a COM MTA worker queries the system's default input/output roles and checks
 WASAPI sessions on the opposite side of each Babel cable (or optional VB-Audio
@@ -404,8 +404,13 @@ Conversational Gemini uses resumption when available; continuous translation
 may open a new session. A rejected key/model must not create an endless
 reconnection loop.
 
-Saved configuration contains credential references; temporary keys stay in
-memory with zeroization on replacement/drop. Necessary copies in HTTP/TLS
+Saved configuration contains credential references and explicitly saved keys
+in a private `[credentials]` table. Temporary and saved values are independent,
+with temporary > saved > environment precedence. Temporary keys stay only in
+memory; saved keys load into a separate zeroizing cache at startup. Both caches
+zeroize values on replacement/drop. Control tasks perform atomic disk writes;
+original routing and audio callbacks never read or write credential files.
+Public configuration and credential metadata APIs exclude secret values. Necessary copies in HTTP/TLS
 headers and dependency buffers are not a guarantee of cryptographic erasure
 of all process memory. Remote errors are sanitized so they do not expose
 headers, tokens, user audio or text.
@@ -451,9 +456,15 @@ releases the journal and RAM-only key. The optional pre-session history remains 
 Provider input EOF requests completion, rather than cancellation. Local segment
 queues, translated playback and file writers drain their accepted input. There is
 no blanket 15/30-second deadline for finalization. Per-request provider failures
-are still errors, never proof of completion; retained originals support explicit
-recovery. A failed translation route may replay speech already heard because the
-APIs do not supply a durable acknowledgement for each original frame. Translation
+never acknowledge completion. Transcription buffers results until whole-window
+success, retries the same original PCM on failure, then advances its capture clock.
+File writers retry the same buffered bytes at an absolute confirmed offset after
+partial I/O. These consumers backpressure their own readers, never original routing.
+Translation defaults to recent speech after failure, reporting skipped work while
+all originals stay available to transcription and recording. An explicit per-route
+`replay_translation_backlog` opt-in uses finite windows, whole-window playback
+checkpoints and 1.5x PCM playback while behind. A playback failure can repeat the
+unconfirmed window; previously completed windows remain committed. Translation
 routes already completed are not repeated during file recovery.
 
 All of this runs outside original audio callbacks and the original routing

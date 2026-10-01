@@ -31,6 +31,307 @@ pub(super) async fn run(
     metrics: Arc<RouteMetrics>,
     playback: watch::Receiver<String>,
     mirror_metrics: Option<Arc<RouteMetrics>>,
+    usage: watch::Receiver<audio::activity::EndpointUse>,
+) -> Result<()> {
+    let mut reader = retained.reader(origin);
+    if !route.replay_translation_backlog {
+        if streaming(
+            cfg.clone(),
+            route.clone(),
+            origin,
+            retained.clone(),
+            metrics.clone(),
+            playback.clone(),
+            mirror_metrics.clone(),
+            usage.clone(),
+        )
+        .await
+        .is_ok()
+        {
+            return Ok(());
+        }
+        metrics.recovery("translation", true);
+        if let Some(at) = reader.resume_recent() {
+            metrics.recovery_notice(format!(
+                "Translation resumed from recent audio at +{:.1} s; earlier unconfirmed translation was skipped. Original transcription and recording preserve the full audio.",
+                at.saturating_duration_since(retained.origin()).as_secs_f64()));
+        }
+    }
+    let profile = cfg.profile(&route.provider).clone();
+    let provider =
+        provider::create_configured_provider(&route.provider, &profile, &cfg.providers.local)?;
+    let settings = SessionConfig {
+        model: profile.model,
+        api_key_env: profile.api_key_env,
+        voice: if route.provider == "local" {
+            route.resolved_voice.clone()
+        } else {
+            String::new()
+        },
+        source_language: route.source_language.clone(),
+        target_language: route.target_language.clone(),
+        prompt: route.prompt.clone(),
+        vad_silence_ms: cfg.audio.quality.vad_silence_ms(),
+        connect_timeout_secs: profile.connect_timeout_secs,
+        max_reconnect_attempts: 0,
+        input_transcription: false,
+        output_transcription: false,
+    };
+    let mut attempts = 0u32;
+    loop {
+        let checkpoint = reader.bookmark();
+        let Some(first) = reader.next().await? else {
+            metrics.recovery("translation", false);
+            return Ok(());
+        };
+        let mut samples = first.samples;
+        let start = first.captured_at;
+        let mut end = start;
+        while samples.len() < INPUT_RATE as usize * 2 {
+            match tokio::time::timeout(Duration::from_millis(200), reader.next()).await {
+                Ok(Ok(Some(frame))) => {
+                    end = frame.captured_at;
+                    samples.extend_from_slice(&frame.samples);
+                }
+                Ok(Ok(None)) | Err(_) => break,
+                Ok(Err(error)) => return Err(error),
+            }
+        }
+        if samples.iter().all(|sample| *sample == 0) {
+            continue;
+        }
+        let result = async {
+            let results =
+                resilience::segment(provider.clone(), settings.clone(), &samples, false).await?;
+            let lag = retained
+                .latest_capture(origin)
+                .unwrap_or(end)
+                .saturating_duration_since(end);
+            let accelerated = route.replay_translation_backlog && lag > Duration::from_secs(2);
+            play_segment(
+                &cfg,
+                &route,
+                origin,
+                &metrics,
+                &playback,
+                mirror_metrics.as_ref(),
+                usage.clone(),
+                results,
+                accelerated,
+            )
+            .await
+        }
+        .await;
+        match result {
+            Ok(()) => {
+                attempts = 0;
+                if !route.replay_translation_backlog
+                    && retained
+                        .latest_capture(origin)
+                        .unwrap_or(end)
+                        .saturating_duration_since(end)
+                        > Duration::from_secs(3)
+                    && let Some(at) = reader.resume_recent()
+                {
+                    metrics.recovery_notice(format!(
+                        "Translation skipped +{:.1}–{:.1} s to resume recent speech. Original transcription and recording preserve the full audio.",
+                        end.saturating_duration_since(retained.origin()).as_secs_f64(),
+                        at.saturating_duration_since(retained.origin()).as_secs_f64()));
+                }
+                metrics.recovery("translation", false);
+                metrics.state("running");
+            }
+            Err(_) => {
+                attempts = attempts.saturating_add(1);
+                metrics.recovery("translation", true);
+                metrics.reconnects.fetch_add(1, Ordering::Relaxed);
+                reader.rewind(checkpoint);
+                tokio::time::sleep(resilience::delay(attempts)).await;
+                if !route.replay_translation_backlog
+                    && let Some(at) = reader.resume_recent()
+                {
+                    metrics.recovery_notice(format!(
+                            "Translation skipped the unconfirmed interval +{:.1}–{:.1} s to resume recent speech. Original transcription and recording preserve the full audio.",
+                            start.saturating_duration_since(retained.origin()).as_secs_f64(),
+                            at.saturating_duration_since(retained.origin()).as_secs_f64()));
+                }
+            }
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn play_segment(
+    cfg: &AppConfig,
+    route: &RouteConfig,
+    origin: TranscriptOrigin,
+    metrics: &Arc<RouteMetrics>,
+    playback: &watch::Receiver<String>,
+    mirror_metrics: Option<&Arc<RouteMetrics>>,
+    usage: watch::Receiver<audio::activity::EndpointUse>,
+    results: Vec<ProviderEvent>,
+    accelerated: bool,
+) -> Result<()> {
+    let selected = playback_selection(&usage.borrow(), origin)?;
+    let mirror = origin == TranscriptOrigin::Speaker
+        && cfg.audio.microphone_source == crate::config::MicrophoneSource::SpeakerOutput;
+    let cancel = CancellationToken::new();
+    let _guard = cancel.clone().drop_guard();
+    let stats = Arc::new(AudioStats {
+        translated_playback: true,
+        playback_mirror: (!mirror)
+            .then(|| metrics.audio.playback_mirror.clone())
+            .flatten(),
+        ..Default::default()
+    });
+    let mirror_stats = Arc::new(AudioStats {
+        translated_playback: true,
+        ..Default::default()
+    });
+    *metrics
+        .translated_audio
+        .lock()
+        .unwrap_or_else(|error| error.into_inner()) = Some(stats.clone());
+    if mirror && let Some(metrics) = mirror_metrics {
+        *metrics
+            .translated_audio
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()) = Some(mirror_stats.clone());
+    }
+    let (tx, rx) = mpsc::channel(8);
+    let (mirror_tx, mirror_rx) = mpsc::channel(8);
+    let (_, mic_device) = watch::channel(cfg.microphone.playback_device.clone());
+    let options = AudioOptions {
+        sample_rate: OUTPUT_RATE,
+        channels: 1,
+        frame_ms: OUTPUT_FRAME_MS,
+        latency_ms: cfg.audio.device_latency_ms,
+        queue_ms: cfg.audio.playback_queue_ms,
+    };
+    let feed = async {
+        for event in results {
+            if let ProviderEvent::Audio {
+                mut samples,
+                sample_rate,
+            } = event
+            {
+                ensure!(
+                    sample_rate == OUTPUT_RATE,
+                    "Translator returned unsupported audio sample rate"
+                );
+                if accelerated {
+                    samples = accelerate(&samples);
+                }
+                apply_gain(&mut samples, route.gain);
+                metrics
+                    .translated_samples
+                    .fetch_add(samples.len() as u64, Ordering::Relaxed);
+                for chunk in samples.chunks(OUTPUT_FRAME_SAMPLES) {
+                    tx.send(PlaybackCommand::Audio {
+                        samples: chunk.to_vec(),
+                        generation: 0,
+                    })
+                    .await
+                    .context("Translated playback closed")?;
+                    if mirror {
+                        mirror_tx
+                            .send(PlaybackCommand::Audio {
+                                samples: chunk.to_vec(),
+                                generation: 0,
+                            })
+                            .await
+                            .context("Translated mirror closed")?;
+                    }
+                }
+            }
+        }
+        drop(tx);
+        drop(mirror_tx);
+        Ok::<_, anyhow::Error>(())
+    };
+    let primary = playback_worker(
+        playback.borrow().clone(),
+        options,
+        rx,
+        playback.clone(),
+        cancel.child_token(),
+        stats.clone(),
+    );
+    let mirrored = async {
+        if mirror {
+            selected_mirror(
+                mirror_rx,
+                usage.clone(),
+                mirror_stats.clone(),
+                |received, stopped| {
+                    playback_worker(
+                        cfg.microphone.playback_device.clone(),
+                        options,
+                        received,
+                        mic_device.clone(),
+                        stopped,
+                        mirror_stats.clone(),
+                    )
+                },
+            )
+            .await
+        } else {
+            Ok(())
+        }
+    };
+    let microphone_gate =
+        (origin == TranscriptOrigin::Microphone || mirror).then(|| output_gate("microphone"));
+    let speaker_gate = (origin == TranscriptOrigin::Speaker).then(|| output_gate("speaker"));
+    let _microphone = match microphone_gate {
+        Some(gate) => Some(gate.lock_owned().await),
+        None => None,
+    };
+    let _speaker = match speaker_gate {
+        Some(gate) => Some(gate.lock_owned().await),
+        None => None,
+    };
+    complete_selected(
+        usage.clone(),
+        origin,
+        selected,
+        &cancel,
+        [&stats, &mirror_stats],
+        async {
+            tokio::try_join!(feed, primary, mirrored)?;
+            ensure!(
+                stats.dropped_frames.load(Ordering::Acquire) == 0
+                    && mirror_stats.dropped_frames.load(Ordering::Acquire) == 0,
+                "Translated playback was interrupted before checkpoint"
+            );
+            Ok(())
+        },
+    )
+    .await
+}
+
+/// The explicit backlog option shortens PCM to 2/3 duration (1.5x playback).
+/// Interpolation is confined to processing; native transport keeps its clock.
+fn accelerate(samples: &[i16]) -> Vec<i16> {
+    (0..samples.len() * 2 / 3)
+        .map(|index| {
+            let position = index as f64 * 1.5;
+            let base = position as usize;
+            let left = f64::from(samples[base]);
+            let right = f64::from(samples[(base + 1).min(samples.len() - 1)]);
+            (left + (right - left) * (position - base as f64)).round() as i16
+        })
+        .collect()
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn streaming(
+    cfg: AppConfig,
+    route: RouteConfig,
+    origin: TranscriptOrigin,
+    retained: Arc<retained::RetainedSession>,
+    metrics: Arc<RouteMetrics>,
+    playback: watch::Receiver<String>,
+    mirror_metrics: Option<Arc<RouteMetrics>>,
     mut usage: watch::Receiver<audio::activity::EndpointUse>,
 ) -> Result<()> {
     let mut reader = retained.reader(origin);
@@ -411,6 +712,18 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn accelerated_pcm_shortens_backlog_without_changing_transport_rate() {
+        assert!(accelerate(&[]).is_empty());
+        assert!(accelerate(&[1]).is_empty());
+        assert_eq!(
+            accelerate(&[0, 100, 200, 300, 400, 500]),
+            vec![0, 150, 300, 450]
+        );
+        assert_eq!(accelerate(&vec![i16::MAX; 24000]), vec![i16::MAX; 16000]);
+        assert_eq!(accelerate(&vec![i16::MIN; 24000]), vec![i16::MIN; 16000]);
+    }
 
     #[tokio::test]
     async fn capture_stop_preserves_selected_translation_completion() {

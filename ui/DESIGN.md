@@ -101,3 +101,21 @@ keyboard focus and an expanded disclosure pause that timeout. A new activation
 replaces the previous notification and cancels its timeout. Dismiss and Escape
 hide the whole activation, including later updates. Local service setup errors
 remain contextual on Commands rather than appearing as failed spoken commands.
+
+## Credential lifetimes and session duration
+
+Use two left-aligned credential rows for each reference: temporary above saved,
+with independent password drafts and remove buttons. Keep existing white/slate
+surfaces and Manrope; lifetime labels, active-source status and the saved file
+path explain precedence without returning either value. These controls use the
+same layout in translation, transcription and Commands. The session dock shows
+a quiet tabular HH:MM:SS counter from backend elapsed time, retained across views
+and page reloads, hidden when the session is stopped or status is unavailable.
+
+## Recent audio storage
+
+Keep the existing history checkbox and duration display. Use “recent audio”
+consistently rather than claiming it lives only in memory. The privacy hint
+explains encrypted temporary storage and the memory-only key. The existing
+buffer status line shows storage recovery or known capture gaps while retaining
+the authoritative duration; do not add animation, modals or an automatic opt-in.

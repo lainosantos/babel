@@ -11,6 +11,18 @@ from unittest.mock import patch
 import setup_whisper as setup
 
 
+class UserStorageTests(unittest.TestCase):
+    def test_default_paths_match_platform_configuration_storage(self):
+        home = Path(tempfile.gettempdir()) / "babel-test-home"
+        custom = home / "custom"
+        self.assertEqual(setup.default_services_root("linux", home, {}), home / ".config/babel/services")
+        self.assertEqual(setup.default_services_root("darwin", home, {}), home / "Library/Application Support/Babel/services")
+        self.assertEqual(setup.default_services_root("win32", home, {}), home / "AppData/Roaming/Babel/services")
+        self.assertEqual(setup.default_services_root("linux", home, {"XDG_CONFIG_HOME": str(custom)}), custom / "babel/services")
+        self.assertEqual(setup.default_services_root("linux", home, {"XDG_CONFIG_HOME": "relative"}), home / ".config/babel/services")
+        self.assertEqual(setup.default_services_root("win32", home, {"APPDATA": str(custom)}), custom / "Babel/services")
+
+
 class ModelTests(unittest.TestCase):
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory()

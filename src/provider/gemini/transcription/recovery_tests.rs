@@ -350,7 +350,10 @@ async fn missing_live_noise_final_recovers_empty_then_keeps_processing_new_speec
         .unwrap();
     }));
     let http = http(vec![
-        (StatusCode::OK, completed("")),
+        (
+            StatusCode::OK,
+            json!({"id":"synthetic-no-speech","model":"gemini-3.5-transcribe","status":"completed"}),
+        ),
         (StatusCode::OK, completed("Speech after quiet input.")),
     ])
     .await;

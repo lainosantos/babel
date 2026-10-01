@@ -699,3 +699,12 @@ footer { display: flex; justify-content: space-between; gap: 20px; padding: 28px
 .output-volume-slider input:hover:not(:disabled)::-moz-range-thumb { box-shadow: 0 0 0 4px var(--output-soft); }
 .output-volume-slider input:disabled { opacity: .5; cursor: default; }
 .output-volume-control > .field-hint { margin-top: 6px; font-size: 11px; }
+
+.recovery-details .checkbox-label { padding-top: 8px; max-width: 70ch; }
+.recovery-details .field-hint { max-width: 70ch; }
+.recovery-status { margin: 0 0 18px; padding: 10px 12px; border-left: 3px solid var(--warm); background: var(--raised); color: var(--text); font-size: 12px; line-height: 1.7; overflow-wrap: anywhere; }
+
+.credential-permanent { margin-top: 16px; padding-top: 16px; }
+.credential-path { overflow-wrap: anywhere; }
+.session-timer { margin: 3px 0; color: var(--muted); font-size: 12px; }
+.session-timer time { margin-left: 6px; color: var(--text); font-variant-numeric: tabular-nums; font-weight: 700; }

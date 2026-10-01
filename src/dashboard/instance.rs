@@ -24,7 +24,17 @@ impl InstanceGuard {
         } else {
             let parent = absolute
                 .parent()
-                .context("Configuration directory unavailable")?
+                .context("Configuration directory unavailable")?;
+            if !parent.exists() {
+                std::fs::create_dir_all(parent)
+                    .context("Could not create the configuration directory")?;
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700))?;
+                }
+            }
+            let parent = parent
                 .canonicalize()
                 .context("Configuration directory unavailable")?;
             parent.join(absolute.file_name().context("Invalid configuration name")?)
@@ -85,6 +95,26 @@ impl InstanceGuard {
 mod tests {
     use super::*;
 
+    #[test]
+    fn first_run_creates_private_user_directory_without_saving_settings() {
+        let directory = tempfile::tempdir().unwrap();
+        let config = directory.path().join("new-user/babel/babel.toml");
+        let guard = InstanceGuard::acquire(&config).unwrap();
+        assert_eq!(guard.config_path(), config);
+        assert!(!config.exists());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                std::fs::metadata(config.parent().unwrap())
+                    .unwrap()
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                0o700
+            );
+        }
+    }
     #[test]
     fn duplicate_configuration_is_blocked_until_its_owner_exits() {
         let directory = tempfile::tempdir().unwrap();

@@ -12,6 +12,7 @@ pub(super) async fn run_route(
     io: RouteIo,
 ) -> Result<()> {
     let RouteIo {
+        #[cfg(test)]
         recognition,
         audio: mut audio_tx,
         origin,
@@ -100,6 +101,7 @@ pub(super) async fn run_route(
         speech: audio::speech::SpeechTap::new(),
         history: &history,
         recording: &mut audio_tx,
+        #[cfg(test)]
         recognition: recognition.as_ref(),
         retained: retained.as_deref(),
         origin,
@@ -124,7 +126,10 @@ pub(super) async fn run_route(
                     if let Some(frame) = originals.retain(&original, false) {
                         metrics.input_level.store(rms(&frame.samples).to_bits(), Ordering::Relaxed);
                     }
-                    if retained.as_ref().is_some_and(|retained| retained.status().error.is_some()) {
+                    if let Some(retained) = &retained {
+                        metrics.recovery("original audio storage", retained.storage_recovering());
+                    }
+                    if retained.as_ref().is_some_and(|retained| retained.capture_requires_stop()) {
                         bail!("Original retention needs attention; capture stopped while accepted audio remains retained");
                     }
                 }
@@ -163,6 +168,7 @@ pub(super) async fn run_route(
     originals.drain(&mut captured_rx);
     drop(originals);
     drop(audio_tx);
+    #[cfg(test)]
     drop(recognition);
     metrics.input_level.store(0, Ordering::Relaxed);
     metrics.state(if result.is_ok() && cleanup.is_ok() {
@@ -181,6 +187,7 @@ struct OriginalSidecar<'a> {
     speech: audio::speech::SpeechTap,
     history: &'a crate::history::HistoryBuffer,
     recording: &'a mut Option<mpsc::Sender<AudioRecord>>,
+    #[cfg(test)]
     recognition: Option<&'a recognition::Sink>,
     retained: Option<&'a retained::RetainedSession>,
     origin: TranscriptOrigin,
@@ -190,6 +197,16 @@ struct OriginalSidecar<'a> {
 }
 
 impl OriginalSidecar<'_> {
+    fn has_recognition(&self) -> bool {
+        #[cfg(test)]
+        {
+            self.recognition.is_some()
+        }
+        #[cfg(not(test))]
+        {
+            false
+        }
+    }
     fn report_incomplete(&self, reason: &str) {
         self.metrics.report_processing_error(reason);
         if let Some(retained) = self.retained {
@@ -211,7 +228,7 @@ impl OriginalSidecar<'_> {
             .sidecar_dropped_frames
             .load(Ordering::Relaxed);
         if losses > self.copy_losses
-            && (self.recording.is_some() || self.recognition.is_some() || self.retained.is_some())
+            && (self.recording.is_some() || self.has_recognition() || self.retained.is_some())
         {
             self.report_missing_originals(
                 "Original audio was lost before session retention; those missing frames cannot be recovered",
@@ -224,7 +241,7 @@ impl OriginalSidecar<'_> {
             .capture_lost_frames
             .load(Ordering::Relaxed);
         if capture_losses > self.capture_losses
-            && (self.recording.is_some() || self.recognition.is_some() || self.retained.is_some())
+            && (self.recording.is_some() || self.has_recognition() || self.retained.is_some())
         {
             self.report_missing_originals(
                 "Captured original audio was discarded before session processing; those missing frames cannot be recovered",
@@ -240,7 +257,7 @@ impl OriginalSidecar<'_> {
     ) -> Option<audio::PcmFrame> {
         self.observe_copy_losses();
         if !needs_translation
-            && self.recognition.is_none()
+            && !self.has_recognition()
             && self.recording.is_none()
             && self.retained.is_none()
             && !self.history.enabled()
@@ -291,6 +308,7 @@ impl OriginalSidecar<'_> {
                 // after either congestion or a permanently closed writer.
             }
         }
+        #[cfg(test)]
         if let Some(recognizer) = self.recognition {
             if recognizer.available() {
                 let accepted = recognizer.submit(
@@ -555,7 +573,7 @@ mod tests {
                 snapshot
                     .frames
                     .iter()
-                    .map(|frame| frame.samples().len())
+                    .map(|frame| frame.sample_count())
                     .sum::<usize>(),
                 480
             );
@@ -844,12 +862,14 @@ mod tests {
             assert!(recorded.try_recv().is_err());
             let snapshot = history.snapshot(600, Instant::now());
             assert_eq!(snapshot.frames.len(), 3);
-            assert!(
-                snapshot
-                    .frames
-                    .iter()
-                    .all(|frame| frame.lane == lane && frame.samples() == [4096; 160])
-            );
+            let mut reader = crate::history::HistoryReader::default();
+            for frame in &snapshot.frames {
+                assert_eq!(frame.lane, lane);
+                assert_eq!(
+                    frame.read_samples(&mut reader).await.unwrap().as_slice(),
+                    &[4096; 160]
+                );
+            }
             let TranscriptRecord::Routed {
                 origin: source,
                 record,

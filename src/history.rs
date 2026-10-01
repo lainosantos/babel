@@ -1,5 +1,7 @@
-//! Bounded in-memory originals. Capture workers supply mono PCM16 at 16 kHz;
-//! this module never opens a device, writes files, or contacts a provider.
+//! Rolling originals with bounded memory staging and encrypted disk storage.
+//! Capture workers supply mono PCM16 at 16 kHz; only retention workers perform
+//! disk I/O. Snapshots pin encrypted references and decrypt incrementally.
+mod storage;
 use crate::{config::HistoryConfig, recording::RecordingLane};
 use serde::Serialize;
 use std::{
@@ -11,6 +13,7 @@ use std::{
     },
     time::{Duration, Instant},
 };
+pub use storage::Reader as HistoryReader;
 
 const SAMPLE_RATE: usize = 16_000;
 const SAMPLE_NANOS: u64 = 1_000_000_000 / SAMPLE_RATE as u64;
@@ -22,14 +25,25 @@ const MAX_FRAMES_PER_SECOND: usize = 200;
 #[derive(Clone, Debug)]
 pub struct HistoryFrame {
     pub lane: RecordingLane,
-    /// Shared storage; use samples() because the retained interval may be clipped.
-    pub samples: Arc<[i16]>,
+    /// Shared storage; use read_samples() because the retained interval may be clipped.
+    pub samples: Arc<storage::Audio>,
     pub captured_at: Instant,
     range: Range<usize>,
 }
 impl HistoryFrame {
-    pub fn samples(&self) -> &[i16] {
-        &self.samples[self.range.clone()]
+    pub fn sample_count(&self) -> usize {
+        self.range.len()
+    }
+
+    pub fn memory_bytes(&self) -> usize {
+        self.samples.memory_bytes()
+    }
+
+    pub async fn read_samples(
+        &self,
+        reader: &mut HistoryReader,
+    ) -> anyhow::Result<zeroize::Zeroizing<Vec<i16>>> {
+        reader.samples(&self.samples, self.range.clone()).await
     }
 
     pub fn started_at(&self) -> Instant {
@@ -70,7 +84,12 @@ pub struct HistoryStatus {
     /// Retained PCM durations per lane, excluding gaps.
     pub microphone_secs: f64,
     pub speaker_secs: f64,
+    /// Actual plaintext staging, independent of the configured rolling duration.
     pub buffered_bytes: usize,
+    pub retained_bytes: usize,
+    pub encrypted_bytes: usize,
+    pub storage_error: Option<String>,
+    pub dropped_frames: u64,
 }
 impl Default for HistoryStatus {
     fn default() -> Self {
@@ -82,6 +101,10 @@ impl Default for HistoryStatus {
             microphone_secs: 0.0,
             speaker_secs: 0.0,
             buffered_bytes: 0,
+            retained_bytes: 0,
+            encrypted_bytes: 0,
+            storage_error: None,
+            dropped_frames: 0,
         }
     }
 }
@@ -94,7 +117,7 @@ struct Lane {
 impl Lane {
     fn pop_front(&mut self) {
         if let Some(frame) = self.frames.pop_front() {
-            self.allocated_samples -= frame.samples.len();
+            self.allocated_samples -= frame.sample_count();
         }
     }
 
@@ -109,22 +132,14 @@ impl Lane {
         for frame in self.frames.iter_mut().take_while(|frame| {
             frame.captured_at.saturating_duration_since(cutoff) < Duration::from_secs(1)
         }) {
+            let previous = frame.sample_count();
             frame.clip_before(cutoff);
-            if frame.range.start > 0 {
-                // A buffer boundary may release its expired prefix; snapshots
-                // keep sharing their old allocation without changing contents.
-                // Count retained allocations, so a partial boundary cannot make
-                // the sample cap discard the remainder of an otherwise useful frame.
-                let kept: Arc<[i16]> = Arc::from(frame.samples());
-                self.allocated_samples -= frame.samples.len() - kept.len();
-                frame.range = 0..kept.len();
-                frame.samples = kept;
-            }
+            self.allocated_samples -= previous - frame.sample_count();
         }
         while self
             .frames
             .front()
-            .is_some_and(|frame| frame.samples().is_empty())
+            .is_some_and(|frame| frame.sample_count() == 0)
         {
             self.pop_front();
         }
@@ -188,7 +203,7 @@ impl Contents {
                     .as_nanos()
                     * SAMPLE_RATE as u128
                     / 1_000_000_000) as u64;
-                let samples = frame.samples().len() as u64;
+                let samples = frame.sample_count() as u64;
                 let candidate = end_by_clock.saturating_sub(samples);
                 let start = match expected {
                     Some(next) if candidate <= next.saturating_add(SAMPLE_RATE as u64 / 20) => next,
@@ -232,10 +247,21 @@ pub struct HistoryBuffer {
     enabled: AtomicBool,
     generation: AtomicU64,
     contents: Mutex<Contents>,
+    storage: Option<storage::Storage>,
+    storage_error: Option<String>,
 }
 impl HistoryBuffer {
     pub fn new(config: &HistoryConfig) -> Self {
+        let (storage, storage_error) = match storage::Storage::new() {
+            Ok(storage) => (Some(storage), None),
+            Err(_) => (
+                None,
+                Some("Recent audio encrypted storage could not start".into()),
+            ),
+        };
         Self {
+            storage,
+            storage_error,
             enabled: AtomicBool::new(config.enabled),
             generation: AtomicU64::new(0),
             contents: Mutex::new(Contents {
@@ -272,6 +298,9 @@ impl HistoryBuffer {
     pub fn configure(&self, config: &HistoryConfig) {
         let mut contents = self.contents.lock().unwrap_or_else(|e| e.into_inner());
         if contents.config.enabled != config.enabled {
+            if let Some(storage) = &self.storage {
+                storage.reset_gaps();
+            }
             contents.enabled_since = config.enabled.then(Instant::now);
             self.generation.fetch_add(1, Ordering::AcqRel);
         }
@@ -303,10 +332,17 @@ impl HistoryBuffer {
         {
             return;
         }
+        let Some(audio) = self
+            .storage
+            .as_ref()
+            .and_then(|storage| storage.stage(samples))
+        else {
+            return;
+        };
         lane_buffer.allocated_samples += samples.len();
         lane_buffer.frames.push_back(HistoryFrame {
             lane,
-            samples: Arc::from(samples),
+            samples: audio,
             captured_at,
             range: 0..samples.len(),
         });
@@ -337,7 +373,7 @@ impl HistoryBuffer {
             .cloned()
             .filter_map(|mut frame| {
                 frame.clip_before(cutoff);
-                (!frame.samples().is_empty()).then_some(frame)
+                (frame.sample_count() > 0).then_some(frame)
             })
             .collect::<Vec<_>>();
         drop(contents);
@@ -356,16 +392,47 @@ impl HistoryBuffer {
         }
     }
 
+    #[cfg(test)]
+    pub(crate) async fn flush(&self) {
+        if let Some(storage) = &self.storage {
+            storage.flush().await;
+        }
+    }
+
     pub fn status(&self, now: Instant) -> HistoryStatus {
         let mut contents = self.contents.lock().unwrap_or_else(|e| e.into_inner());
         contents.prune(now);
         let seconds = |lane: &Lane| {
             lane.frames
                 .iter()
-                .map(|frame| frame.samples().len())
+                .map(|frame| frame.sample_count())
                 .sum::<usize>() as f64
                 / SAMPLE_RATE as f64
         };
+        if let Some(storage) = &self.storage {
+            storage.expire_gaps(
+                now.checked_sub(Duration::from_secs(u64::from(
+                    contents.config.duration_secs,
+                )))
+                .unwrap_or(now),
+            );
+        }
+        let (memory_bytes, storage_error, dropped_frames) = self
+            .storage
+            .as_ref()
+            .map_or((0, self.storage_error.clone(), 0), storage::Storage::status);
+        let retained_bytes = contents
+            .lanes
+            .iter()
+            .map(|lane| lane.allocated_samples * 2)
+            .sum();
+        let encrypted_bytes = contents
+            .lanes
+            .iter()
+            .flat_map(|lane| &lane.frames)
+            .filter(|frame| frame.memory_bytes() == 0)
+            .map(|frame| frame.sample_count() * 2)
+            .sum();
         HistoryStatus {
             enabled: contents.config.enabled,
             capacity_secs: contents.config.duration_secs,
@@ -375,11 +442,11 @@ impl HistoryBuffer {
             combined_audio_secs: contents.combined_audio_duration().as_secs_f64(),
             microphone_secs: seconds(&contents.lanes[0]),
             speaker_secs: seconds(&contents.lanes[1]),
-            buffered_bytes: contents
-                .lanes
-                .iter()
-                .map(|lane| lane.allocated_samples * size_of::<i16>())
-                .sum(),
+            buffered_bytes: memory_bytes,
+            retained_bytes,
+            encrypted_bytes,
+            storage_error,
+            dropped_frames,
         }
     }
 }
@@ -512,7 +579,7 @@ mod tests {
         let disabled = history.status(fresh);
         assert_eq!(disabled.combined_audio_secs, 0.0);
         assert_eq!(disabled.available_secs, 0.0);
-        assert_eq!(disabled.buffered_bytes, 0);
+        assert_eq!(disabled.retained_bytes, 0);
         assert_eq!(HistoryStatus::default().combined_audio_secs, 0.0);
     }
 
@@ -612,6 +679,9 @@ mod tests {
             );
         }
         let expected = history.status(now).combined_audio_secs;
+        history.flush().await;
+        assert_eq!(history.status(now).buffered_bytes, 0);
+        assert!(history.status(now).encrypted_bytes > 0);
         let snapshot = history.snapshot(10, now);
         let directory = tempfile::tempdir().unwrap();
         let recorder = SessionAudioRecorder::create(
@@ -626,17 +696,16 @@ mod tests {
         let path = recorder.path().to_owned();
         let (sender, receiver) = tokio::sync::mpsc::channel(1);
         drop(sender);
-        recorder
-            .run_with_history(
-                receiver,
-                snapshot.frames.into_iter().map(|frame| AudioRecord {
-                    lane: frame.lane,
-                    samples: frame.samples().to_vec(),
-                    captured_at: frame.captured_at,
-                }),
-            )
-            .await
-            .unwrap();
+        let mut reader = HistoryReader::default();
+        let mut records = Vec::new();
+        for frame in snapshot.frames {
+            records.push(AudioRecord {
+                lane: frame.lane,
+                samples: frame.read_samples(&mut reader).await.unwrap().to_vec(),
+                captured_at: frame.captured_at,
+            });
+        }
+        recorder.run_with_history(receiver, records).await.unwrap();
         let reader = hound::WavReader::open(path).unwrap();
         let occupied = reader
             .into_samples::<i16>()
@@ -659,7 +728,7 @@ mod tests {
         assert_eq!(snapshot.included_secs, 2.01);
         history.prune(now + Duration::from_secs(11));
         assert_eq!(
-            history.status(now + Duration::from_secs(11)).buffered_bytes,
+            history.status(now + Duration::from_secs(11)).retained_bytes,
             0
         );
         assert!(
@@ -670,7 +739,7 @@ mod tests {
         );
         history.push(Microphone, &[99; 160], now);
         assert_eq!(
-            history.status(now + Duration::from_secs(11)).buffered_bytes,
+            history.status(now + Duration::from_secs(11)).retained_bytes,
             0
         );
     }
@@ -688,16 +757,16 @@ mod tests {
         let snapshot = history.snapshot(1, now);
         assert_eq!(snapshot.origin, now - Duration::from_secs(1));
         assert_eq!(snapshot.frames.len(), 2);
-        assert_eq!(snapshot.frames[0].samples().len(), 12000);
-        assert_eq!(snapshot.frames[1].samples().len(), 4000);
+        assert_eq!(snapshot.frames[0].sample_count(), 12000);
+        assert_eq!(snapshot.frames[1].sample_count(), 4000);
         assert_eq!(
-            history.status(now).buffered_bytes,
+            history.status(now).retained_bytes,
             SAMPLE_RATE * size_of::<i16>()
         );
     }
 
-    #[test]
-    fn snapshots_clip_at_sample_precision_share_storage_and_preserve_lane_gaps() {
+    #[tokio::test]
+    async fn snapshots_clip_at_sample_precision_share_storage_and_preserve_lane_gaps() {
         let history = buffer(10);
         let now = Instant::now();
         let first_end = now - Duration::from_millis(1500);
@@ -708,7 +777,7 @@ mod tests {
         let clipped = history.snapshot(2, now);
         assert_eq!(clipped.origin, now - Duration::from_secs(2));
         assert_eq!(clipped.included_secs, 2.0);
-        assert_eq!(clipped.frames[0].samples().len(), 8000);
+        assert_eq!(clipped.frames[0].sample_count(), 8000);
         assert_eq!(clipped.frames[0].captured_at, first_end);
         assert!(Arc::ptr_eq(
             &whole.frames[0].samples,
@@ -718,7 +787,14 @@ mod tests {
             clipped.frames[1].started_at(),
             now - Duration::from_millis(410)
         );
-        assert_eq!(clipped.frames[2].samples(), &[0; 160]);
+        assert_eq!(
+            clipped.frames[2]
+                .read_samples(&mut HistoryReader::default())
+                .await
+                .unwrap()
+                .as_slice(),
+            &[0; 160]
+        );
         assert!(history.snapshot(0, now).frames.is_empty());
     }
 
@@ -743,7 +819,7 @@ mod tests {
             duration_secs: 600,
         });
         history.push(Microphone, &[3; 160], Instant::now());
-        assert_eq!(history.status(Instant::now()).buffered_bytes, 0);
+        assert_eq!(history.status(Instant::now()).retained_bytes, 0);
         assert!(!history.enabled());
         history.configure(&HistoryConfig::default());
         assert!(history.snapshot(600, Instant::now()).frames.is_empty());
@@ -759,7 +835,7 @@ mod tests {
             history.push(Speaker, &second, now);
         }
         assert_eq!(
-            history.status(now).buffered_bytes,
+            history.status(now).retained_bytes,
             2 * SAMPLE_RATE * size_of::<i16>()
         );
         assert_eq!(history.snapshot(1, now).frames.len(), 2);
@@ -771,11 +847,11 @@ mod tests {
             history.snapshot(1, now).frames.len(),
             2 * MAX_FRAMES_PER_SECOND
         );
-        assert!(history.status(now).buffered_bytes <= 2 * SAMPLE_RATE * size_of::<i16>());
+        assert!(history.status(now).retained_bytes <= 2 * SAMPLE_RATE * size_of::<i16>());
     }
 
-    #[test]
-    fn chronological_snapshot_merges_lanes_and_rejects_oversized_or_backwards_frames() {
+    #[tokio::test]
+    async fn chronological_snapshot_merges_lanes_and_rejects_oversized_or_backwards_frames() {
         let history = buffer(10);
         let now = Instant::now();
         history.push(Speaker, &[3; 160], now);
@@ -785,15 +861,87 @@ mod tests {
         history.push(Speaker, &vec![99; SAMPLE_RATE + 1], now);
         history.push(Speaker, &[], now);
         let snapshot = history.snapshot(10, now);
-        assert_eq!(
-            snapshot
-                .frames
-                .iter()
-                .map(|frame| frame.samples()[0])
-                .collect::<Vec<_>>(),
-            [1, 2, 3]
-        );
+        let mut reader = HistoryReader::default();
+        let mut values = Vec::new();
+        for frame in &snapshot.frames {
+            values.push(frame.read_samples(&mut reader).await.unwrap()[0]);
+        }
+        assert_eq!(values, [1, 2, 3]);
         assert_eq!(history.status(now).microphone_secs, 0.02);
         assert_eq!(history.status(now).speaker_secs, 0.01);
+    }
+
+    #[tokio::test]
+    async fn encrypted_snapshots_keep_sample_clipping_and_survive_rolling_expiration_and_disable() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut history = buffer(2);
+        history.storage = Some(
+            storage::Storage::with_limits(directory.path().to_owned(), storage::MAX_MEMORY_BYTES)
+                .unwrap(),
+        );
+        let now = Instant::now();
+        history.push(
+            Microphone,
+            &vec![101; SAMPLE_RATE],
+            now - Duration::from_millis(1500),
+        );
+        history.push(Speaker, &[202; 160], now - Duration::from_millis(400));
+        let clipped = history.snapshot(2, now);
+        let counts = history.status(now);
+        history.flush().await;
+        let committed = history.status(now);
+        assert_eq!(committed.buffered_bytes, 0);
+        assert_eq!(committed.encrypted_bytes, committed.retained_bytes);
+        assert_eq!(counts.combined_audio_secs, committed.combined_audio_secs);
+        assert_eq!(counts.microphone_secs, committed.microphone_secs);
+        assert_eq!(clipped.frames[0].sample_count(), 8000);
+        history.prune(now + Duration::from_secs(3));
+        history.configure(&HistoryConfig {
+            enabled: false,
+            duration_secs: 2,
+        });
+        assert!(
+            history
+                .snapshot(2, now + Duration::from_secs(3))
+                .frames
+                .is_empty()
+        );
+        let mut reader = HistoryReader::default();
+        assert_eq!(
+            clipped.frames[0]
+                .read_samples(&mut reader)
+                .await
+                .unwrap()
+                .as_slice(),
+            &[101; 8000]
+        );
+        assert_eq!(
+            clipped.frames[1]
+                .read_samples(&mut reader)
+                .await
+                .unwrap()
+                .as_slice(),
+            &[202; 160]
+        );
+        assert_eq!(clipped.origin, now - Duration::from_secs(2));
+        drop(clipped);
+        assert!(
+            std::fs::read_dir(directory.path())
+                .unwrap()
+                .next()
+                .is_some()
+        );
+        drop(reader);
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while std::fs::read_dir(directory.path())
+                .unwrap()
+                .next()
+                .is_some()
+            {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
     }
 }

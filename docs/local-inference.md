@@ -119,7 +119,7 @@ selected STT's results, not intermediate translation text.
 
 In **Settings → Local models**, configure:
 
-- **Model storage folder:** empty uses the app cache in the OS account. To choose another
+- **Model storage folder:** empty uses the `models` subfolder of Babel’s user configuration folder. To choose another
   disk/folder, enter an absolute path, such as `/home/user/Babel-models` on Linux,
   `/Users/user/Babel-models` on macOS or `D:\Babel-models` on Windows.
   `~` and environment variables are not expanded.
@@ -137,13 +137,13 @@ When the folder field is empty, weights default to:
 
 | Babel host OS | Default weights folder |
 |---|---|
-| Linux | `$XDG_DATA_HOME/babel/models` when set to an absolute path; otherwise `$HOME/.local/share/babel/models` |
+| Linux | `$XDG_CONFIG_HOME/babel/models` when set to an absolute path; otherwise `$HOME/.config/babel/models` |
 | macOS | `$HOME/Library/Application Support/Babel/models` |
-| Windows | `%LOCALAPPDATA%\Babel\models` |
+| Windows | `%APPDATA%\Babel\models` |
 
 These names describe the Babel process's environment variables. The UI field
 does not expand them: use a complete absolute path for a custom folder. Weights
-live in local app data, not browser downloads. If no valid account directory
+live alongside the user configuration, not in browser downloads. If no valid account directory
 exists, an explicit absolute folder is required.
 
 The model folder is independent of the TXT/WAV session-file base. Changing it
@@ -152,7 +152,7 @@ prepared again. Reserve space for all selected models; model/voice sizes vary.
 
 ```toml
 [local_runtime]
-directory = "" # App cache, or an absolute path on the Babel host.
+directory = "" # User configuration folder/models, or an absolute path on the Babel host.
 threads = 2
 idle_unload_secs = 60
 
@@ -198,7 +198,7 @@ server, or stop it on inactivity. Whisper uses the model loaded there; the UI's
 Whisper variant selection controls only the embedded engine.
 
 For external Whisper STT, `api_key_env` is an optional Bearer credential
-reference. The secret can come from the process environment or a temporary key
+reference. The secret can come from the process environment, a saved key, or a temporary key
 applied in the dashboard. Do not put the secret in TOML. Non-TLS HTTP is accepted
 only on loopback; remote servers require HTTPS. Embedded URL credentials are
 rejected.

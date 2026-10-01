@@ -11,8 +11,7 @@ use std::{
     time::{Duration, Instant},
 };
 use tokio::{
-    fs::{self, File, OpenOptions},
-    io::{AsyncSeekExt, AsyncWriteExt, BufWriter},
+    fs::{self, OpenOptions},
     sync::mpsc,
 };
 
@@ -51,7 +50,7 @@ struct LaneClock {
 
 pub struct SessionAudioRecorder {
     path: PathBuf,
-    file: BufWriter<File>,
+    file: crate::storage::resilient::ResilientFile,
     origin: Instant,
     active: [bool; 2],
     mixer: RecordingMixer,
@@ -115,7 +114,7 @@ impl SessionAudioRecorder {
                 path.display()
             )
         })?;
-        let mut file = BufWriter::with_capacity(64 * 1024, file);
+        let mut file = crate::storage::resilient::ResilientFile::new(file);
         file.write_all(&wav_header(0)?).await?;
         file.flush().await?;
         Ok(Self {
@@ -134,6 +133,12 @@ impl SessionAudioRecorder {
     }
     pub fn path(&self) -> &Path {
         &self.path
+    }
+    pub(crate) fn observe_recovery(
+        &mut self,
+        observer: crate::storage::resilient::RecoveryObserver,
+    ) {
+        self.file.observe(observer);
     }
     /// File creation can precede the capture boundary so slow storage never
     /// pauses original routing. Rebase only before any PCM has been accepted.
@@ -295,7 +300,6 @@ impl SessionAudioRecorder {
         self.write_mixed_bytes().await?;
         self.checkpoint().await?;
         self.file
-            .get_ref()
             .sync_data()
             .await
             .context("Failed to finalize the recording on disk")

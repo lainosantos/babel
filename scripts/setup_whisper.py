@@ -128,9 +128,25 @@ def build_server(source, backend, jobs):
     raise RuntimeError(f"Build completed but {name} was not found below {build / 'bin'}")
 
 
+def default_services_root(platform=None, home=None, environ=None):
+    """Match Babel's per-user configuration folder, independent of the checkout."""
+    platform = sys.platform if platform is None else platform
+    home = Path.home() if home is None else Path(home)
+    environ = os.environ if environ is None else environ
+    if platform == "darwin":
+        base = home / "Library/Application Support/Babel"
+    elif platform == "win32":
+        candidate = Path(environ.get("APPDATA", ""))
+        base = (candidate if candidate.is_absolute() else home / "AppData/Roaming") / "Babel"
+    else:
+        candidate = Path(environ.get("XDG_CONFIG_HOME", ""))
+        base = (candidate if candidate.is_absolute() else home / ".config") / "babel"
+    return base / "services"
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--source-dir", type=Path, default=ROOT / ".tools" / "whisper.cpp")
+    parser.add_argument("--source-dir", type=Path, default=default_services_root() / ".tools" / "whisper.cpp")
     parser.add_argument("--backend", choices=["cpu", "cuda", "metal"], default="cpu",
                         help="cpu is portable; CUDA or Metal require an installed native toolkit")
     parser.add_argument("--jobs", type=int, default=min(4, os.cpu_count() or 1))
@@ -147,6 +163,12 @@ def main(argv=None):
     model = source / "models" / MODEL["name"]
     ensure_model(model)
     executable = build_server(source, args.backend, args.jobs)
+    # Keep the managed helper beside the user-owned engine installation.
+    if source.parent.name == ".tools":
+        helper = source.parent.parent / "scripts/needle_bridge.py"
+        if not helper.exists():
+            helper.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(ROOT / "scripts/needle_bridge.py", helper)
     print(json.dumps({"service": "babel-whisper", "version": VERSION,
                       "commit": COMMIT, "executable": str(executable),
                       "model": str(model), "backend": args.backend}))

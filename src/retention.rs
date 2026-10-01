@@ -353,12 +353,17 @@ impl SessionRetention {
         }
         // Files are opened within the worker rather than kept alive in the
         // store, so Windows can remove the directory when its last owner drops.
-        let mut file = options
-            .open(self.journal_path())
-            .map_err(|_| anyhow!("Could not open encrypted retention journal"))?;
+        let mut file = options.open(self.journal_path()).map_err(|error| {
+            std::io::Error::new(error.kind(), "Could not open encrypted retention journal")
+        })?;
         let existing = file
             .metadata()
-            .map_err(|_| anyhow!("Could not inspect encrypted retention journal"))?
+            .map_err(|error| {
+                std::io::Error::new(
+                    error.kind(),
+                    "Could not inspect encrypted retention journal",
+                )
+            })?
             .len();
         ensure!(
             existing >= offset,
@@ -372,8 +377,12 @@ impl SessionRetention {
             file.sync_data()
                 .map_err(|_| anyhow!("Could not sync repaired retention journal"))?;
         }
-        file.seek(SeekFrom::Start(offset))
-            .map_err(|_| anyhow!("Could not position encrypted retention journal"))?;
+        file.seek(SeekFrom::Start(offset)).map_err(|error| {
+            std::io::Error::new(
+                error.kind(),
+                "Could not position encrypted retention journal",
+            )
+        })?;
         let written = (|| -> Result<()> {
             file.write_all(&header)
                 .map_err(|_| anyhow!("Could not append retention journal header"))?;
@@ -410,18 +419,28 @@ impl SessionRetention {
                 end <= state.committed_len,
                 "Encrypted retention journal index is invalid"
             );
-            let mut file = File::open(self.journal_path())
-                .map_err(|_| anyhow!("Could not open encrypted retention journal"))?;
+            let mut file = File::open(self.journal_path()).map_err(|error| {
+                std::io::Error::new(error.kind(), "Could not open encrypted retention journal")
+            })?;
             let size = file
                 .metadata()
-                .map_err(|_| anyhow!("Could not inspect encrypted retention journal"))?
+                .map_err(|error| {
+                    std::io::Error::new(
+                        error.kind(),
+                        "Could not inspect encrypted retention journal",
+                    )
+                })?
                 .len();
             ensure!(
                 end <= size,
                 "Encrypted retention journal record is truncated"
             );
-            file.seek(SeekFrom::Start(entry.offset))
-                .map_err(|_| anyhow!("Could not position encrypted retention journal"))?;
+            file.seek(SeekFrom::Start(entry.offset)).map_err(|error| {
+                std::io::Error::new(
+                    error.kind(),
+                    "Could not position encrypted retention journal",
+                )
+            })?;
             // Limit reads to the authenticated indexed record, excluding later
             // committed records and any failed append's uncommitted tail.
             return self.decode_record(&mut file.take(entry.length), id, entry.length);

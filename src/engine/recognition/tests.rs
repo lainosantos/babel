@@ -921,3 +921,102 @@ async fn stop_preserves_a_full_startup_queue_until_setup_completes() {
         if matches!(*record, TranscriptRecord::TurnComplete)));
     assert!(records.recv().await.is_none());
 }
+
+#[tokio::test]
+async fn retained_transcription_retries_only_the_unconfirmed_segment_then_continues() {
+    let received = Arc::new(StdMutex::new(Vec::new()));
+    let calls = Arc::new(AtomicU64::new(0));
+    let recorded = received.clone();
+    let counted = calls.clone();
+    let app = axum::Router::new().route(
+        "/inference",
+        axum::routing::post(move |body: axum::body::Bytes| {
+            let recorded = recorded.clone();
+            let counted = counted.clone();
+            async move {
+                let start = body.windows(4).position(|bytes| bytes == b"RIFF").unwrap();
+                let mut wav = hound::WavReader::new(std::io::Cursor::new(&body[start..])).unwrap();
+                let pcm: Vec<i16> = wav.samples().map(|sample| sample.unwrap()).collect();
+                let value = pcm[0];
+                recorded.lock().unwrap().push(pcm);
+                if counted.fetch_add(1, Ordering::Relaxed) == 0 {
+                    (
+                        axum::http::StatusCode::SERVICE_UNAVAILABLE,
+                        axum::Json(serde_json::json!({"error": "Synthetic interruption"})),
+                    )
+                } else {
+                    (
+                        axum::http::StatusCode::OK,
+                        axum::Json(
+                            serde_json::json!({"text": format!("Confirmed source {value}." )}),
+                        ),
+                    )
+                }
+            }
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let endpoint = format!("http://{}/inference", listener.local_addr().unwrap());
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let directory = tempfile::tempdir().unwrap();
+    let store = crate::retention::SessionRetention::create_in(directory.path(), "retry-originals")
+        .await
+        .unwrap();
+    let origin = Instant::now();
+    let originals =
+        retained::RetainedSession::new(store, origin, &tokio::runtime::Handle::current());
+    for second in 1..=10 {
+        originals
+            .capture(
+                &frame(
+                    origin,
+                    second * 1000,
+                    16000,
+                    if second <= 5 { 5000 } else { 7000 },
+                ),
+                TranscriptOrigin::Microphone,
+            )
+            .unwrap();
+    }
+    originals.close_capture();
+    let mut config = AppConfig::default();
+    config.transcription.microphone_recognition.provider = "whisper".into();
+    config.transcription.providers.whisper.endpoint = endpoint;
+    config.transcription.providers.whisper.segment_ms = 5000;
+    let metrics = Arc::new(RouteMetrics::default());
+    let (text, mut records) = mpsc::channel(32);
+    tokio::time::timeout(
+        Duration::from_secs(10),
+        start_retained(
+            config,
+            TranscriptSink {
+                retained: Some(originals.clone()),
+                sender: text,
+                origin: TranscriptOrigin::Microphone,
+            },
+            metrics.clone(),
+            origin,
+            originals.clone(),
+        ),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(
+        *received.lock().unwrap(),
+        vec![vec![5000; 80000], vec![5000; 80000], vec![7000; 80000]]
+    );
+    let mut saved = Vec::new();
+    while let Some(record) = records.recv().await {
+        if let TranscriptRecord::Routed { record, .. } = record
+            && let TranscriptRecord::Text { text, .. } = *record
+        {
+            saved.push(text);
+        }
+    }
+    assert_eq!(saved, ["Confirmed source 5000.", "Confirmed source 7000."]);
+    assert!(metrics.snapshot().recovering.is_empty());
+    assert_eq!(metrics.reconnects.load(Ordering::Relaxed), 1);
+    assert!(!originals.capture_requires_stop());
+    server.abort();
+}

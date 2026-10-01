@@ -8,7 +8,7 @@ const { JSDOM } = require('jsdom');
 
 function defaults() {
   const cloud = (values = {}) => ({ api_key_env: 'GEMINI_API_KEY', endpoint: 'wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent', model: 'gemini-3.5-live-translate-preview', transcription_model: '', connect_timeout_secs: 15, max_reconnect_attempts: 5, ...values });
-  const route = (values = {}) => ({ enabled: true, provider: 'gemini', capture_device: 'physical-mic', playback_device: 'babel_mic_bus', source_language: 'pt-BR', target_language: 'en-US', prompt: '', gain: 1, ...values });
+  const route = (values = {}) => ({ enabled: true, provider: 'gemini', capture_device: 'physical-mic', playback_device: 'babel_mic_bus', source_language: 'pt-BR', target_language: 'en-US', prompt: '', gain: 1, replay_translation_backlog: false, ...values });
   return {
     version: 1, interface: { language: 'system' }, local_runtime: { directory: '', threads: 2, idle_unload_secs: 60 },
     providers: { gemini: cloud(), openai: cloud({ api_key_env: 'OPENAI_API_KEY', endpoint: '', model: 'gpt-realtime-translate' }), local: { whisper_endpoint: 'auto', whisper_model: 'base', ollama_endpoint: 'auto', translation_api: 'ollama', translation_model: 'qwen3-0.6b', piper_endpoint: 'auto', segment_ms: 2000, silence_ms: 300, vad_threshold: 0.01, request_timeout_secs: 30 } },
@@ -81,6 +81,7 @@ async function page(t, options = {}) {
   let autostart = false;
   const autostartMetadata = options.autostartMetadata || {};
   const credentials = new Set();
+  const permanentCredentials = new Set();
   const metrics = { state: 'stopped', captured_frames: 0, dropped_frames: 0, underruns: 0, translated_samples: 0, reconnects: 0, input_level: 0, output_level: 0, last_input_transcript: null };
   const routeStatuses = { microphone: {}, speaker: {} };
   window.structuredClone = structuredClone;
@@ -142,9 +143,13 @@ async function page(t, options = {}) {
       running = false;
     }
     else if (parsed.pathname === '/api/autostart') { if (options.method === 'POST') autostart = body.enabled; value = { ...autostartMetadata, enabled: autostart, supported: true, description: autostart ? 'Início automático ativado; tradução parada.' : 'Início automático desativado.' }; }
-    else if (parsed.pathname === '/api/credentials' && options.method === 'GET') value = { configured: credentials.has(parsed.searchParams.get('api_key_env')) };
-    else if (parsed.pathname === '/api/credentials') credentials.add(body.api_key_env);
-    else if (parsed.pathname === '/api/credentials/clear') credentials.delete(body.api_key_env);
+    else if (parsed.pathname === '/api/credentials' && options.method === 'GET') {
+      const name = parsed.searchParams.get('api_key_env');
+      const temporary = credentials.has(name), permanent = permanentCredentials.has(name);
+      value = { configured: temporary || permanent, temporary, permanent, environment: false, source: temporary ? 'temporary' : permanent ? 'permanent' : null, config_path: '/home/test/.config/babel/babel.toml' };
+    }
+    else if (parsed.pathname === '/api/credentials') (body.storage === 'permanent' ? permanentCredentials : credentials).add(body.api_key_env);
+    else if (parsed.pathname === '/api/credentials/clear') (body.storage === 'permanent' ? permanentCredentials : credentials).delete(body.api_key_env);
     return new Response(JSON.stringify(value), { headers: { 'Content-Type': 'application/json', ...(parsed.pathname === '/api/config' ? { ETag: `"${revision}"` } : {}) } });
   };
   window.eval(fs.readFileSync(path.join(__dirname, 'i18n.js'), 'utf8'));
@@ -1807,7 +1812,7 @@ test('advanced start shows live combined audio without enabling history or chang
 test('buffer timer distinguishes disabled, unavailable and recovered status in both interface languages', async t => {
   let offline = false;
   const p = await page(t, { language: 'pt', statusRequest: () => { if (offline) throw new Error('offline fixture'); } });
-  assert.equal(p.byId('history-buffer-label').textContent, 'Áudio disponível na memória');
+  assert.equal(p.byId('history-buffer-label').textContent, 'Áudio recente disponível');
   assert.equal(p.byId('history-buffer-update').textContent, 'Atualizado a cada segundo');
   offline = true;
   await p.poll();
@@ -2426,4 +2431,99 @@ test('delayed volume readback cannot undo a concurrent session start or stop', a
     assert.equal(p.byId('stop').hidden, !running);
     assert.equal(p.byId('output-volume').value, value);
   }
+});
+
+
+test('accelerated translation recovery requires explicit independent opt-in and survives save', async t => {
+  const p = await page(t, { language: 'en' });
+  for (const route of ['microphone', 'speaker']) assert.equal(p.byId(`${route}-replay_translation_backlog`).checked, false);
+  p.set('microphone-replay_translation_backlog', true);
+  p.byId('save').click();
+  await settle(() => p.config().microphone.replay_translation_backlog === true && !p.byId('settings').disabled);
+  assert.equal(p.config().speaker.replay_translation_backlog, false);
+  p.set('microphone-replay_translation_backlog', false);
+  p.set('speaker-replay_translation_backlog', true);
+  p.byId('save').click();
+  await settle(() => p.config().speaker.replay_translation_backlog === true && !p.byId('settings').disabled);
+  assert.equal(p.config().microphone.replay_translation_backlog, false);
+});
+
+test('recovery status shows retrying features and the skipped translation interval', async t => {
+  const p = await page(t, { language: 'en' });
+  p.routeStatus('microphone', { recovering: ['translation', 'recording'], recovery_notice: 'Translation skipped +1.0–4.0 s.' });
+  await p.poll();
+  const status = p.byId('microphone-recovery-status');
+  assert.equal(status.hidden, false);
+  assert.match(status.textContent, /translation/i);
+  assert.match(status.textContent, /recording/i);
+  assert.match(status.textContent, /1.0–4.0/);
+  p.routeStatus('microphone', {});
+  await p.poll();
+  assert.equal(status.hidden, true);
+});
+
+
+test('saved and temporary keys have independent drafts, precedence and remove buttons', async t => {
+  const p = await page(t, { language: 'en' });
+  const click = selector => p.doc.querySelector(selector).click();
+  p.byId('credential-gemini-permanent').value = 'synthetic-saved-key';
+  p.byId('credential-gemini').value = 'synthetic-temporary-draft';
+  click('.credential-save[data-provider="gemini"]');
+  await settle(() => p.byId('credential-gemini-status').textContent.includes('Saved key is active'));
+  assert.equal(p.byId('credential-gemini').value, 'synthetic-temporary-draft');
+  assert.equal(p.byId('credential-gemini-permanent').value, '');
+  assert.equal(p.calls.find(c => c.path === '/api/credentials' && c.body?.storage === 'permanent').body.key, 'synthetic-saved-key');
+  click('.credential-apply[data-provider="gemini"]');
+  await settle(() => p.byId('credential-gemini-status').textContent.includes('Temporary key is active'));
+  assert.match(p.byId('credential-gemini-status').textContent, /saved key is also available/);
+  assert.match(p.byId('stt-credential-gemini-status').textContent, /Temporary key is active/);
+  click('.credential-clear[data-provider="gemini"]');
+  await settle(() => p.byId('credential-gemini-status').textContent.includes('Saved key is active'));
+  p.byId('credential-gemini').value = 'another-synthetic-temporary';
+  click('.credential-apply[data-provider="gemini"]');
+  await settle(() => p.byId('credential-gemini-status').textContent.includes('Temporary key is active'));
+  click('.credential-clear-permanent[data-provider="gemini"]');
+  await settle(() => p.calls.some(c => c.path === '/api/credentials/clear' && c.body?.storage === 'permanent'));
+  await settle(() => !p.byId('credential-gemini-status').textContent.includes('saved key is also available'));
+  assert.match(p.byId('credential-gemini-status').textContent, /Temporary key is active/);
+  assert.match(p.byId('credential-gemini-saved-path').textContent, /\/home\/test\/.config\/babel\/babel.toml/);
+  assert.equal(JSON.stringify(p.config()).includes('synthetic-'), false);
+  p.window.close();
+});
+
+test('session duration uses server elapsed time across views, reload snapshots, and new sessions', async t => {
+  const p = await page(t, { language: 'en' });
+  assert.equal(p.byId('session-timer').hidden, true);
+  p.statusResponse(status => { status.running = true; status.session_elapsed_secs = 3661; });
+  await p.poll();
+  assert.equal(p.byId('session-timer').hidden, false);
+  assert.equal(p.byId('session-elapsed').textContent, '01:01:01');
+  assert.equal(p.byId('session-elapsed').dateTime, 'PT3661S');
+  p.doc.querySelector('[data-view-target="recording"]')?.click();
+  p.statusResponse(status => { status.running = true; status.session_elapsed_secs = 3662; });
+  await p.poll();
+  assert.equal(p.byId('session-elapsed').textContent, '01:01:02');
+  p.statusResponse(status => { status.running = true; status.session_elapsed_secs = 0; });
+  await p.poll();
+  assert.equal(p.byId('session-elapsed').textContent, '00:00:00');
+  p.statusResponse(status => { status.running = false; status.session_elapsed_secs = null; });
+  await p.poll();
+  assert.equal(p.byId('session-timer').hidden, true);
+  p.window.close();
+});
+
+
+test('encrypted history recovery and capture gaps are visible without changing live routing or inclusion', async t => {
+  const p = await page(t, { language: 'en' });
+  p.history({ enabled: true, capacity_secs: 600, combined_audio_secs: 42, storage_error: 'Storage unavailable', dropped_frames: 0 });
+  await p.poll();
+  assert.equal(p.byId('history-buffer-update').textContent, 'Encrypted history storage is recovering; original audio continues');
+  assert.equal(p.byId('history-buffer-duration').textContent, '00 min 42 s');
+  assert.equal(p.byId('history-include').checked, false);
+  p.history({ enabled: true, capacity_secs: 600, combined_audio_secs: 42, storage_error: null, dropped_frames: 3 });
+  await p.poll();
+  assert.equal(p.byId('history-buffer-update').textContent, 'Recent history has gaps after a storage failure; original audio continues');
+  p.history({ enabled: true, capacity_secs: 600, combined_audio_secs: 43, storage_error: null, dropped_frames: 0 });
+  await p.poll();
+  assert.equal(p.byId('history-buffer-update').textContent, 'Updated every second');
 });

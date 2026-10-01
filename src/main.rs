@@ -13,8 +13,8 @@ use tokio_util::sync::CancellationToken;
     about = "Real-time bidirectional voice translation with virtual devices"
 )]
 struct Cli {
-    #[arg(long, global = true, default_value = "babel.toml")]
-    config: PathBuf,
+    #[arg(long, global = true)]
+    config: Option<PathBuf>,
     #[command(subcommand)]
     command: Option<Command>,
 }
@@ -54,27 +54,31 @@ fn main() -> Result<()> {
         port: 0,
         no_tray: false,
     });
+    let config = match cli.config {
+        Some(path) => path,
+        None => babel_audio::config::default_path()?,
+    };
     #[cfg(any(target_os = "macos", target_os = "windows"))]
     if let Command::Serve {
         port,
         no_tray: false,
     } = &command
     {
-        return babel_audio::tray::run_native(cli.config, *port);
+        return babel_audio::tray::run_native(config, *port);
     }
-    babel_audio::execution::control_runtime()?.block_on(run(cli, command))
+    babel_audio::execution::control_runtime()?.block_on(run(config, command))
 }
 
-async fn run(cli: Cli, command: Command) -> Result<()> {
+async fn run(config: PathBuf, command: Command) -> Result<()> {
     match command {
         Command::Init => {
             ensure!(
-                !cli.config.exists(),
+                !config.exists(),
                 "{} already exists; edit the file or use --config with another path",
-                cli.config.display()
+                config.display()
             );
-            AppConfig::default().save(&cli.config)?;
-            println!("Configuration created at {}", cli.config.display());
+            AppConfig::default().save(&config)?;
+            println!("Configuration created at {}", config.display());
         }
         Command::Devices => {
             println!(
@@ -93,7 +97,7 @@ async fn run(cli: Cli, command: Command) -> Result<()> {
                 "System: {}",
                 babel_audio::platform::PlatformInfo::current().name
             );
-            let cfg = load_or_default(&cli.config)?;
+            let cfg = load_or_default(&config)?;
             cfg.validate()?;
             println!(
                 "Configuration valid. Microphone: {}; speaker: {}",
@@ -130,7 +134,7 @@ async fn run(cli: Cli, command: Command) -> Result<()> {
             println!("See docs/platforms.md. No audio was sent to the cloud.");
         }
         Command::Serve { port, no_tray } => {
-            let instance = dashboard::InstanceGuard::acquire(&cli.config)?;
+            let instance = dashboard::InstanceGuard::acquire(&config)?;
             let cfg = load_or_default(instance.config_path())?;
             let controller = Arc::new(Controller::new(cfg, instance.config_path().to_owned())?);
             let cancel = CancellationToken::new();
@@ -164,7 +168,7 @@ async fn run(cli: Cli, command: Command) -> Result<()> {
             result?;
         }
         Command::Run { session } => {
-            let instance = dashboard::InstanceGuard::acquire(&cli.config)?;
+            let instance = dashboard::InstanceGuard::acquire(&config)?;
             let cfg = AppConfig::load(instance.config_path())
                 .context("Run `babel init` and configure devices first")?;
             let controller = Controller::new(cfg, instance.config_path().to_owned())?;
@@ -191,6 +195,7 @@ async fn run(cli: Cli, command: Command) -> Result<()> {
 }
 
 fn load_or_default(path: &std::path::Path) -> Result<AppConfig> {
+    babel_audio::credentials::load_saved(path)?;
     if path.exists() {
         AppConfig::load(path)
     } else {
@@ -202,6 +207,24 @@ fn load_or_default(path: &std::path::Path) -> Result<AppConfig> {
 mod tests {
     use super::*;
 
+    #[test]
+    fn configuration_defaults_to_user_storage_and_respects_explicit_paths() {
+        assert!(
+            Cli::try_parse_from(["babel", "serve"])
+                .unwrap()
+                .config
+                .is_none()
+        );
+        assert_eq!(
+            Cli::try_parse_from(["babel", "--config", "custom.toml", "serve"])
+                .unwrap()
+                .config,
+            Some(PathBuf::from("custom.toml"))
+        );
+        let path = babel_audio::config::default_path().unwrap();
+        assert!(path.is_absolute());
+        assert_eq!(path.file_name().unwrap(), "babel.toml");
+    }
     #[test]
     fn serve_asks_the_os_for_a_free_port_unless_explicitly_overridden() {
         let cli = Cli::try_parse_from(["babel", "serve"]).unwrap();

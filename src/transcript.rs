@@ -7,8 +7,7 @@ use std::{
     time::Duration,
 };
 use tokio::{
-    fs::{self, File, OpenOptions},
-    io::{AsyncWriteExt, BufWriter},
+    fs::{self, OpenOptions},
     sync::mpsc,
 };
 
@@ -47,7 +46,7 @@ pub struct TranscriptWriter {
 }
 
 struct TextFile {
-    file: BufWriter<File>,
+    file: crate::storage::resilient::ResilientFile,
     line_open: bool,
     timestamps: bool,
     speaker: Option<String>,
@@ -65,7 +64,7 @@ impl TextFile {
             .await
             .with_context(|| format!("Could not create the transcript at {}", path.display()))?;
         let mut writer = Self {
-            file: BufWriter::new(file),
+            file: crate::storage::resilient::ResilientFile::new(file),
             line_open: false,
             timestamps,
             speaker: None,
@@ -145,6 +144,12 @@ fn seconds(milliseconds: u64) -> String {
 }
 
 impl TranscriptWriter {
+    pub(crate) fn observe_recovery(
+        &mut self,
+        observer: crate::storage::resilient::RecoveryObserver,
+    ) {
+        self.original.file.observe(observer);
+    }
     pub async fn create_merged(
         config: &TranscriptionConfig,
         stem: &str,
@@ -294,7 +299,7 @@ impl TranscriptWriter {
         }
         self.original.newline().await?;
         self.original.file.flush().await?;
-        self.original.file.get_ref().sync_data().await?;
+        self.original.file.sync_data().await?;
         Ok(())
     }
 }

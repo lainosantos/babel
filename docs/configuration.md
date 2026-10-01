@@ -51,8 +51,11 @@ To add translations to the project, see [Internationalization](localization.md).
 
 ## Files and keys
 
-Babel loads `babel.toml` from the working directory or the path passed with
-`--config`. Without a file, the dashboard opens with defaults; saving creates the
+Babel loads the configuration from the current user’s configuration folder:
+Linux `$XDG_CONFIG_HOME/babel/babel.toml` (default `~/.config/babel/babel.toml`),
+macOS `~/Library/Application Support/Babel/babel.toml`, and Windows
+`%APPDATA%\Babel\babel.toml` (default `%USERPROFILE%\AppData\Roaming\Babel\babel.toml`).
+The CLI and login launcher use the same default. `--config` explicitly overrides it. Without a file, the dashboard opens with defaults; saving creates the
 file. `init` refuses to overwrite an existing file. Unknown fields, out-of-range
 values, and incompatible capability combinations are errors. Writes use a temporary
 file and atomic replacement. On Unix, newly created configuration, transcript,
@@ -84,21 +87,48 @@ Each cloud profile has an `api_key_env`. Defaults are `GEMINI_API_KEY`,
 `OPENAI_API_KEY`, and `DEEPGRAM_API_KEY`. STT and translation
 can use different names to keep accounts/keys separate. Whisper accepts an
 optional variable name for HTTP services requiring authentication.
-There are two ways to provide a key:
+Keys resolve in this order, using the profile's `api_key_env` as their reference:
 
-- **Dashboard, key for this run:** the key stays in a separate memory store,
-  is erased when replaced/removed, and is not returned by dashboard APIs.
-  It takes precedence over the environment variable with the same name.
-  Restarting Babel requires entering it again.
-- **Environment variable:** set it before opening Babel. Linux/macOS:
-  `export GEMINI_API_KEY='your-key'`. PowerShell:
-  `$env:GEMINI_API_KEY='your-key'`. The dashboard shows only presence/absence.
+1. **Temporary key:** entered in its own dashboard field, held only in memory,
+   zeroized when replaced/removed, and discarded when Babel exits.
+2. **Saved key:** entered in a separate field and saved in the same configuration
+   file under `[credentials]`, mapping reference names to secret strings. It is
+   loaded into memory on startup; no credential file I/O runs in audio callbacks.
+3. **Environment variable:** set before opening Babel, for example Linux/macOS
+   `export GEMINI_API_KEY='your-key'` or PowerShell
+   `$env:GEMINI_API_KEY='your-key'`.
 
-Removing the temporary key makes the program fall back to the environment variable,
-if present. Do not write keys in prompts, endpoints, or configuration
-files. Credentials already used in an active session are reapplied on the next
-connection; stop/restart the stream when changing accounts. `doctor` checks
-presence, not remote validity, credits, or model access.
+Temporary and saved values are independent. Each has its own remove button:
+removing the temporary value reveals the saved value; removing the saved value
+leaves the temporary value active. The environment is always the final fallback
+and is never modified by these buttons. Profiles referencing the same name share
+both values, including command credentials.
+
+The dashboard returns only availability, the active source and the config path;
+it never returns either secret. Ordinary settings saves and legacy migrations
+preserve saved keys. Saved keys are plaintext in the private configuration file,
+so keep that file out of source control and shared backups. Unix config files
+use mode 0600 and newly created config folders use mode 0700. Windows uses the
+user folder's inherited access permissions. Do not put keys in prompts or endpoints.
+Stop the audio session before changing its credentials. `doctor` checks presence,
+not remote validity, credits, or model access.
+
+Downloaded model files default to the `models` subfolder of the same user folder;
+command engines and helper installations use its `services` subfolder. Custom
+absolute model/service folders remain supported. Application installers keep
+their shipped executables in the installation folder; user downloads and caches
+do not belong in the source checkout.
+
+Credential API writes accept `storage: "temporary"` (the backward-compatible
+default) or `storage: "permanent"` on `/api/credentials` and
+`/api/credentials/clear`; the command credential endpoints accept the same scope.
+A disk-write failure leaves the cached saved key unchanged. Values are excluded
+from `/api/config` and `/api/agent` payloads.
+
+The session dock displays elapsed live session time as `HH:MM:SS`, measured by
+Babel's monotonic clock. Reloading the dashboard or changing views keeps the
+counter correct; included history does not add to it. A new session resets the
+counter. It is hidden when the session ends or the dashboard loses status.
 
 The dashboard server listens only on `127.0.0.1`. The initial URL contains a random
 capability in its fragment; JavaScript uses Bearer authentication for requests.
@@ -136,7 +166,7 @@ Recording, original transcription and translated playback continue independently
 You can immediately start another session with separate files and processing;
 older sessions retain their own models, source audio and encryption keys until
 completion. Translated sessions targeting the same endpoint serialize playback
-to avoid talking over one another. Explicit failures remain available for recovery.
+to avoid talking over one another. Transient processing failures retry automatically.
 Original routing uses its separate audio executor and never waits for journal
 writes, file finalization or inference.
 
@@ -231,7 +261,8 @@ and recording without transcription or translation neither send audio to
 recognizers nor require a key.
 
 `[local_runtime]` configures `directory`, `threads`, and `idle_unload_secs`.
-An empty folder uses the application's cache for the system account; an explicit
+An empty folder uses `models` inside Babel’s default user configuration folder
+(`~/.config/babel/models` on Linux); an explicit
 value must be absolute on Linux, macOS, or Windows. It is not resolved relative
 to the startup directory. `threads` accepts 1–64, defaulting to up to 2 according
 to available CPUs, for recognition and text translation; it does not control
@@ -270,6 +301,14 @@ remain visible and retain the source for recovery while Babel stays open.
 Recent originals are read directly from RAM, while a separate worker commits an
 encrypted journal in the system temporary directory. Slower consumers read older
 journal batches; neither disk latency nor model backpressure blocks original routing.
+
+Each translation direction defaults to recent speech after an interruption, showing
+which unconfirmed translation was skipped. Under **Recovery after a failure**, the
+unchecked accelerated replay option sets `replay_translation_backlog = true` for
+that direction. This preserves every pending translation window and uses 1.5x
+playback while behind; inference and playback checkpoints add latency. Recording
+and transcription preserve complete originals independently of this selection.
+See [recovery details](recording.md#recover-an-incomplete-session).
 
 ## Languages and prompts
 
@@ -458,7 +497,7 @@ folder according to the rules below.
 
 ### Audio history and advanced start
 
-By default, Babel retains up to ten minutes of recent original audio in memory,
+By default, Babel retains up to ten minutes of recent original audio in encrypted temporary files,
 separately per source, while routing captures audio. Configure **Settings → Recent
 audio history** or this section:
 
@@ -472,12 +511,13 @@ duration_secs = 600
 recently, an inactive route, or a capture failure may leave less audio available.
 History is discarded from oldest to newest as the window advances. Saving a lower
 capacity removes the part exceeding the new limit; saving `enabled = false`
-clears all retained memory. Starting/stopping sessions or switching devices does
+clears the rolling history. Snapshots already accepted by a session remain owned
+by that session until its processing finishes. Starting/stopping sessions or switching devices does
 not automatically erase history. Closing the application loses it.
 
 To include an interval, use **Advanced start options → Include recent history**
 next to **Start session**. Choose the duration in minutes, limited to capacity.
-The **Audio available in memory** counter shows the total stored, updated every
+The **Recent audio available** counter shows the total stored, updated every
 second. Input and output are considered together: simultaneous intervals count
 once, and gaps without capture do not increase the total. Configured capacity
 appears separately. The option starts unchecked and is not saved in TOML: it is
@@ -485,6 +525,15 @@ a decision for each new session. Normal startup from the dashboard, tray, or
 `babel run` in the CLI always starts without history. The API also defaults to
 no history: inclusion requires a positive `history_seconds` in that request.
 Keeping retention enabled does not enable inclusion in any session.
+
+History shares the session-retention encryption implementation: XChaCha20-Poly1305
+with keys held only in RAM, never in TOML or the temporary files. A bounded
+8 MiB plaintext queue feeds rotating journals on the retention executor. Readers
+decrypt small batches rather than loading the entire historical prefix. Storage
+failures retry accepted originals; if the queue fills, the dashboard reports
+history gaps while original routing continues. Expired files are reclaimed after
+the last session snapshot or reader releases them. Closing Babel loses the keys
+and makes remaining ciphertext unrecoverable.
 
 The interval goes only into enabled recording and/or transcription, using each
 feature's selected sources and the current STT recognizer configuration. It does
@@ -651,7 +700,7 @@ fall back to another device.
 If a device fails or is removed, the dashboard reports the error. Select another
 physical device from the tray to recover audio in the same session. The unavailable
 interval may create a gap; old audio does not accumulate in playback or translation
-queues. Optional in-memory retention is separate from those queues and enters
+queues. Optional encrypted rolling retention is separate from those queues and enters
 recording/transcription only through explicit selection at startup. Changing
 languages, models, and other options still requires stopping the
 processing session.

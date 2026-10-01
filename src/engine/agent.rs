@@ -57,6 +57,17 @@ impl Controller {
         Ok(state.agent_revision)
     }
     pub async fn set_agent_credential(&self, name: &str, key: Option<String>) -> Result<()> {
+        self.update_agent_credential(name, key, false).await
+    }
+    pub async fn set_agent_saved_credential(&self, name: &str, key: Option<String>) -> Result<()> {
+        self.update_agent_credential(name, key, true).await
+    }
+    async fn update_agent_credential(
+        &self,
+        name: &str,
+        key: Option<String>,
+        permanent: bool,
+    ) -> Result<()> {
         let key = key.map(zeroize::Zeroizing::new);
         let state = self.state.lock().await;
         let config = &state.config.agent;
@@ -66,7 +77,15 @@ impl Controller {
         );
         // Keys shared deliberately with audio providers retain their session
         // semantics; changing a command credential never restarts an audio task.
-        if let Some(key) = key {
+        if permanent {
+            let config = state.config.clone();
+            let path = self.path.clone();
+            let name = name.to_owned();
+            tokio::task::spawn_blocking(move || {
+                crate::credentials::save(&config, &path, &name, key.map(|v| v.to_string()))
+            })
+            .await??;
+        } else if let Some(key) = key {
             crate::credentials::set(name, key.to_string())?;
         } else {
             crate::credentials::clear(name)?;

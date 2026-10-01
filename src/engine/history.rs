@@ -13,7 +13,7 @@ pub(super) fn validate_request(config: &AppConfig, seconds: u32) -> Result<()> {
     }
     ensure!(
         config.history.enabled,
-        "Enable in-memory history before including it in a session"
+        "Enable recent audio history before including it in a session"
     );
     ensure!(
         seconds <= config.history.duration_secs,
@@ -49,7 +49,7 @@ pub(super) fn select_sources(snapshot: &mut HistorySnapshot, config: &AppConfig,
             frame
                 .captured_at
                 .checked_sub(Duration::from_secs_f64(
-                    frame.samples().len() as f64 / 16_000.0,
+                    frame.sample_count() as f64 / 16_000.0,
                 ))
                 .unwrap_or(frame.captured_at)
         })
@@ -118,11 +118,9 @@ pub(super) async fn write_transcript(
                     Some(record) => output.send(record).await.context("Transcript file closed")?,
                     None => history_open = false,
                 },
-                record = live.recv(), if live_open => match record {
+                record = live.recv(), if live_open && backlog.len() < MAX_PENDING_RECORDS && backlog_bytes < MAX_PENDING_TEXT_BYTES - 64 * 1024 => match record {
                     Some(record) => {
                         backlog_bytes += record_size(&record)?;
-                        ensure!(backlog_bytes <= MAX_PENDING_TEXT_BYTES && backlog.len() < MAX_PENDING_RECORDS,
-                            "History transcription is too slow: live text reached the memory limit; the session stopped without silently discarding passages");
                         backlog.push_back(record);
                     }
                     None => live_open = false,
@@ -219,43 +217,16 @@ async fn replay(
             let provider = provider::stt::create(&recognition, &profiles)?;
             let session = provider::stt::session_config(&recognition, &profiles)?;
             let (audio_tx, audio_rx) = mpsc::channel(8);
-            let (events_tx, mut events_rx) = mpsc::channel(32);
             let input = feed_frames(frames, clock, audio_tx, route_cancel.clone());
-            let model = provider.run_history(session, audio_rx, events_tx, route_cancel.clone());
-            let forward = async {
-                while let Some(event) = events_rx.recv().await {
-                    let record = match event {
-                        ProviderEvent::Transcript {
-                            input: true,
-                            text,
-                            metadata,
-                        } => TranscriptRecord::Text {
-                            input: true,
-                            text,
-                            metadata,
-                            received_at: chrono::Utc::now().to_rfc3339(),
-                        },
-                        ProviderEvent::TurnComplete => TranscriptRecord::TurnComplete,
-                        ProviderEvent::Reconnecting { .. } | ProviderEvent::Interrupted => {
-                            bail!("The history transcription connection was interrupted")
-                        }
-                        ProviderEvent::Warning { message } => {
-                            bail!("History transcription was incomplete: {message}")
-                        }
-                        _ => continue,
-                    };
-                    record_size(&record)?;
-                    output
-                        .send(TranscriptRecord::Routed {
-                            origin,
-                            record: Box::new(record),
-                        })
-                        .await
-                        .context("History transcription unavailable")?;
-                }
-                Ok(())
-            };
-            tokio::try_join!(input, model, forward)?;
+            let model = recovery::transcribe(
+                provider,
+                session,
+                audio_rx,
+                output,
+                origin,
+                route_cancel.clone(),
+            );
+            tokio::try_join!(input, model)?;
             ensure!(
                 !route_cancel.is_cancelled(),
                 "History transcription stopped before completion"
@@ -278,6 +249,7 @@ async fn feed_frames(
     cancel: CancellationToken,
 ) -> Result<()> {
     let mut next = 0u64;
+    let mut reader = crate::history::HistoryReader::default();
     for frame in frames {
         let end = (frame
             .captured_at
@@ -285,7 +257,7 @@ async fn feed_frames(
             .as_nanos()
             * 16000
             / 1_000_000_000) as u64;
-        let candidate = end.saturating_sub(frame.samples().len() as u64);
+        let candidate = end.saturating_sub(frame.sample_count() as u64);
         let start = if next > 0 && candidate <= next.saturating_add(800) {
             next
         } else {
@@ -296,7 +268,12 @@ async fn feed_frames(
             send_audio(&audio, vec![0; count], &cancel).await?;
             next += count as u64;
         }
-        for chunk in frame.samples().chunks(16000) {
+        let samples = tokio::select! {
+            biased;
+            _ = cancel.cancelled() => bail!("History transcription stopped before completion"),
+            samples = frame.read_samples(&mut reader) => samples?,
+        };
+        for chunk in samples.chunks(16000) {
             send_audio(&audio, chunk.to_vec(), &cancel).await?;
             next += chunk.len() as u64;
         }
@@ -320,8 +297,9 @@ mod tests {
     use super::*;
     use crate::{history::HistoryBuffer, provider::TranscriptMetadata};
 
-    #[test]
-    fn speaker_mirror_history_retains_one_original_lane_and_excludes_the_prior_physical_mic() {
+    #[tokio::test]
+    async fn speaker_mirror_history_retains_one_original_lane_and_excludes_the_prior_physical_mic()
+    {
         let mut config = AppConfig::default();
         config.audio.microphone_source = crate::config::MicrophoneSource::SpeakerOriginal;
         config.recording.enabled = true;
@@ -334,7 +312,14 @@ mod tests {
         select_sources(&mut snapshot, &config, now);
         assert_eq!(snapshot.frames.len(), 1);
         assert_eq!(snapshot.frames[0].lane, RecordingLane::Speaker);
-        assert_eq!(snapshot.frames[0].samples(), &[456; 1600]);
+        assert_eq!(
+            snapshot.frames[0]
+                .read_samples(&mut crate::history::HistoryReader::default())
+                .await
+                .unwrap()
+                .as_slice(),
+            &[456; 1600]
+        );
         config.recording.speaker = false;
         config.transcription.speaker = false;
         let mut snapshot = history.snapshot(10, now);
@@ -372,6 +357,7 @@ mod tests {
             &[2000; 1600],
             origin + Duration::from_millis(400),
         );
+        buffer.flush().await;
         let snapshot = buffer.snapshot(10, now);
         let (tx, mut rx) = mpsc::channel(1);
         let collect = async {
@@ -505,17 +491,16 @@ mod tests {
             snapshot,
             Arc::new(AtomicBool::new(true)),
         ));
-        recorder
-            .run_with_history(
-                audio_rx,
-                frames.into_iter().map(|frame| AudioRecord {
-                    lane: frame.lane,
-                    samples: frame.samples().to_vec(),
-                    captured_at: frame.captured_at,
-                }),
-            )
-            .await
-            .unwrap();
+        let mut reader = crate::history::HistoryReader::default();
+        let mut records = Vec::new();
+        for frame in frames {
+            records.push(AudioRecord {
+                lane: frame.lane,
+                samples: frame.read_samples(&mut reader).await.unwrap().to_vec(),
+                captured_at: frame.captured_at,
+            });
+        }
+        recorder.run_with_history(audio_rx, records).await.unwrap();
 
         let mut first_microphone = None;
         let mut first_speaker = None;
@@ -550,16 +535,21 @@ mod tests {
             .unwrap()
             .send("microfone histórico 1")
             .unwrap();
-        wait_for_text(&text_path, "microfone histórico 1").await;
         let (microphone, second_microphone) =
             tokio::time::timeout(Duration::from_secs(3), pending_requests.recv())
                 .await
                 .unwrap()
                 .unwrap();
         assert!(microphone);
+        let pending_text = tokio::fs::read_to_string(&text_path).await.unwrap();
+        assert!(
+            !pending_text.contains("microfone histórico 1"),
+            "An unconfirmed finite window must not persist partial text"
+        );
+        second_microphone.send("microfone histórico 2").unwrap();
+        wait_for_text(&text_path, "microfone histórico 2").await;
         first_speaker.unwrap().send("saída histórica").unwrap();
         wait_for_text(&text_path, "saída histórica").await;
-        second_microphone.send("microfone histórico 2").unwrap();
         tokio::time::timeout(Duration::from_secs(3), transcript)
             .await
             .unwrap()
@@ -578,8 +568,8 @@ mod tests {
         let text = tokio::fs::read_to_string(text_path).await.unwrap();
         let lines = [
             "[microphone] [audio +0.000–0.500s] microfone histórico 1",
-            "[received output] [audio +0.000–0.500s] saída histórica",
             "[microphone] [audio +0.500–1.000s] microfone histórico 2",
+            "[received output] [audio +0.000–0.500s] saída histórica",
             "[microphone] [audio +1.000–1.500s] microfone ao vivo",
             "[received output] [audio +1.000–1.500s] saída ao vivo",
         ];
@@ -685,7 +675,8 @@ mod tests {
         config.transcription.enabled = true;
         config.transcription.speaker = false;
         config.transcription.directory = directory.path().to_str().unwrap().into();
-        config.transcription.microphone_recognition.provider = "whisper".into();
+        config.transcription.microphone_recognition.provider =
+            "unsupported-fixture-provider".into();
         config.transcription.providers.whisper.endpoint = endpoint;
         let buffer = HistoryBuffer::new(&config.history);
         let now = Instant::now();

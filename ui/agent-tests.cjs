@@ -20,7 +20,7 @@ async function page(t, options = {}) {
   let history = structuredClone(options.history || { revision: 1, capacity: 100, entries: [] });
   let historyFailure = options.historyFailure; let now = Date.now(); let deferHistory = false; let releaseHistory;
   window.Date.now = () => now;
-  const calls = []; const secrets = new Set(); const timers = new Map(); let timerId = 0;
+  const calls = []; const secrets = new Set(); const savedSecrets = new Set(); const timers = new Map(); let timerId = 0;
   window.structuredClone = structuredClone; window.AbortSignal = AbortSignal;
   window.BabelDashboard = { authorization: () => `Bearer ${'a'.repeat(64)}` };
   window.setInterval = callback => { interval = callback; return 0; };
@@ -45,9 +45,9 @@ async function page(t, options = {}) {
       }
       return reply(history);
     }
-    if (parsed.pathname === '/api/credentials') return reply({ configured: secrets.has(parsed.searchParams.get('api_key_env')) });
-    if (parsed.pathname === '/api/agent/credentials') { secrets.add(body.api_key_env); return reply({ ok: true }); }
-    if (parsed.pathname === '/api/agent/credentials/clear') { secrets.delete(body.api_key_env); return reply({ ok: true }); }
+    if (parsed.pathname === '/api/credentials') { const name = parsed.searchParams.get('api_key_env'); const temporary = secrets.has(name), permanent = savedSecrets.has(name); return reply({configured: temporary || permanent, temporary, permanent, source: temporary ? 'temporary' : permanent ? 'permanent' : null, config_path: '/home/test/.config/babel/babel.toml'}); }
+    if (parsed.pathname === '/api/agent/credentials') { (body.storage === 'permanent' ? savedSecrets : secrets).add(body.api_key_env); return reply({ ok: true }); }
+    if (parsed.pathname === '/api/agent/credentials/clear') { (body.storage === 'permanent' ? savedSecrets : secrets).delete(body.api_key_env); return reply({ ok: true }); }
     if (parsed.pathname === '/api/agent/integrations/test') return reply({ tools: [{ server_id: 'test-server', name: '<img src=x onerror=alert(1)>', description: 'Find an appointment', input_schema: { type: 'object' } }] });
     if (parsed.pathname === '/api/agent/integrations/status') return reply([{ id: 'test-server', authenticated: oauthAuthenticated }]);
     if (parsed.pathname === '/api/agent/oauth/begin') return reply({ authorization_url: options.authorizationUrl || 'https://accounts.example.test/authorize?state=fixture' });
@@ -689,4 +689,24 @@ test('a locale change during a pending history request refreshes again without p
   p.releaseHistory(); await new Promise(resolve => setImmediate(resolve));
   await p.poll(30000);
   assert.equal(reads(), 4, 'a queued refresh does not fetch in a hidden workspace');
+});
+
+
+test('command credentials keep saved and temporary values and removals separate', async t => {
+  const p = await page(t, { language: 'en' });
+  p.byId('agent-credential-permanent').value = 'synthetic-command-saved';
+  p.byId('agent-credential-value').value = 'synthetic-command-temporary';
+  p.doc.querySelectorAll('#agent-credentials button')[2].click();
+  await settle(() => p.byId('agent-notice').textContent.includes('Key saved'));
+  assert.equal(p.byId('agent-credential-value').value, 'synthetic-command-temporary');
+  assert.equal(p.byId('agent-credential-permanent').value, '');
+  assert.match(p.byId('agent-credential-status').textContent, /Saved key is active/);
+  p.doc.querySelectorAll('#agent-credentials button')[0].click();
+  await settle(() => p.byId('agent-credential-status').textContent.includes('Temporary key is active'));
+  assert.match(p.byId('agent-credential-status').textContent, /saved key is also available/);
+  p.doc.querySelectorAll('#agent-credentials button')[3].click();
+  await settle(() => p.byId('agent-notice').textContent.includes('Saved key removed'));
+  assert.match(p.byId('agent-credential-status').textContent, /Temporary key is active/);
+  assert.equal(p.calls.some(c => c.path === '/api/agent/credentials/clear' && c.body.storage === 'permanent'), true);
+  assert.equal(JSON.stringify(p.config()).includes('synthetic-command'), false);
 });

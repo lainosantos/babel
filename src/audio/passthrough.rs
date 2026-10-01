@@ -605,12 +605,11 @@ mod tests {
                 .iter()
                 .all(|frame| frame.lane == RecordingLane::Speaker)
         );
-        let pcm = snapshot
-            .frames
-            .iter()
-            .flat_map(|frame| frame.samples())
-            .copied()
-            .collect::<Vec<_>>();
+        let mut reader = crate::history::HistoryReader::default();
+        let mut pcm = Vec::new();
+        for frame in &snapshot.frames {
+            pcm.extend_from_slice(&frame.read_samples(&mut reader).await.unwrap());
+        }
         assert!((300..=320).contains(&pcm.len()));
         assert!(pcm[20..].iter().all(|&value| (value - 4000).abs() <= 1));
         cancel.cancel();
@@ -670,7 +669,9 @@ mod tests {
         assert_eq!(snapshot.frames.len(), 1);
         assert!(
             snapshot.frames[0]
-                .samples()
+                .read_samples(&mut crate::history::HistoryReader::default())
+                .await
+                .unwrap()
                 .iter()
                 .all(|&sample| sample == 0)
         );

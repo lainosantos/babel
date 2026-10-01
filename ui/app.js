@@ -541,6 +541,7 @@
       else if (!dedicated && source.dataset.savedSource !== undefined) { source.value = source.dataset.savedSource; delete source.dataset.savedSource; }
       byId(`${route}-target_language`).disabled = !translating;
       byId(`${route}-gain`).disabled = !translating;
+      byId(`${route}-replay_translation_backlog`).disabled = !translating;
       byId(`${route}-prompt`).disabled = !translating || dedicated;
       byId(`${route}-prompt-hint`).textContent = dedicated
         ? t("ui.this_continuous_model_does_not_accept_prompts_saving_in_this_mode_clears_th")
@@ -659,7 +660,9 @@
     byId('history-buffer-capacity').textContent = Number.isFinite(buffer?.capacity_secs)
       ? t('history.buffer_capacity', { duration: historyDuration(buffer.capacity_secs) }) : '';
     const update = byId('history-buffer-update');
-    update.textContent = t(!known ? 'history.buffer_unavailable' : buffer.enabled ? 'history.buffer_live' : 'history.buffer_disabled');
+    const updateKey = !known ? 'history.buffer_unavailable' : !buffer.enabled ? 'history.buffer_disabled'
+      : buffer.dropped_frames > 0 ? 'history.buffer_gap' : buffer.storage_error ? 'history.buffer_recovering' : 'history.buffer_live';
+    update.textContent = t(updateKey);
     update.dataset.live = String(Boolean(known && buffer.enabled));
   }
 
@@ -875,6 +878,14 @@
     const sessionLabel = sessionIdentity ? t(status.running ? 'session.identity' : 'session.previous', { name: sessionIdentity }) : '';
     if (byId('session-identity').textContent !== sessionLabel) byId('session-identity').textContent = sessionLabel;
     byId('session-identity').hidden = !sessionIdentity;
+    const elapsed = status.session_elapsed_secs;
+    byId('session-timer').hidden = !fresh || !status.running || !Number.isFinite(elapsed);
+    if (Number.isFinite(elapsed)) {
+      const seconds = Math.max(0, Math.floor(elapsed));
+      const value = [Math.floor(seconds / 3600), Math.floor(seconds / 60) % 60, seconds % 60].map(part => String(part).padStart(2, '0')).join(':');
+      byId('session-elapsed').textContent = value;
+      byId('session-elapsed').dateTime = `PT${seconds}S`;
+    }
     const waiting = routeNames.every(route => routeWaiting(route, status));
     byId('session-state').textContent = status.running ? t("ui.session_active") : status.finalizing ? t('session.finalizing') : waiting ? t('routing.waiting_for_app') : status.routing_active ? t("ui.original_audio") : t("ui.no_routing");
     byId('status-dot').className = `status-dot${status.running || status.routing_active ? ' running' : ''}${status.last_error || status.routing_error ? ' error' : ''}`;
@@ -891,6 +902,10 @@
         byId(`${route}-state`).textContent = t(speakerTranslationActive(status) ? 'routing.after_output_translation' : 'routing.speaker_audio');
       }
       byId(`${route}-state`).title = routeWaiting(route, status) ? waitingHint(route) : '';
+      const recovery = byId(`${route}-recovery-status`);
+      const recovering = (current.recovering || []).map(feature => t(`processing.${feature}`));
+      recovery.textContent = [recovering.length ? t('processing.recovering', { features: recovering.join(', ') }) : '', current.recovery_notice || ''].filter(Boolean).join(' ');
+      recovery.hidden = !recovery.textContent;
       byId(`${route}-reconnects`).textContent = t('audio.reconnections', { count: i18n.number(current.reconnects || 0) });
       for (const metric of ['captured_frames', 'dropped_frames', 'processing_dropped_frames', 'underruns']) {
         byId(`${route}-${metric}`).textContent = i18n.number(current[metric] || 0);
@@ -1002,6 +1017,7 @@
       await refreshRetention();
     } catch (error) {
       state.statusFresh = false;
+      byId('session-timer').hidden = true;
       renderHistoryBuffer();
       byId('session-state').textContent = t("ui.disconnected");
       byId('status-dot').className = 'status-dot error';
@@ -1196,9 +1212,11 @@
     try {
       const result = await api(`/credentials?${new URLSearchParams({ api_key_env: environment })}`);
       if (value(provider, 'api_key_env') !== environment) return;
-      i18n.message(status, result.configured
-        ? t("ui.a_key_is_available_for_this_profile_in_memory_or_the_environment_its_value_")
-        : t("ui.no_key_is_available_apply_a_temporary_key_or_set_the_environment_variable_b"));
+      const source = result.source || (result.configured ? 'temporary' : 'absent');
+      i18n.message(status, t(`credentials.source_${source}`) + (result.permanent && source === 'temporary' ? ` ${t('credentials.saved_available')}` : ''));
+      const path = byId(`${prefix}credential-${provider}-saved-path`);
+      if (path) i18n.message(path, result.config_path ? t('credentials.saved_path', { path: result.config_path }) : t('credentials.priority'));
+
     } catch (error) { if (value(provider, 'api_key_env') === environment) status.textContent = error.message; }
   }
 
@@ -1219,28 +1237,39 @@
     const field = byId(`stt-profile-${sttProvider(button.dataset.sttRouteProfile)}-model`);
     window.BabelWorkspace?.revealField(field);
   }));
-  document.querySelectorAll('.credential-apply, .stt-credential-apply').forEach(button => button.addEventListener('click', () => action(async () => {
+  window.addEventListener('babel:credentials-changed', event => {
+    if (event.detail?.origin === 'audio') return;
+    for (const [provider, stt] of [['gemini', false], ['openai', false], ...['gemini', 'openai', 'deepgram', 'whisper'].map(name => [name, true])]) refreshCredentialStatus(provider, stt);
+  });
+  async function refreshSharedCredentials(environment) {
+    const profiles = [['gemini', false], ['openai', false], ...['gemini', 'openai', 'deepgram', 'whisper'].map(name => [name, true])];
+    await Promise.all(profiles.filter(([name, stt]) => (stt ? sttProfileValue : profileValue)(name, 'api_key_env') === environment).map(([name, stt]) => refreshCredentialStatus(name, stt)));
+    window.dispatchEvent(new CustomEvent('babel:credentials-changed', { detail: { origin: 'audio' } }));
+  }
+  document.querySelectorAll('.credential-apply, .stt-credential-apply, .credential-save, .stt-credential-save').forEach(button => button.addEventListener('click', () => action(async () => {
     const provider = button.dataset.provider;
-    const stt = button.classList.contains('stt-credential-apply');
+    const stt = button.className.includes('stt-credential-');
+    const permanent = button.classList.contains('credential-save') || button.classList.contains('stt-credential-save');
     const environment = (stt ? sttProfileValue : profileValue)(provider, 'api_key_env');
     if (!environment.trim()) throw new Error(t('stt.credential_name_required'));
-    const input = byId(`${stt ? 'stt-' : ''}credential-${provider}`);
+    const input = byId(`${stt ? 'stt-' : ''}credential-${provider}${permanent ? '-permanent' : ''}`);
     const key = input.value;
-    input.value = '';
     if (!key.trim()) throw new Error(t("ui.enter_a_key_for_this_app_instance"));
-    await api('/credentials', { method: 'POST', body: { api_key_env: environment, key } });
-    await refreshCredentialStatus(provider, stt);
-    announce(t("ui.key_applied_to_this_app_instance_s_memory_only_it_will_be_discarded_when_ba"));
+    await api('/credentials', { method: 'POST', body: { api_key_env: environment, key, ...(permanent ? { storage: 'permanent' } : {}) } });
+    input.value = '';
+    await refreshSharedCredentials(environment);
+    announce(t(permanent ? 'credentials.saved' : "ui.key_applied_to_this_app_instance_s_memory_only_it_will_be_discarded_when_ba"));
   })));
-  document.querySelectorAll('.credential-clear, .stt-credential-clear').forEach(button => button.addEventListener('click', () => action(async () => {
+  document.querySelectorAll('.credential-clear, .stt-credential-clear, .credential-clear-permanent, .stt-credential-clear-permanent').forEach(button => button.addEventListener('click', () => action(async () => {
     const provider = button.dataset.provider;
-    const stt = button.classList.contains('stt-credential-clear');
+    const stt = button.className.includes('stt-credential-');
+    const permanent = button.className.includes('clear-permanent');
     const environment = (stt ? sttProfileValue : profileValue)(provider, 'api_key_env');
     if (!environment.trim()) throw new Error(t('stt.credential_name_required'));
-    byId(`${stt ? 'stt-' : ''}credential-${provider}`).value = '';
-    await api('/credentials/clear', { method: 'POST', body: { api_key_env: environment } });
-    await refreshCredentialStatus(provider, stt);
-    announce(t("ui.temporary_key_removed_a_key_set_in_the_environment_remains_available_as_a_f"));
+    await api('/credentials/clear', { method: 'POST', body: { api_key_env: environment, ...(permanent ? { storage: 'permanent' } : {}) } });
+    byId(`${stt ? 'stt-' : ''}credential-${provider}${permanent ? '-permanent' : ''}`).value = '';
+    await refreshSharedCredentials(environment);
+    announce(t(permanent ? 'credentials.saved_removed' : 'credentials.temporary_removed'));
   })));
 
   function renderInterfaceText() {

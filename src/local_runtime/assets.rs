@@ -60,25 +60,7 @@ pub(super) fn cache_directory(custom: &str) -> Result<PathBuf> {
         );
         return Ok(path);
     }
-    #[cfg(target_os = "windows")]
-    let base = std::env::var_os("LOCALAPPDATA")
-        .map(PathBuf::from)
-        .map(|p| p.join("Babel"));
-    #[cfg(target_os = "macos")]
-    let base = std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .map(|p| p.join("Library/Application Support/Babel"));
-    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
-    let base = std::env::var_os("XDG_DATA_HOME")
-        .map(PathBuf::from)
-        .filter(|p| p.is_absolute())
-        .map(|p| p.join("babel"))
-        .or_else(|| {
-            std::env::var_os("HOME")
-                .map(PathBuf::from)
-                .map(|p| p.join(".local/share/babel"))
-        });
-    let path = base.context("Cannot determine the local model directory; configure an absolute directory in Settings")?.join("models");
+    let path = crate::config::default_path()?.with_file_name("models");
     ensure!(
         path.is_absolute(),
         "Local model directory must be an absolute path"
@@ -431,6 +413,13 @@ mod tests {
     #[test]
     fn custom_model_path_is_absolute() {
         assert!(cache_directory("relative/path").is_err());
-        assert!(cache_directory("").unwrap().is_absolute());
+        assert_eq!(
+            cache_directory("").unwrap(),
+            crate::config::default_path()
+                .unwrap()
+                .with_file_name("models")
+        );
+        let custom = std::env::temp_dir().join("custom-babel-models");
+        assert_eq!(cache_directory(custom.to_str().unwrap()).unwrap(), custom);
     }
 }

@@ -1,6 +1,101 @@
 use anyhow::{Context, Result, ensure};
 use serde::{Deserialize, Serialize};
-use std::{fs, io::Write, path::Path};
+use std::{
+    fs,
+    io::Write,
+    path::{Path, PathBuf},
+    sync::Mutex,
+};
+use zeroize::Zeroizing;
+
+static CONFIG_WRITES: Mutex<()> = Mutex::new(());
+
+/// CLI and login startup share the same per-user default.
+pub fn default_path() -> Result<PathBuf> {
+    let home = std::env::home_dir().context("User home directory is unavailable")?;
+    ensure!(home.is_absolute(), "User home directory must be absolute");
+    Ok(user_config_directory(
+        std::env::consts::OS,
+        &home,
+        std::env::var_os("APPDATA").map(PathBuf::from).as_deref(),
+        std::env::var_os("XDG_CONFIG_HOME")
+            .map(PathBuf::from)
+            .as_deref(),
+    )
+    .join("babel.toml"))
+}
+pub fn user_config_directory(
+    os: &str,
+    home: &Path,
+    appdata: Option<&Path>,
+    xdg: Option<&Path>,
+) -> PathBuf {
+    match os {
+        "macos" => home.join("Library/Application Support/Babel"),
+        "windows" => appdata
+            .filter(|p| p.is_absolute())
+            .map_or_else(|| home.join("AppData/Roaming"), PathBuf::from)
+            .join("Babel"),
+        _ => xdg
+            .filter(|p| p.is_absolute())
+            .map_or_else(|| home.join(".config"), PathBuf::from)
+            .join("babel"),
+    }
+}
+
+fn read_document(path: &Path) -> Result<toml::Value> {
+    ensure!(
+        fs::metadata(path)?.len() <= 65_536,
+        "Configuration exceeds 64 KiB"
+    );
+    let text =
+        Zeroizing::new(fs::read_to_string(path).context("Could not read the configuration")?);
+    // TOML parse errors can include the source line, including a saved key.
+    toml::from_str(&text).map_err(|_| anyhow::anyhow!("Invalid TOML configuration"))
+}
+fn take_credentials(document: &mut toml::Value) -> Result<crate::credentials::SavedKeys> {
+    let value = document
+        .as_table_mut()
+        .context("Invalid TOML configuration")?
+        .remove("credentials");
+    let Some(value) = value else {
+        return Ok(Default::default());
+    };
+    let toml::Value::Table(entries) = value else {
+        anyhow::bail!("Invalid saved credentials table");
+    };
+    let mut keys = crate::credentials::SavedKeys::new();
+    for (name, value) in entries {
+        let toml::Value::String(key) = value else {
+            anyhow::bail!("Invalid saved credential value");
+        };
+        let key = Zeroizing::new(key);
+        crate::credentials::validate_name(&name)?;
+        crate::credentials::validate_key(&key)?;
+        keys.insert(name, key);
+    }
+    Ok(keys)
+}
+pub(crate) fn saved_credentials(path: &Path) -> Result<crate::credentials::SavedKeys> {
+    if !path.exists() {
+        return Ok(Default::default());
+    }
+    take_credentials(&mut read_document(path)?)
+}
+struct CredentialTable<'a>(&'a crate::credentials::SavedKeys);
+impl Serialize for CredentialTable<'_> {
+    fn serialize<S: serde::Serializer>(
+        &self,
+        serializer: S,
+    ) -> std::result::Result<S::Ok, S::Error> {
+        use serde::ser::SerializeMap;
+        let mut map = serializer.serialize_map(Some(self.0.len()))?;
+        for (name, key) in self.0 {
+            map.serialize_entry(name, key.as_str())?;
+        }
+        map.end()
+    }
+}
 
 mod stt;
 pub use stt::{
@@ -27,7 +122,7 @@ pub struct AppConfig {
     pub files: FileConfig,
 }
 
-/// Managed inference assets live in an OS cache unless an absolute directory is chosen.
+/// Managed inference assets live beside the user config unless a custom directory is chosen.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct LocalRuntimeConfig {
@@ -173,7 +268,7 @@ impl RecordingMixConfig {
     }
 }
 
-/// Original audio retained only in memory, independently of file sessions.
+/// Rolling original audio retained in encrypted temporary files, independently of file sessions.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct HistoryConfig {
@@ -403,6 +498,9 @@ pub struct RouteConfig {
     pub target_language: String,
     pub prompt: String,
     pub gain: f32,
+    /// Explicit opt-in: keep the full translation backlog and speed up playback
+    /// after an interruption. The default resumes from recent speech.
+    pub replay_translation_backlog: bool,
     #[serde(skip_serializing)]
     pub voice: RemovedSetting,
     /// Internal, language-selected embedded Piper voice. Never saved or accepted
@@ -421,6 +519,7 @@ impl Default for RouteConfig {
             target_language: "en-US".into(),
             prompt: String::new(),
             gain: 1.0,
+            replay_translation_backlog: false,
             voice: RemovedSetting,
             resolved_voice: String::new(),
         }
@@ -549,16 +648,12 @@ impl AppConfig {
         }
     }
     pub fn load(path: &Path) -> Result<Self> {
-        ensure!(
-            fs::metadata(path)?.len() <= 65_536,
-            "Configuration exceeds 64 KiB"
-        );
-        let text = fs::read_to_string(path).context("Could not read the configuration")?;
-        let document: toml::Value = toml::from_str(&text).context("Invalid TOML configuration")?;
+        let mut document = read_document(path)?;
+        let _credentials = take_credentials(&mut document)?;
         let mut cfg: Self = document
             .clone()
             .try_into()
-            .context("Invalid TOML configuration")?;
+            .map_err(|_| anyhow::anyhow!("Invalid TOML configuration"))?;
         let stored_base = document
             .get("files")
             .and_then(|files| files.get("base_path"));
@@ -625,14 +720,47 @@ impl AppConfig {
         Ok(cfg)
     }
     pub fn save(&self, path: &Path) -> Result<()> {
+        let _guard = CONFIG_WRITES.lock().unwrap_or_else(|e| e.into_inner());
+        self.write_document(path, &saved_credentials(path)?)
+    }
+    pub(crate) fn save_credential(&self, path: &Path, name: &str, key: Option<&str>) -> Result<()> {
+        let _guard = CONFIG_WRITES.lock().unwrap_or_else(|e| e.into_inner());
+        let mut entries = saved_credentials(path)?;
+        if let Some(key) = key {
+            entries.insert(name.into(), Zeroizing::new(key.into()));
+        } else {
+            entries.remove(name);
+        }
+        self.write_document(path, &entries)
+    }
+    fn write_document(&self, path: &Path, keys: &crate::credentials::SavedKeys) -> Result<()> {
         self.validate()?;
-        let serialized = toml::to_string_pretty(self)?;
+        let mut serialized = Zeroizing::new(toml::to_string_pretty(self)?);
+        if !keys.is_empty() {
+            #[derive(Serialize)]
+            struct Saved<'a> {
+                credentials: CredentialTable<'a>,
+            }
+            let table = Zeroizing::new(toml::to_string(&Saved {
+                credentials: CredentialTable(keys),
+            })?);
+            serialized.push('\n');
+            serialized.push_str(&table);
+        }
         ensure!(serialized.len() <= 65_536, "Configuration exceeds 64 KiB");
         let parent = path
             .parent()
             .filter(|p| !p.as_os_str().is_empty())
             .unwrap_or(Path::new("."));
+        let new_parent = !parent.exists();
         fs::create_dir_all(parent)?;
+        #[cfg(unix)]
+        if new_parent {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(parent, fs::Permissions::from_mode(0o700))?;
+        }
+        #[cfg(not(unix))]
+        let _ = new_parent;
         let mut file = tempfile::NamedTempFile::new_in(parent)?;
         #[cfg(unix)]
         {
@@ -952,6 +1080,31 @@ fn canonical_device(id: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn replaying_translation_backlog_requires_an_explicit_per_route_opt_in() {
+        let mut document = serde_json::to_value(AppConfig::default()).unwrap();
+        document["microphone"]
+            .as_object_mut()
+            .unwrap()
+            .remove("replay_translation_backlog");
+        document["speaker"]
+            .as_object_mut()
+            .unwrap()
+            .remove("replay_translation_backlog");
+        let defaults: AppConfig = serde_json::from_value(document.clone()).unwrap();
+        assert!(!defaults.microphone.replay_translation_backlog);
+        assert!(!defaults.speaker.replay_translation_backlog);
+        document["microphone"]["replay_translation_backlog"] = true.into();
+        let opted: AppConfig = serde_json::from_value(document.clone()).unwrap();
+        assert!(opted.microphone.replay_translation_backlog);
+        assert!(!opted.speaker.replay_translation_backlog);
+        let saved = toml::to_string(&opted).unwrap();
+        let restored: AppConfig = toml::from_str(&saved).unwrap();
+        assert!(restored.microphone.replay_translation_backlog);
+        document["microphone"]["replay_translation_backlog"] = "true".into();
+        assert!(serde_json::from_value::<AppConfig>(document).is_err());
+    }
 
     #[test]
     fn removed_voice_settings_are_discarded_and_migrated_without_changing_session_preferences() {
