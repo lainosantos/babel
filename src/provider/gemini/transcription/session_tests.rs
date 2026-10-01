@@ -87,6 +87,7 @@ async fn turn(socket: &mut Server) -> Vec<i16> {
         let bytes = STANDARD
             .decode(input["audio"]["data"].as_str().unwrap())
             .unwrap();
+        assert!(bytes.len() <= STREAM_CHUNK_SAMPLES * 2);
         pcm.extend(
             bytes
                 .as_chunks::<2>()
@@ -113,9 +114,13 @@ async fn window(
     cancel: CancellationToken,
 ) -> (Result<()>, Vec<ProviderEvent>) {
     let (input, audio) = mpsc::channel(4);
-    input.send(vec![0; 1600]).await.unwrap();
-    input.send(samples).await.unwrap();
-    drop(input);
+    let feed = async move {
+        input.send(vec![0; 1600]).await.unwrap();
+        for chunk in samples.chunks(16000) {
+            input.send(chunk.to_vec()).await.unwrap();
+        }
+        drop(input);
+    };
     let (events, mut output) = mpsc::channel(16);
     let collect = async {
         let mut received = Vec::new();
@@ -125,14 +130,117 @@ async fn window(
         received
     };
     let settings = config();
-    timeout(Duration::from_secs(8), async {
-        tokio::join!(
+    timeout(WINDOW_FINAL_TIMEOUT + Duration::from_secs(5), async {
+        let (result, events, ()) = tokio::join!(
             session(&settings, "synthetic-key", endpoint, audio, events, cancel),
+            collect,
+            feed
+        );
+        (result, events)
+    })
+    .await
+    .unwrap()
+}
+
+#[tokio::test]
+async fn retained_window_with_capture_overflow_has_one_complete_audio_boundary() {
+    let (listener, endpoint) = bind().await;
+    let mut originals = vec![420; 80000];
+    // A 13 ms tail exceeds the engine's five-second collection target. It
+    // must stay with the speech window instead of becoming an extra turn.
+    originals.extend(vec![1; 208]);
+    let expected = originals.clone();
+    let server = AbortOnDropHandle::new(tokio::spawn(async move {
+        let mut socket = accept(&listener, true).await;
+        let received = turn(&mut socket).await;
+        assert_eq!(received.len(), expected.len());
+        assert!(received == expected, "Original window PCM changed");
+        socket.send(Message::Text(json!({"serverContent":{"inputTranscription":{"text":"Complete original window."}}}).to_string().into())).await.unwrap();
+    }));
+    let (result, events) = window(&endpoint, originals, CancellationToken::new()).await;
+    result.unwrap();
+    assert_eq!(events.iter().filter(|event| matches!(event, ProviderEvent::Transcript {text, ..} if text == "Complete original window.")).count(), 1);
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| matches!(event, ProviderEvent::TurnComplete))
+            .count(),
+        1
+    );
+    server.await.unwrap();
+}
+
+#[tokio::test]
+async fn retained_window_accepts_a_final_later_than_the_old_five_second_deadline() {
+    let (listener, endpoint) = bind().await;
+    let server = AbortOnDropHandle::new(tokio::spawn(async move {
+        let mut socket = accept(&listener, true).await;
+        assert_eq!(turn(&mut socket).await, vec![420; 1600]);
+        tokio::time::sleep(Duration::from_secs(6)).await;
+        socket
+            .send(Message::Text(
+                json!({"serverContent":{"inputTranscription":{"text":"Delayed original speech."}}})
+                    .to_string()
+                    .into(),
+            ))
+            .await
+            .unwrap();
+    }));
+    let (result, events) = window(&endpoint, vec![420; 1600], CancellationToken::new()).await;
+    result.unwrap();
+    assert!(events.iter().any(|event| matches!(event, ProviderEvent::Transcript {text, ..} if text == "Delayed original speech.")));
+    server.await.unwrap();
+}
+
+#[tokio::test]
+async fn pauses_and_digital_silence_inside_a_retained_window_do_not_split_it() {
+    let (listener, endpoint) = bind().await;
+    let (input, audio) = mpsc::channel(4);
+    let (events, mut output) = mpsc::channel(16);
+    let server = AbortOnDropHandle::new(tokio::spawn(async move {
+        let mut socket = accept(&listener, true).await;
+        let received = turn(&mut socket).await;
+        assert_eq!(received.len(), 6400);
+        assert!(received[..1600].iter().all(|sample| *sample == 420));
+        assert!(received[1600..4800].iter().all(|sample| *sample == 0));
+        assert!(received[4800..].iter().all(|sample| *sample == 840));
+        socket.send(Message::Text(json!({"serverContent":{"inputTranscription":{"text":"Speech on both sides of a pause."}}}).to_string().into())).await.unwrap();
+    }));
+    let feed = async move {
+        input.send(vec![420; 1600]).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(350)).await;
+        input.send(vec![0; 3200]).await.unwrap();
+        input.send(vec![840; 1600]).await.unwrap();
+    };
+    let collect = async {
+        let mut finals = 0;
+        while let Some(event) = output.recv().await {
+            if matches!(event, ProviderEvent::TurnComplete) {
+                finals += 1;
+            }
+        }
+        finals
+    };
+    let settings = config();
+    let (result, (), finals) = timeout(Duration::from_secs(3), async {
+        tokio::join!(
+            session(
+                &settings,
+                "synthetic-key",
+                &endpoint,
+                audio,
+                events,
+                CancellationToken::new()
+            ),
+            feed,
             collect
         )
     })
     .await
-    .unwrap()
+    .unwrap();
+    result.unwrap();
+    assert_eq!(finals, 1);
+    server.await.unwrap();
 }
 
 #[tokio::test]
@@ -152,7 +260,7 @@ async fn failed_original_window_replays_to_the_same_configured_live_model() {
     }));
     let (failed, events) = window(&endpoint, vec![42; 1600], CancellationToken::new()).await;
     let error = failed.unwrap_err();
-    assert_eq!(retryable_error(&error), Some(true));
+    assert!(crate::provider::retryable_error(&error));
     assert!(error.to_string().contains("1012"));
     assert!(!error.to_string().contains("synthetic-key"));
     assert!(!events.iter().any(|event| matches!(
@@ -183,7 +291,7 @@ async fn rejected_live_setup_returns_its_error_without_an_alternate_model() {
     }));
     let (result, events) = window(&endpoint, vec![42; 1600], CancellationToken::new()).await;
     let error = result.unwrap_err();
-    assert_eq!(retryable_error(&error), Some(false));
+    assert!(!crate::provider::retryable_error(&error));
     assert!(error.to_string().contains("1008"));
     assert!(!error.to_string().contains("private speech"));
     assert!(events.is_empty());
@@ -200,7 +308,7 @@ async fn a_missing_final_is_a_retryable_error_and_never_acknowledges_original_au
     }));
     let (result, events) = window(&endpoint, vec![1; 1600], CancellationToken::new()).await;
     let error = result.unwrap_err();
-    assert_eq!(retryable_error(&error), Some(true));
+    assert!(crate::provider::retryable_error(&error));
     assert!(
         error
             .to_string()

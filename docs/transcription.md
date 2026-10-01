@@ -108,26 +108,65 @@ requests text output and preserves the original speech, without a target languag
 translation prompt, or voice override.
 
 Session-owned transcription reads accepted originals from the encrypted journal
-in windows of at most five seconds plus one capture chunk. It waits for a whole
-window to complete before saving its results. A failed request retries the exact
+in initial windows of five seconds plus at most one capture chunk. It waits for
+a whole window to complete before saving its results. A failed request retries the exact
 same PCM and capture timeline with exponential backoff from 250 ms to five
 seconds. Partial text from unsuccessful attempts is discarded; confirmed windows
-are not submitted again. Transcription preserves all original speech while
+are not submitted again. Transcription retains the full original audio while
 translation may independently jump to recent audio. Stop ends capture; pending
 transcription continues while Babel remains open. During active capture, transient
-failures keep retrying the same window, slowing to one attempt every 30 seconds
-after the initial reconnect budget. After Stop, that budget bounds failed
+transport failures keep retrying the same window, slowing to one attempt every
+30 seconds after the initial reconnect budget. After Stop, that budget bounds failed
 attempts for each window, with a minimum of three transient retries;
 successful windows can keep finalizing without a blanket time limit. Permanent
 Gemini authentication or protocol errors pause immediately. The sanitized cause
 is shown in processing status; unfinished originals remain available for explicit
 recovery. Successful recovery clears only this source's transcription error.
 
+The adapter sends each retained window as one manual Live turn, ending at input
+EOF. It never divides the engine's five-second window again: its overflow capture
+chunk and quiet tail stay with the preceding speech rather than becoming a tiny
+second turn. PCM messages contain at most 100 ms of audio. Final acknowledgement
+has a 30-second deadline after the complete window is submitted; a delayed result
+within that limit can finish without reconnecting. This is a per-window failure
+bound, not a time limit on successful session finalization. Absence of a final
+result is never treated as proof of silence or successful recognition.
+
+During normal session transcription, a missing final acknowledgement has a
+separate recovery policy: the engine keeps the unconfirmed PCM prefix and appends the next five seconds of originals,
+up to 30 seconds plus one capture chunk. This supplies following speech without
+classifying quiet audio as disposable silence. Attempts remain bounded by the
+reconnect budget even during capture. After Stop, the engine appends available
+following context in one step and makes at most one additional context attempt.
+If no following audio exists, it does not repeat the same failed request.
+At the size or retry limit, the transcript
+marks the unresolved capture interval and the reader continues with later audio.
+Later confirmed text is saved, but the session remains incomplete and keeps its
+encrypted originals for explicit recovery. Successfully confirmed windows are
+never included in the expanded window.
+
+Normal Gemini transcription uses a local voice activity detector to avoid
+opening speech requests for non-speech windows, including initial background
+and closing tails. Earshot's bundled Rust classifier evaluates 16 ms PCM frames
+on the processing worker with a conservative speech threshold of 0.35 (below
+its usual 0.5 threshold). Any frame above this threshold keeps the window
+eligible. Windows shorter than half a second remain eligible unless they meet
+the background floor: every 20 ms block has RMS at most 4 PCM16 units and every
+sample has magnitude at most 16 units. The detector is a heuristic; it can miss
+very quiet or unusual speech. It does not recognize words, select another model,
+or contact another API. Recording and encrypted retention preserve unchanged
+originals, including windows classified as non-speech. Failed audible windows
+remain unconfirmed; a timeout never proves silence.
+
 Every window, including history and explicit session recovery, uses the selected
 `transcription.providers.gemini.model` over the Live API. Recovery opens a new
-connection to that same model and replays the exact unconfirmed original window.
+connection to that same model and preserves the exact unconfirmed original PCM.
 Window boundaries limit retained processing work; they do not select a different
 model or upload a WAV to another API. There is no automatic provider/model fallback.
+Confirmed windows are cached in the session encrypted journal before TXT delivery.
+Recovery reuses those results and sends only unconfirmed windows to the model,
+including when the earlier TXT writer failed. Microphone, received output and
+pre-session history have separate cache namespaces.
 
 The Live adapter validates final `inputTranscription` rather than saving
 speculative `interimInputTranscription` hypotheses. A whole window must succeed

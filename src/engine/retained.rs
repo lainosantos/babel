@@ -12,7 +12,7 @@ use std::{
     collections::VecDeque,
     sync::{
         Arc, Mutex,
-        atomic::{AtomicUsize, Ordering},
+        atomic::{AtomicU64, AtomicUsize, Ordering},
     },
     time::{Duration, Instant},
 };
@@ -73,6 +73,7 @@ struct State {
     lanes: [Lane; 2],
     memory_bytes: usize,
     staging_bytes: usize,
+    capacity_exhausted: bool,
     frames: u64,
     encrypted_frames: u64,
     encrypted_bytes: u64,
@@ -121,6 +122,8 @@ pub(super) struct RetentionStatus {
 /// Keep session ownership outside provider/writer tasks. Final owner drop erases
 /// the RAM-only key and removes ephemeral ciphertext through SessionRetention.
 pub(super) struct RetainedSession {
+    pub(super) transcripts: Arc<super::transcription_cache::Cache>,
+    translation_checkpoints: [AtomicU64; 2],
     inner: Arc<Inner>,
     _worker: AbortOnDropHandle<()>,
 }
@@ -150,6 +153,8 @@ impl RetainedSession {
             stopping: tokio_util::sync::CancellationToken::new(),
         });
         Arc::new(Self {
+            transcripts: Arc::new(super::transcription_cache::Cache::new(inner.store.clone())),
+            translation_checkpoints: std::array::from_fn(|_| AtomicU64::new(0)),
             _worker: AbortOnDropHandle::new(runtime.spawn(spill(inner.clone()))),
             inner,
         })
@@ -184,6 +189,7 @@ impl RetainedSession {
             "Original retention capture clock moved backwards"
         );
         if state.staging_bytes.saturating_add(required) > self.inner.limits.hard {
+            state.capacity_exhausted = true;
             state.error = Some("Original retention memory limit reached; accepted audio remains preserved, but capture must stop until encrypted storage recovers".into());
             self.inner.wake.notify_one();
             self.inner.changed();
@@ -267,11 +273,13 @@ impl RetainedSession {
         self.inner.changed();
     }
 
-    /// A failed consumer still has recoverable originals. Only an upstream gap
-    /// or the bounded storage ceiling can make accepting more capture unsafe.
+    /// An upstream gap leaves the session incomplete but does not prevent
+    /// retaining subsequent originals. Stop only when storage cannot accept more.
     pub(super) fn capture_requires_stop(&self) -> bool {
         let state = self.inner.state.lock().unwrap_or_else(|e| e.into_inner());
-        state.missing_audio || state.staging_bytes >= self.inner.limits.hard || state.worker_done
+        state.capacity_exhausted
+            || state.staging_bytes >= self.inner.limits.hard
+            || state.worker_done
     }
     pub(super) fn storage_recovering(&self) -> bool {
         self.inner
@@ -284,6 +292,16 @@ impl RetainedSession {
 
     /// Independent processing cursor. Slow consumers read the encrypted backlog
     /// without blocking capture, dropping frames, or pinning all PCM in RAM.
+    pub(super) fn translation_checkpoint(&self, origin: TranscriptOrigin) -> u64 {
+        self.translation_checkpoints[lane_index(origin)].load(Ordering::Acquire)
+    }
+
+    /// Processing only: advance after complete translated playback, never on
+    /// model output alone. The cursor survives worker failure and explicit replay.
+    pub(super) fn confirm_translation(&self, origin: TranscriptOrigin, checkpoint: u64) {
+        self.translation_checkpoints[lane_index(origin)].fetch_max(checkpoint, Ordering::AcqRel);
+    }
+
     pub(super) fn reader(self: &Arc<Self>, origin: TranscriptOrigin) -> Reader {
         self.inner.replays.fetch_add(1, Ordering::Relaxed);
         Reader {
@@ -428,6 +446,7 @@ impl RetainedSession {
         for id in ids {
             self.inner.store.ack(id).await?;
         }
+        self.transcripts.complete().await?;
         let mut state = self.inner.state.lock().unwrap_or_else(|e| e.into_inner());
         state.lanes = Default::default();
         state.memory_bytes = 0;
@@ -693,6 +712,25 @@ impl Reader {
     }
     pub(super) async fn next(&mut self) -> Result<Option<AudioRecord>> {
         loop {
+            self.changes.borrow_and_update();
+            let closed = self.retained.status().capture_closed;
+            if let Some(frame) = self.available().await? {
+                return Ok(Some(frame));
+            }
+            if closed {
+                return Ok(None);
+            }
+            self.changes
+                .changed()
+                .await
+                .context("Original retention updates closed")?;
+        }
+    }
+
+    /// Read already captured work without waiting for this source to become
+    /// active. Recording merges available clocks across both sources.
+    async fn available(&mut self) -> Result<Option<AudioRecord>> {
+        loop {
             if let Some(frame) = self.decoded.pop_front() {
                 if frame.sequence < self.next_sequence {
                     continue;
@@ -709,7 +747,7 @@ impl Reader {
                 }));
             }
             self.changes.borrow_and_update();
-            let (batch, memory, ended) = {
+            let (batch, memory) = {
                 let state = self
                     .retained
                     .inner
@@ -749,19 +787,20 @@ impl Reader {
                 if memory.is_some() {
                     batch = None;
                 }
-                let uncommitted = lane
-                    .pending
-                    .back()
-                    .is_some_and(|frame| frame.sequence >= self.next_sequence);
-                (batch, memory, state.capture_closed && !uncommitted)
+                (batch, memory)
             };
             if let Some(batch) = batch {
                 let mut attempts = 0u32;
                 let data = loop {
                     match self.retained.inner.store.load(batch.id).await {
                         Ok(data) => break data,
-                        Err(_) => {
+                        Err(error) => {
                             attempts = attempts.saturating_add(1);
+                            if !crate::storage::resilient::retryable_read(&error)
+                                || self.retained.status().capture_closed && attempts > 3
+                            {
+                                return Err(error.context("Encrypted original read did not complete; retained audio remains available"));
+                            }
                             if attempts == 1 {
                                 tracing::warn!(
                                     "Retained original read failed; retrying the same batch"
@@ -780,13 +819,8 @@ impl Reader {
                 self.decoded = decode(&data.bytes, self.retained.inner.origin, batch.frames)?;
             } else if let Some(frame) = memory {
                 self.decoded.push_back(frame);
-            } else if ended {
-                return Ok(None);
             } else {
-                self.changes
-                    .changed()
-                    .await
-                    .context("Original retention updates closed")?;
+                return Ok(None);
             }
         }
     }
@@ -796,6 +830,59 @@ impl Drop for Reader {
         self.retained.inner.replays.fetch_sub(1, Ordering::Release);
     }
 }
+/// Merge currently available frames by capture clock. An inactive source has
+/// no ordering claim over another source's already captured audio. Each reader
+/// holds at most one decoded batch; the WAV writer handles bounded clock jitter.
+pub(super) struct RecordingReader {
+    retained: Arc<RetainedSession>,
+    sources: [Option<Reader>; 2],
+    heads: [Option<AudioRecord>; 2],
+    changes: watch::Receiver<u64>,
+}
+impl RecordingReader {
+    pub(super) fn new(retained: Arc<RetainedSession>, microphone: bool, speaker: bool) -> Self {
+        Self {
+            sources: [
+                microphone.then(|| retained.reader(TranscriptOrigin::Microphone)),
+                speaker.then(|| retained.reader(TranscriptOrigin::Speaker)),
+            ],
+            heads: [None, None],
+            changes: retained.inner.updates.subscribe(),
+            retained,
+        }
+    }
+    pub(super) async fn next(&mut self) -> Result<Option<AudioRecord>> {
+        loop {
+            self.changes.borrow_and_update();
+            let closed = self.retained.status().capture_closed;
+            for index in 0..2 {
+                if self.heads[index].is_none()
+                    && let Some(source) = &mut self.sources[index]
+                {
+                    self.heads[index] = source.available().await?;
+                }
+            }
+            if let Some(index) = self
+                .heads
+                .iter()
+                .enumerate()
+                .filter_map(|(index, frame)| frame.as_ref().map(|frame| (index, frame.captured_at)))
+                .min_by_key(|(_, time)| *time)
+                .map(|(index, _)| index)
+            {
+                return Ok(self.heads[index].take());
+            }
+            if closed {
+                return Ok(None);
+            }
+            self.changes
+                .changed()
+                .await
+                .context("Original recording updates closed")?;
+        }
+    }
+}
+
 pub(super) struct Replay {
     store: Arc<SessionRetention>,
     origin: Instant,
@@ -885,6 +972,160 @@ mod tests {
             records.push(frame);
         }
         records
+    }
+
+    #[tokio::test]
+    async fn translated_delivery_cursor_survives_worker_restart_without_touching_original_readers()
+    {
+        let (_folder, retained, origin) = session(Limits::default()).await;
+        for (index, source, value) in [
+            (1, TranscriptOrigin::Microphone, 42),
+            (2, TranscriptOrigin::Speaker, -42),
+            (3, TranscriptOrigin::Microphone, 43),
+        ] {
+            retained
+                .capture(&frame(value, origin + Duration::from_millis(index)), source)
+                .unwrap();
+        }
+        retained.close_capture();
+        let mut delivered = retained.reader(TranscriptOrigin::Microphone);
+        assert_eq!(delivered.next().await.unwrap().unwrap().samples[0], 42);
+        let checkpoint = delivered.bookmark();
+        retained.confirm_translation(TranscriptOrigin::Microphone, checkpoint);
+        drop(delivered);
+        retained.confirm_translation(TranscriptOrigin::Microphone, 0);
+        let mut recovery = retained.reader(TranscriptOrigin::Microphone);
+        recovery.rewind(retained.translation_checkpoint(TranscriptOrigin::Microphone));
+        assert_eq!(recovery.next().await.unwrap().unwrap().samples[0], 43);
+        assert!(recovery.next().await.unwrap().is_none());
+        assert_eq!(
+            retained.translation_checkpoint(TranscriptOrigin::Speaker),
+            0
+        );
+        let mut recording = RecordingReader::new(retained, true, true);
+        let mut originals = Vec::new();
+        while let Some(frame) = recording.next().await.unwrap() {
+            originals.push(frame.samples[0]);
+        }
+        assert_eq!(originals, vec![42, -42, 43]);
+    }
+
+    #[tokio::test]
+    async fn corrupt_original_journal_pauses_promptly_and_preserves_session_ownership() {
+        let (folder, retained, origin) = session(Limits {
+            soft: 1024,
+            hard: 1024 * 1024,
+            batch: 65536,
+        })
+        .await;
+        retained
+            .capture(
+                &PcmFrame {
+                    samples: vec![42; 16000],
+                    sample_rate: SAMPLE_RATE,
+                    captured_at: origin + Duration::from_secs(1),
+                },
+                TranscriptOrigin::Microphone,
+            )
+            .unwrap();
+        retained.close_capture();
+        retained.flush().await.unwrap();
+        assert_eq!(retained.status().in_memory_frames, 0);
+        let directory = std::fs::read_dir(folder.path())
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+            .path();
+        let journal = directory.join("session.brj");
+        let mut bytes = std::fs::read(&journal).unwrap();
+        *bytes.last_mut().unwrap() ^= 1;
+        std::fs::write(&journal, bytes).unwrap();
+        let mut reader = retained.reader(TranscriptOrigin::Microphone);
+        let error = tokio::time::timeout(Duration::from_secs(1), reader.next())
+            .await
+            .unwrap()
+            .unwrap_err();
+        assert!(format!("{error:#}").contains("retained audio remains available"));
+        assert!(journal.exists());
+        assert!(!retained.status().completed);
+        assert_eq!(retained.status().frames, 1);
+    }
+
+    #[tokio::test]
+    async fn recording_does_not_wait_for_an_inactive_source_and_drains_both_at_eof() {
+        let (_folder, retained, origin) = session(Limits::default()).await;
+        let mut reader = RecordingReader::new(retained.clone(), true, true);
+        retained
+            .capture(
+                &frame(42, origin + Duration::from_millis(1)),
+                TranscriptOrigin::Microphone,
+            )
+            .unwrap();
+        let first = tokio::time::timeout(Duration::from_secs(1), reader.next())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert_eq!(first.lane, RecordingLane::Microphone);
+        assert_eq!(first.samples, vec![42; 16]);
+        retained
+            .capture(
+                &frame(-42, origin + Duration::from_millis(2)),
+                TranscriptOrigin::Speaker,
+            )
+            .unwrap();
+        retained
+            .capture(
+                &frame(43, origin + Duration::from_millis(3)),
+                TranscriptOrigin::Microphone,
+            )
+            .unwrap();
+        retained.close_capture();
+        assert_eq!(reader.next().await.unwrap().unwrap().samples, vec![-42; 16]);
+        assert_eq!(reader.next().await.unwrap().unwrap().samples, vec![43; 16]);
+        assert!(reader.next().await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn recording_merges_encrypted_backlog_in_capture_order_with_one_source_disabled() {
+        let (_folder, retained, origin) = session(Limits {
+            soft: 1024,
+            hard: 1024 * 1024,
+            batch: 65536,
+        })
+        .await;
+        for second in 1..=4 {
+            for (source, value) in [
+                (TranscriptOrigin::Microphone, second),
+                (TranscriptOrigin::Speaker, -second),
+            ] {
+                retained
+                    .capture(
+                        &PcmFrame {
+                            samples: vec![value as i16; 16000],
+                            sample_rate: SAMPLE_RATE,
+                            captured_at: origin + Duration::from_secs(second as u64),
+                        },
+                        source,
+                    )
+                    .unwrap();
+            }
+        }
+        retained.close_capture();
+        retained.flush().await.unwrap();
+        let mut reader = RecordingReader::new(retained.clone(), true, true);
+        let mut merged = Vec::new();
+        while let Some(frame) = reader.next().await.unwrap() {
+            merged.push(frame.samples[0]);
+        }
+        assert_eq!(merged, vec![1, -1, 2, -2, 3, -3, 4, -4]);
+        let mut reader = RecordingReader::new(retained.clone(), false, true);
+        let mut output = Vec::new();
+        while let Some(frame) = reader.next().await.unwrap() {
+            output.push(frame.samples[0]);
+        }
+        assert_eq!(output, vec![-1, -2, -3, -4]);
     }
 
     #[tokio::test]
@@ -1081,8 +1322,8 @@ mod tests {
     #[tokio::test]
     async fn memory_limit_rejects_new_input_without_overwriting_accepted_originals() {
         let (_folder, retained, origin) = session(Limits {
-            soft: 640,
-            hard: 640,
+            soft: 650,
+            hard: 650,
             batch: 256,
         })
         .await;
@@ -1212,12 +1453,21 @@ mod tests {
             .unwrap();
         retained.mark_unrecoverable("Capture queue discarded an original frame");
         retained.mark_incomplete("Transcript output still needs recovery");
+        assert!(!retained.capture_requires_stop());
+        retained
+            .capture(
+                &frame(55, origin + Duration::from_millis(20)),
+                TranscriptOrigin::Speaker,
+            )
+            .unwrap();
+        retained.flush().await.unwrap();
         let available = collect(retained.snapshot().unwrap()).await;
-        assert_eq!(available.len(), 1);
+        assert_eq!(available.len(), 2);
+        assert_eq!(available[1].samples, vec![55; 16]);
         assert!(retained.status().missing_audio);
-        assert!(retained.capture_requires_stop());
+        assert!(!retained.capture_requires_stop());
         assert!(retained.complete().await.is_err());
-        assert_eq!(retained.status().frames, 1);
+        assert_eq!(retained.status().frames, 2);
         assert!(!retained.status().completed);
         assert_eq!(
             collect(retained.snapshot().unwrap()).await[0].samples,

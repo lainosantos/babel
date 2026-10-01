@@ -78,6 +78,7 @@ pub(super) async fn write_transcript(
     config: AppConfig,
     snapshot: HistorySnapshot,
     pending: Arc<AtomicBool>,
+    cache: Option<Arc<transcription_cache::Cache>>,
 ) -> Result<()> {
     let guard = PendingGuard(pending);
     if !snapshot.frames.iter().any(|frame| match frame.lane {
@@ -101,7 +102,7 @@ pub(super) async fn write_transcript(
     let seconds = snapshot.included_secs;
     let captured_at = chrono::Utc::now()
         - chrono::Duration::from_std(snapshot.origin.elapsed()).unwrap_or_default();
-    let replay = replay(config, snapshot, history_tx, replay_cancel);
+    let replay = replay(config, snapshot, history_tx, replay_cancel, cache);
     tokio::pin!(replay);
     let mut backlog = VecDeque::new();
     let mut backlog_bytes = 0;
@@ -181,6 +182,7 @@ async fn replay(
     snapshot: HistorySnapshot,
     output: mpsc::Sender<TranscriptRecord>,
     cancel: CancellationToken,
+    cache: Option<Arc<transcription_cache::Cache>>,
 ) -> Result<()> {
     let mut routes = JoinSet::new();
     for (lane, origin, selected, recognition) in [
@@ -213,6 +215,7 @@ async fn replay(
         let output = output.clone();
         let route_cancel = cancel.child_token();
         let clock = snapshot.origin;
+        let cache = cache.clone();
         routes.spawn(async move {
             let provider = provider::stt::create(&recognition, &profiles)?;
             let session = provider::stt::session_config(&recognition, &profiles)?;
@@ -225,6 +228,7 @@ async fn replay(
                 output,
                 origin,
                 route_cancel.clone(),
+                cache,
             );
             tokio::try_join!(input, model)?;
             ensure!(
@@ -490,6 +494,7 @@ mod tests {
             config,
             snapshot,
             Arc::new(AtomicBool::new(true)),
+            None,
         ));
         let mut reader = crate::history::HistoryReader::default();
         let mut records = Vec::new();
@@ -644,6 +649,7 @@ mod tests {
             config,
             snapshot,
             pending.clone(),
+            None,
         ));
         tokio::time::timeout(Duration::from_secs(2), async {
             while pending.load(Ordering::Acquire) {
@@ -717,7 +723,7 @@ mod tests {
         });
         let result = tokio::time::timeout(
             Duration::from_secs(2),
-            write_transcript(writer, rx, config, snapshot, pending.clone()),
+            write_transcript(writer, rx, config, snapshot, pending.clone(), None),
         )
         .await
         .unwrap();
@@ -786,6 +792,7 @@ mod tests {
             config,
             snapshot,
             pending.clone(),
+            None,
         ));
         tokio::time::timeout(Duration::from_secs(3), entered.notified())
             .await

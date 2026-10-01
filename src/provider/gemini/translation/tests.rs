@@ -116,12 +116,14 @@ async fn eof_sends_audio_stream_end_and_waits_for_delayed_tail_and_turn_complete
         )
         .await;
         send(&mut server, json!({"generationComplete":true})).await;
-        pending(&mut task).await;
-        send(
-            &mut server,
-            json!({"inputTranscription":{"text":"Original final."},"turnComplete":true}),
-        )
-        .await;
+        if model != TRANSLATE_MODEL {
+            pending(&mut task).await;
+            send(
+                &mut server,
+                json!({"inputTranscription":{"text":"Original final."},"turnComplete":true}),
+            )
+            .await;
+        }
         timeout(Duration::from_secs(3), task)
             .await
             .unwrap()
@@ -134,7 +136,12 @@ async fn eof_sends_audio_stream_end_and_waits_for_delayed_tail_and_turn_complete
                 sample_rate: 24000
             }
         );
-        for input in [false, true] {
+        let expected_inputs: &[bool] = if model == TRANSLATE_MODEL {
+            &[false]
+        } else {
+            &[false, true]
+        };
+        for &input in expected_inputs {
             assert!(
                 matches!(event(&mut events).await, ProviderEvent::Transcript { input: actual, .. } if actual == input)
             );
@@ -147,7 +154,12 @@ async fn eof_sends_audio_stream_end_and_waits_for_delayed_tail_and_turn_complete
 #[tokio::test]
 async fn empty_and_silent_eof_finish_without_waiting_for_a_generation() {
     for model in [TRANSLATE_MODEL, "gemini-3.8-live"] {
-        for input in [None, Some(Vec::new()), Some(vec![0; 480])] {
+        for input in [
+            None,
+            Some(Vec::new()),
+            Some(vec![0; 480]),
+            Some([2, -2].repeat(240)),
+        ] {
             let (socket, mut server) = sockets().await;
             let (audio, receiver) = mpsc::channel(1);
             if let Some(samples) = &input {
@@ -172,55 +184,61 @@ async fn empty_and_silent_eof_finish_without_waiting_for_a_generation() {
 
 #[tokio::test]
 async fn inactivity_final_cannot_acknowledge_the_next_queued_stream() {
-    let (socket, mut server) = sockets().await;
-    let (audio, receiver) = mpsc::channel(1);
-    let (mut task, mut events) = spawn(socket, receiver, config(TRANSLATE_MODEL));
-    audio.send(vec![5000; 160]).await.unwrap();
-    assert_eq!(input_samples(&read(&mut server).await), vec![5000; 160]);
-    assert_eq!(
-        read(&mut server).await["realtimeInput"]["audioStreamEnd"],
-        true
-    );
-    audio.send(vec![9000; 17]).await.unwrap();
-    drop(audio);
-    assert!(
-        timeout(Duration::from_millis(30), server.next())
-            .await
-            .is_err(),
-        "a second stream must wait for the first stream's terminal acknowledgement"
-    );
-    send(&mut server, json!({"generationComplete":true})).await;
-    assert!(
-        timeout(Duration::from_millis(30), server.next())
-            .await
-            .is_err()
-    );
-    send(&mut server, json!({"turnComplete":true})).await;
-    assert_eq!(input_samples(&read(&mut server).await), vec![9000; 17]);
-    assert_eq!(
-        read(&mut server).await["realtimeInput"]["audioStreamEnd"],
-        true
-    );
-    pending(&mut task).await;
-    send(&mut server, output_audio(&[19, -20])).await;
-    send(&mut server, json!({"generationComplete":true})).await;
-    pending(&mut task).await;
-    send(&mut server, json!({"turnComplete":true})).await;
-    timeout(Duration::from_secs(3), task)
-        .await
-        .unwrap()
-        .unwrap()
-        .unwrap();
-    assert_eq!(event(&mut events).await, ProviderEvent::TurnComplete);
-    assert_eq!(
-        event(&mut events).await,
-        ProviderEvent::Audio {
-            samples: vec![19, -20],
-            sample_rate: 24000
+    for model in [TRANSLATE_MODEL, "gemini-3.8-live"] {
+        let (socket, mut server) = sockets().await;
+        let (audio, receiver) = mpsc::channel(1);
+        let (mut task, mut events) = spawn(socket, receiver, config(model));
+        audio.send(vec![5000; 160]).await.unwrap();
+        assert_eq!(input_samples(&read(&mut server).await), vec![5000; 160]);
+        assert_eq!(
+            read(&mut server).await["realtimeInput"]["audioStreamEnd"],
+            true
+        );
+        audio.send(vec![9000; 17]).await.unwrap();
+        drop(audio);
+        assert!(
+            timeout(Duration::from_millis(30), server.next())
+                .await
+                .is_err(),
+            "a second stream must wait for the first stream's terminal acknowledgement"
+        );
+        send(&mut server, json!({"generationComplete":true})).await;
+        if model != TRANSLATE_MODEL {
+            assert!(
+                timeout(Duration::from_millis(30), server.next())
+                    .await
+                    .is_err()
+            );
+            send(&mut server, json!({"turnComplete":true})).await;
         }
-    );
-    assert_eq!(event(&mut events).await, ProviderEvent::TurnComplete);
-    assert!(events.recv().await.is_none());
+        assert_eq!(input_samples(&read(&mut server).await), vec![9000; 17]);
+        assert_eq!(
+            read(&mut server).await["realtimeInput"]["audioStreamEnd"],
+            true
+        );
+        pending(&mut task).await;
+        send(&mut server, output_audio(&[19, -20])).await;
+        send(&mut server, json!({"generationComplete":true})).await;
+        if model != TRANSLATE_MODEL {
+            pending(&mut task).await;
+            send(&mut server, json!({"turnComplete":true})).await;
+        }
+        timeout(Duration::from_secs(3), task)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert_eq!(event(&mut events).await, ProviderEvent::TurnComplete);
+        assert_eq!(
+            event(&mut events).await,
+            ProviderEvent::Audio {
+                samples: vec![19, -20],
+                sample_rate: 24000
+            }
+        );
+        assert_eq!(event(&mut events).await, ProviderEvent::TurnComplete);
+        assert!(events.recv().await.is_none());
+    }
 }
 
 #[tokio::test]
@@ -241,6 +259,7 @@ async fn old_turn_complete_cannot_finish_audio_submitted_after_generation_comple
         event(&mut events).await,
         ProviderEvent::Transcript { input: false, .. }
     ));
+    assert_eq!(event(&mut events).await, ProviderEvent::TurnComplete);
     audio.send(vec![9000; 17]).await.unwrap();
     assert_eq!(input_samples(&read(&mut server).await), vec![9000; 17]);
     drop(audio);
@@ -301,7 +320,7 @@ async fn missing_turn_complete_times_out_despite_nonfinal_audio_and_text() {
     let (audio, receiver) = mpsc::channel(1);
     audio.send(vec![5000; 7]).await.unwrap();
     drop(audio);
-    let (task, mut events) = spawn(socket, receiver, config(TRANSLATE_MODEL));
+    let (task, mut events) = spawn(socket, receiver, config("gemini-3.8-live"));
     assert_eq!(input_samples(&read(&mut server).await), vec![5000; 7]);
     assert_eq!(
         read(&mut server).await["realtimeInput"]["audioStreamEnd"],
@@ -333,6 +352,110 @@ async fn missing_turn_complete_times_out_despite_nonfinal_audio_and_text() {
 
     tokio::time::pause();
     tokio::time::advance(FINAL_TIMEOUT / 2 + Duration::from_millis(1)).await;
+    let failure = timeout(Duration::from_secs(1), task)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap_err();
+    assert_eq!(
+        failure.message,
+        "Gemini translation final acknowledgement timed out"
+    );
+    assert!(!failure.retryable);
+    assert!(events.recv().await.is_none());
+}
+
+#[tokio::test]
+async fn residual_noise_after_generation_complete_does_not_create_an_unacknowledged_turn() {
+    let (socket, mut server) = sockets().await;
+    let (audio, receiver) = mpsc::channel(1);
+    let (mut task, mut events) = spawn(socket, receiver, config("gemini-3.8-live"));
+    audio.send(vec![5000; 160]).await.unwrap();
+    assert_eq!(input_samples(&read(&mut server).await), vec![5000; 160]);
+    send(
+        &mut server,
+        json!({"generationComplete":true,"outputTranscription":{"text":"Completed speech."}}),
+    )
+    .await;
+    assert!(matches!(
+        event(&mut events).await,
+        ProviderEvent::Transcript { input: false, .. }
+    ));
+    let noise = [2, -2].repeat(240);
+    audio.send(noise.clone()).await.unwrap();
+    assert_eq!(input_samples(&read(&mut server).await), noise);
+    drop(audio);
+    assert_eq!(
+        read(&mut server).await["realtimeInput"]["audioStreamEnd"],
+        true
+    );
+    pending(&mut task).await;
+    send(&mut server, json!({"turnComplete":true})).await;
+    timeout(Duration::from_secs(1), task)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert_eq!(event(&mut events).await, ProviderEvent::TurnComplete);
+    assert!(events.recv().await.is_none());
+}
+
+#[tokio::test]
+async fn continuous_noise_has_no_generation_but_received_response_still_drains() {
+    for response in [false, true] {
+        let (socket, mut server) = sockets().await;
+        let (audio, receiver) = mpsc::channel(1);
+        let (mut task, mut events) = spawn(socket, receiver, config(TRANSLATE_MODEL));
+        let noise = vec![17; 256 * 32];
+        audio.send(noise.clone()).await.unwrap();
+        assert_eq!(input_samples(&read(&mut server).await), noise);
+        if response {
+            send(&mut server, output_audio(&[23, -24])).await;
+            assert!(matches!(
+                event(&mut events).await,
+                ProviderEvent::Audio { .. }
+            ));
+        }
+        drop(audio);
+        if response {
+            assert_eq!(
+                read(&mut server).await["realtimeInput"]["audioStreamEnd"],
+                true
+            );
+            pending(&mut task).await;
+            send(&mut server, json!({"generationComplete":true})).await;
+        }
+        timeout(Duration::from_secs(1), task)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        if response {
+            assert_eq!(event(&mut events).await, ProviderEvent::TurnComplete);
+        }
+        assert!(events.recv().await.is_none());
+    }
+}
+
+#[tokio::test]
+async fn dedicated_interpreter_cannot_finish_nonfinal_output_on_timeout() {
+    let (socket, mut server) = sockets().await;
+    let (audio, receiver) = mpsc::channel(1);
+    audio.send(vec![7000; 37]).await.unwrap();
+    drop(audio);
+    let (task, mut events) = spawn(socket, receiver, config(TRANSLATE_MODEL));
+    assert_eq!(input_samples(&read(&mut server).await), vec![7000; 37]);
+    assert_eq!(
+        read(&mut server).await["realtimeInput"]["audioStreamEnd"],
+        true
+    );
+    send(&mut server, output_audio(&[25, -26])).await;
+    assert!(matches!(
+        event(&mut events).await,
+        ProviderEvent::Audio { .. }
+    ));
+    tokio::time::pause();
+    tokio::time::advance(FINAL_TIMEOUT + Duration::from_millis(1)).await;
     let failure = timeout(Duration::from_secs(1), task)
         .await
         .unwrap()

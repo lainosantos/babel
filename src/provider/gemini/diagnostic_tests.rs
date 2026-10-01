@@ -18,7 +18,6 @@ fn safe_failure_retains_its_retry_classification_through_context() {
         };
         let result: Result<()> = Err(anyhow::Error::new(failure));
         let error = result.context("Original speech transcription").unwrap_err();
-        assert_eq!(retryable_error(&error), Some(retryable));
         assert_eq!(crate::provider::retryable_error(&error), retryable);
     }
 }

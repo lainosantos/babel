@@ -18,7 +18,7 @@ use tokio_tungstenite::{
 };
 use tokio_util::sync::CancellationToken;
 
-use super::{ProviderEvent, SessionConfig, SpeechProvider, TranscriptMetadata};
+use super::{Failure, ProviderEvent, SessionConfig, SpeechProvider, TranscriptMetadata};
 
 mod languages;
 mod transcription;
@@ -47,6 +47,10 @@ pub(super) struct GeminiTranscriptionProvider {
 impl SpeechProvider for GeminiTranscriptionProvider {
     fn id(&self) -> &'static str {
         "gemini"
+    }
+
+    fn is_silent_window(&self, samples: &[i16]) -> bool {
+        crate::audio::speech::likely_non_speech(samples)
     }
 
     async fn run(
@@ -79,39 +83,9 @@ impl SpeechProvider for GeminiTranscriptionProvider {
     }
 }
 
-/// Deliberately contains no raw socket, response, API key, or server error text.
-#[derive(Debug)]
-struct Failure {
-    message: Cow<'static, str>,
-    retryable: bool,
-}
-
-impl std::fmt::Display for Failure {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.write_str(&self.message)
-    }
-}
-impl std::error::Error for Failure {}
-
-pub(super) fn retryable_error(error: &anyhow::Error) -> Option<bool> {
-    error
-        .downcast_ref::<Failure>()
-        .map(|failure| failure.retryable)
-}
-
-impl Failure {
-    fn fatal(message: &'static str) -> Self {
-        Self {
-            message: Cow::Borrowed(message),
-            retryable: false,
-        }
-    }
-    fn retry(message: &'static str) -> Self {
-        Self {
-            message: Cow::Borrowed(message),
-            retryable: true,
-        }
-    }
+#[cfg(test)]
+pub(super) fn missing_transcription_final() -> anyhow::Error {
+    anyhow::Error::new(transcription::final_timeout())
 }
 
 #[async_trait]
@@ -128,7 +102,8 @@ impl SpeechProvider for GeminiProvider {
         cancel: CancellationToken,
     ) -> Result<()> {
         validate_config(&config)?;
-        let api_key = crate::credentials::get(&config.api_key_env)?;
+        let api_key =
+            crate::credentials::get(&config.api_key_env).map_err(super::permanent_error)?;
         ensure!(
             !api_key.trim().is_empty(),
             "Gemini API key environment variable is empty"
@@ -338,7 +313,7 @@ async fn run_sessions(
         // flight. Do not discard its final queued PCM and accept an empty
         // replacement connection as successful processing.
         if audio.is_closed() {
-            bail!("{}", failure.message);
+            return Err(anyhow::Error::new(failure));
         }
         if is_transcription_model(config) {
             discard_queued_audio(&mut audio);
@@ -754,6 +729,7 @@ fn close_failure(code: Option<u16>, stage: CloseStage) -> Failure {
     Failure {
         message: Cow::Owned(message),
         retryable,
+        needs_transcription_context: false,
     }
 }
 

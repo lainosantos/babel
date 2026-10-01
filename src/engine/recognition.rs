@@ -1,6 +1,7 @@
 //! Session-owned original STT. Device selection controls capture, never the
 //! lifetime of already captured speech or an in-flight transcription result.
 use super::*;
+#[cfg(test)]
 use crate::audio::PcmFrame;
 #[cfg(test)]
 use crate::provider::SpeechProvider;
@@ -185,47 +186,72 @@ async fn run_retained(
     // Finite original windows use the configured recognizer's protocol for
     // both normal processing and replay. Recovery never substitutes a model.
     let mut reader = originals.reader(transcript.origin);
+    let mut deferred = 0u64;
+    let namespace = transcription_cache::Namespace::Live(transcript.origin);
     loop {
+        let checkpoint = reader.bookmark();
+        if let Some((end, records)) = originals.transcripts.get(namespace, checkpoint).await? {
+            reader.rewind(end);
+            for prepared in records {
+                record(&Some(transcript.clone()), prepared).await?;
+            }
+            continue;
+        }
         let Some(first) = reader.next().await? else {
+            ensure!(
+                deferred == 0,
+                "{deferred} original transcription windows remain unconfirmed; original audio is retained for recovery"
+            );
             return Ok(());
         };
-        let mut samples = first.samples.clone();
         let mut timeline = Timeline::default();
-        timeline.push(
-            &PcmFrame {
-                samples: first.samples,
-                captured_at: first.captured_at,
-                sample_rate: INPUT_RATE,
-            },
-            origin,
-        );
+        timeline.push_capture(first.samples.len(), first.captured_at, origin);
+        let mut samples = first.samples;
         while samples.len() < INPUT_RATE as usize * 5 {
+            if originals.transcripts.contains(namespace, reader.bookmark()) {
+                break;
+            }
             match tokio::time::timeout(Duration::from_millis(400), reader.next()).await {
                 Ok(Ok(Some(frame))) => {
-                    timeline.push(
-                        &PcmFrame {
-                            samples: frame.samples.clone(),
-                            captured_at: frame.captured_at,
-                            sample_rate: INPUT_RATE,
-                        },
-                        origin,
-                    );
+                    timeline.push_capture(frame.samples.len(), frame.captured_at, origin);
                     samples.extend_from_slice(&frame.samples);
                 }
                 Ok(Ok(None)) | Err(_) => break,
                 Ok(Err(error)) => return Err(error),
             }
         }
-        if samples.iter().all(|sample| *sample == 0) {
+        if provider.is_silent_window(&samples) {
+            originals
+                .transcripts
+                .put(namespace, checkpoint, reader.bookmark(), &[])
+                .await?;
             continue;
         }
         let mut attempts = 0u32;
+        let mut closing_context_retried = false;
         let results = loop {
-            match resilience::segment(provider.clone(), settings.clone(), &samples, true).await {
-                Ok(results) => break results,
+            let result =
+                resilience::segment(provider.clone(), settings.clone(), &samples, true).await;
+            match result {
+                Ok(results) => break Some(results),
                 Err(error) => {
                     attempts = attempts.saturating_add(1);
                     metrics.recovery_error("transcription", Some(&format!("{error:#}")));
+                    let needs_context = provider::transcription_needs_context(&error);
+                    let closing_context = needs_context && originals.status().capture_closed;
+                    if closing_context && closing_context_retried {
+                        deferred = deferred.saturating_add(1);
+                        defer_window(&transcript, &metrics, &timeline, deferred).await?;
+                        break None;
+                    }
+                    if needs_context
+                        && (samples.len() >= INPUT_RATE as usize * 30
+                            || resilience::retry(&error, attempts, retries).is_err())
+                    {
+                        deferred = deferred.saturating_add(1);
+                        defer_window(&transcript, &metrics, &timeline, deferred).await?;
+                        break None;
+                    }
                     resilience::retry_live(
                         &error,
                         attempts,
@@ -234,24 +260,121 @@ async fn run_retained(
                     )?;
                     metrics.recovery("transcription", true);
                     metrics.reconnects.fetch_add(1, Ordering::Relaxed);
-                    // Keep this exact segment and its timeline. No speculative
-                    // text or gap is persisted before successful completion.
+                    // A Live recognizer may emit no final for non-speech. Do
+                    // not replay that isolated window forever while later
+                    // speech waits unread: retain its exact PCM prefix and
+                    // extend the unconfirmed window with the next originals.
+                    if needs_context {
+                        let previous = samples.len();
+                        let target = if closing_context {
+                            // One retry with additional retained context, rather
+                            // than replaying the same final for several minutes.
+                            INPUT_RATE as usize * 30
+                        } else {
+                            samples
+                                .len()
+                                .saturating_add(INPUT_RATE as usize * 5)
+                                .min(INPUT_RATE as usize * 30)
+                        };
+                        while samples.len() < target {
+                            if originals.transcripts.contains(namespace, reader.bookmark()) {
+                                break;
+                            }
+                            match tokio::time::timeout(Duration::from_millis(400), reader.next())
+                                .await
+                            {
+                                Ok(Ok(Some(frame))) => {
+                                    timeline.push_capture(
+                                        frame.samples.len(),
+                                        frame.captured_at,
+                                        origin,
+                                    );
+                                    samples.extend_from_slice(&frame.samples);
+                                }
+                                Ok(Ok(None)) | Err(_) => break,
+                                Ok(Err(error)) => return Err(error),
+                            }
+                        }
+                        if closing_context {
+                            if samples.len() == previous {
+                                deferred = deferred.saturating_add(1);
+                                defer_window(&transcript, &metrics, &timeline, deferred).await?;
+                                break None;
+                            }
+                            closing_context_retried = true;
+                        }
+                    }
+                    // No speculative text or gap is persisted before this
+                    // whole unconfirmed window succeeds.
                     resilience::backoff(&originals, attempts, retries).await;
-                    resilience::retry_live(
-                        &error,
-                        attempts,
-                        retries,
-                        originals.status().capture_closed,
-                    )?;
+                    if !needs_context {
+                        resilience::retry_live(
+                            &error,
+                            attempts,
+                            retries,
+                            originals.status().capture_closed,
+                        )?;
+                    }
                 }
             }
         };
-        for event in results {
-            persist(event, &Some(transcript.clone()), &metrics, &timeline).await?;
+        if let Some(results) = results {
+            let records: Vec<_> = results
+                .into_iter()
+                .filter_map(|event| prepare(event, &metrics, &timeline))
+                .collect();
+            originals
+                .transcripts
+                .put(namespace, checkpoint, reader.bookmark(), &records)
+                .await?;
+            for prepared in records {
+                record(&Some(transcript.clone()), prepared).await?;
+            }
         }
-        metrics.recovery_error("transcription", None);
+        if deferred == 0 {
+            metrics.recovery_error("transcription", None);
+        } else {
+            metrics.recovery_error("transcription", Some(&format!("{deferred} original transcription windows remain unconfirmed; original audio is retained for recovery")));
+        }
         metrics.recovery("transcription", false);
     }
+}
+
+/// Advance only this reader, never the retained session's completion state.
+/// A missing final is unresolved work, even when later speech succeeds.
+async fn defer_window(
+    transcript: &TranscriptSink,
+    metrics: &RouteMetrics,
+    timeline: &Timeline,
+    count: u64,
+) -> Result<()> {
+    let start = timeline.map(0, false).unwrap_or(0);
+    let end = timeline
+        .map(timeline.samples * 1000 / u64::from(INPUT_RATE), true)
+        .unwrap_or(start);
+    let source = match transcript.origin {
+        TranscriptOrigin::Microphone => "microphone",
+        TranscriptOrigin::Speaker => "received output",
+    };
+    let message = format!(
+        "Pending original transcription for {source} at +{:.3}s to +{:.3}s: no final acknowledgement; original audio is retained for recovery",
+        start as f64 / 1000.0,
+        end as f64 / 1000.0,
+    );
+    if let Some(retained) = &transcript.retained {
+        retained.mark_incomplete(&message);
+    }
+    record(
+        &Some(transcript.clone()),
+        TranscriptRecord::Section(message),
+    )
+    .await?;
+    // Persist this diagnosis across subsequent successfully transcribed windows.
+    metrics.recovery_error(
+        "transcription",
+        Some(&format!("{count} original transcription windows remain unconfirmed; original audio is retained for recovery")),
+    );
+    Ok(())
 }
 
 #[cfg(test)]
@@ -344,12 +467,11 @@ async fn run(
     }
 }
 
-async fn persist(
+fn prepare(
     mut event: ProviderEvent,
-    transcript: &Option<TranscriptSink>,
     metrics: &RouteMetrics,
     timeline: &Timeline,
-) -> Result<()> {
+) -> Option<TranscriptRecord> {
     if let ProviderEvent::Transcript { metadata, .. } = &mut event {
         metadata.start_ms = metadata.start_ms.and_then(|ms| timeline.map(ms, false));
         metadata.end_ms = metadata.end_ms.and_then(|ms| timeline.map(ms, true));
@@ -380,9 +502,22 @@ async fn persist(
         }
         ProviderEvent::Reconnecting { .. } | ProviderEvent::Interrupted => TranscriptRecord::Gap,
         // A recognizer never saves generated speech or translated text.
-        _ => return Ok(()),
+        _ => return None,
     };
-    self::record(transcript, record).await
+    Some(record)
+}
+
+#[cfg(test)]
+async fn persist(
+    event: ProviderEvent,
+    transcript: &Option<TranscriptSink>,
+    metrics: &RouteMetrics,
+    timeline: &Timeline,
+) -> Result<()> {
+    if let Some(prepared) = prepare(event, metrics, timeline) {
+        record(transcript, prepared).await?;
+    }
+    Ok(())
 }
 
 async fn record(transcript: &Option<TranscriptSink>, record: TranscriptRecord) -> Result<()> {
@@ -425,17 +560,18 @@ struct Span {
     session_ms: u64,
 }
 impl Timeline {
+    #[cfg(test)]
     fn push(&mut self, frame: &PcmFrame, origin: Instant) {
-        let duration = Duration::from_secs_f64(frame.samples.len() as f64 / f64::from(INPUT_RATE));
-        let start = frame
-            .captured_at
-            .checked_sub(duration)
-            .unwrap_or(frame.captured_at);
+        self.push_capture(frame.samples.len(), frame.captured_at, origin);
+    }
+    fn push_capture(&mut self, sample_count: usize, captured_at: Instant, origin: Instant) {
+        let duration = Duration::from_secs_f64(sample_count as f64 / f64::from(INPUT_RATE));
+        let start = captured_at.checked_sub(duration).unwrap_or(captured_at);
         let session_ms = start
             .saturating_duration_since(origin)
             .as_millis()
             .min(u128::from(u64::MAX)) as u64;
-        let end = self.samples.saturating_add(frame.samples.len() as u64);
+        let end = self.samples.saturating_add(sample_count as u64);
         if let Some(last) = self.spans.back_mut()
             && (last.session_ms + (self.samples - last.start) * 1000 / u64::from(INPUT_RATE))
                 .abs_diff(session_ms)

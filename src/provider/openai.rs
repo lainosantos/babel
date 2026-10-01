@@ -23,7 +23,7 @@ use tokio_tungstenite::{
 };
 use tokio_util::sync::CancellationToken;
 
-use super::{ProviderEvent, SessionConfig, SpeechProvider, TranscriptMetadata};
+use super::{Failure, ProviderEvent, SessionConfig, SpeechProvider, TranscriptMetadata};
 use crate::audio::resample::Resampler;
 
 mod transcription;
@@ -217,26 +217,6 @@ fn setup(config: &SessionConfig, transcription_model: &str) -> Value {
     }})
 }
 
-#[derive(Debug)]
-struct Failure {
-    message: &'static str,
-    retryable: bool,
-}
-impl Failure {
-    fn fatal(message: &'static str) -> Self {
-        Self {
-            message,
-            retryable: false,
-        }
-    }
-    fn retry(message: &'static str) -> Self {
-        Self {
-            message,
-            retryable: true,
-        }
-    }
-}
-
 #[async_trait]
 impl SpeechProvider for OpenAiProvider {
     fn id(&self) -> &'static str {
@@ -253,11 +233,11 @@ impl SpeechProvider for OpenAiProvider {
             config.model.clone_from(&self.transcription_model);
             config.input_transcription = true;
             config.output_transcription = false;
-            transcription::validate(&config)?;
+            transcription::validate(&config).map_err(super::permanent_error)?;
         } else {
-            validate(&config)?;
+            validate(&config).map_err(super::permanent_error)?;
         }
-        let key = crate::credentials::get(&config.api_key_env)?;
+        let key = crate::credentials::get(&config.api_key_env).map_err(super::permanent_error)?;
         ensure!(!key.trim().is_empty(), "OpenAI API key is empty");
         self.run_sessions(&config, &key, audio, events, cancel)
             .await
@@ -275,15 +255,15 @@ impl SpeechProvider for OpenAiProvider {
             "historical audio requires a dedicated STT provider"
         );
         config.model.clone_from(&self.transcription_model);
-        transcription::validate(&config)?;
-        let key = crate::credentials::get(&config.api_key_env)?;
+        transcription::validate(&config).map_err(super::permanent_error)?;
+        let key = crate::credentials::get(&config.api_key_env).map_err(super::permanent_error)?;
         ensure!(!key.trim().is_empty(), "OpenAI API key is empty");
-        let endpoint = self.url(&config.model)?;
+        let endpoint = self.url(&config.model).map_err(super::permanent_error)?;
         tokio::select! {
             biased;
             _ = cancel.cancelled() => bail!("historical transcription was cancelled"),
             result = self.connection_mode(&config, &key, &endpoint, &mut audio, &events, true) =>
-                result.map_err(|failure| anyhow::anyhow!(failure.message)),
+                result.map_err(anyhow::Error::new),
         }
     }
 }
@@ -297,7 +277,7 @@ impl OpenAiProvider {
         events: mpsc::Sender<ProviderEvent>,
         cancel: CancellationToken,
     ) -> Result<()> {
-        let endpoint = self.url(&config.model)?;
+        let endpoint = self.url(&config.model).map_err(super::permanent_error)?;
         let mut attempts = 0u32;
         loop {
             let started = Instant::now();
@@ -307,13 +287,15 @@ impl OpenAiProvider {
                 result = self.connection(config,key,&endpoint,&mut audio,&events) => match result { Ok(()) => return Ok(()), Err(failure) => failure },
             };
             if !failure.retryable || audio.is_closed() {
-                bail!("{}", failure.message);
+                return Err(anyhow::Error::new(failure));
             }
             if started.elapsed() >= Duration::from_secs(60) {
                 attempts = 0;
             }
             if attempts >= config.max_reconnect_attempts {
-                bail!("{}; reconnect budget exhausted", failure.message);
+                return Err(
+                    anyhow::Error::new(failure).context("OpenAI reconnect budget exhausted")
+                );
             }
             attempts += 1;
             tokio::select! {
@@ -322,7 +304,7 @@ impl OpenAiProvider {
                 result = async {
                     emit(&events,ProviderEvent::Interrupted).await?;
                     emit(&events,ProviderEvent::Reconnecting {attempt:attempts}).await
-                } => result.map_err(|error| anyhow::anyhow!(error.message))?,
+                } => result.map_err(anyhow::Error::new)?,
             }
             tokio::select! {
                 biased;

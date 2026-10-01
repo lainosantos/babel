@@ -45,13 +45,21 @@ pub(super) async fn run_route(
         channels,
         frame_ms,
         latency_ms: cfg.audio.device_latency_ms,
-        queue_ms: 80.max(frame_ms),
+        queue_ms: if translating {
+            cfg.audio.capture_queue_ms.max(frame_ms)
+        } else {
+            80.max(frame_ms)
+        },
     };
     let (sidecar_tx, mut captured_rx) =
         mpsc::channel((cfg.audio.capture_queue_ms / frame_ms).clamp(1, 100) as usize);
+    // Metrics survive endpoint reactivation. Previous activations already
+    // reported their losses; observe only new losses from the workers below.
+    let copy_losses = metrics.audio.sidecar_dropped_frames.load(Ordering::Relaxed);
+    let capture_losses = metrics.audio.capture_lost_frames.load(Ordering::Relaxed);
     let mut audio_jobs = JoinSet::new();
     if translating {
-        let (tx, rx) = mpsc::channel((80 / frame_ms).max(1) as usize);
+        let (tx, rx) = mpsc::channel((options.queue_ms / frame_ms).max(1) as usize);
         let token = cancel.clone();
         let stats = metrics.audio.clone();
         audio_jobs.spawn_on(
@@ -106,8 +114,8 @@ pub(super) async fn run_route(
         retained: retained.as_deref(),
         origin,
         metrics: &metrics,
-        copy_losses: 0,
-        capture_losses: 0,
+        copy_losses,
+        capture_losses,
     };
     let result: Result<()> = async {
         loop {
@@ -486,6 +494,61 @@ mod tests {
             sample_rate: INPUT_RATE,
             channels: 1,
             captured_at,
+        }
+    }
+
+    #[tokio::test]
+    async fn capture_gap_keeps_subsequent_originals_available_to_consumers() {
+        for origin in [TranscriptOrigin::Microphone, TranscriptOrigin::Speaker] {
+            let directory = tempfile::tempdir().unwrap();
+            let store = crate::retention::SessionRetention::create_in(directory.path(), "fixture")
+                .await
+                .unwrap();
+            let clock = Instant::now();
+            let retained =
+                retained::RetainedSession::new(store, clock, &tokio::runtime::Handle::current());
+            let history =
+                crate::history::HistoryBuffer::new(&crate::config::HistoryConfig::default());
+            let metrics = RouteMetrics::default();
+            let (sender, mut recorded) = mpsc::channel(2);
+            let mut recording = Some(sender);
+            let mut sidecar = OriginalSidecar {
+                speech: audio::speech::SpeechTap::new(),
+                history: &history,
+                recording: &mut recording,
+                recognition: None,
+                retained: Some(&retained),
+                origin,
+                metrics: &metrics,
+                copy_losses: 0,
+                capture_losses: 0,
+            };
+            sidecar.retain(&original(clock + Duration::from_millis(10)), false);
+            metrics
+                .audio
+                .capture_lost_frames
+                .store(1, Ordering::Relaxed);
+            sidecar.retain(&original(clock + Duration::from_millis(30)), false);
+            assert!(retained.status().missing_audio);
+            assert!(!retained.capture_requires_stop());
+            assert!(metrics.snapshot().processing_error.is_some());
+            for end in [10, 30] {
+                assert_eq!(
+                    recorded.try_recv().unwrap().captured_at,
+                    clock + Duration::from_millis(end)
+                );
+            }
+            retained.flush().await.unwrap();
+            let mut replay = retained.snapshot().unwrap();
+            for end in [10, 30] {
+                assert_eq!(
+                    replay.next().await.unwrap().unwrap().captured_at,
+                    clock + Duration::from_millis(end)
+                );
+            }
+            assert!(replay.next().await.unwrap().is_none());
+            drop(replay);
+            assert!(retained.complete().await.is_err());
         }
     }
 

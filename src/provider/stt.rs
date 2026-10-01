@@ -93,7 +93,7 @@ pub fn session_config(
         "whisper" => (
             &profiles.whisper.endpoint,
             profiles.whisper.request_timeout_secs,
-            0,
+            3,
         ),
         _ => bail!("unknown STT provider"),
     };

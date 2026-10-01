@@ -6,14 +6,33 @@ use super::*;
 
 const FINAL_TIMEOUT: Duration = Duration::from_secs(5);
 const MAX_TURN_SAMPLES: usize = 16_000 * 5;
+const WINDOW_FINAL_TIMEOUT: Duration = Duration::from_secs(30);
+const MAX_WINDOW_SAMPLES: u64 = 16_000 * 31;
+const STREAM_CHUNK_SAMPLES: usize = 1600;
 
-fn final_timeout() -> Failure {
+#[derive(Clone, Copy, PartialEq)]
+enum Boundary {
+    Streaming,
+    Window,
+}
+impl Boundary {
+    fn final_timeout(self) -> Duration {
+        match self {
+            Self::Streaming => FINAL_TIMEOUT,
+            Self::Window => WINDOW_FINAL_TIMEOUT,
+        }
+    }
+}
+
+pub(super) fn final_timeout() -> Failure {
     // A stalled live recognizer must not disable this source for the rest of
     // the session. The supervisor bounds retries and records the discontinuity;
     // when the source has closed, it still returns an incomplete-transcript error.
-    Failure::retry(
+    let mut failure = Failure::retry(
         "Gemini transcription final acknowledgement timed out; transcript may be incomplete",
-    )
+    );
+    failure.needs_transcription_context = true;
+    failure
 }
 
 async fn before_final_deadline<T>(
@@ -42,7 +61,7 @@ struct Turn {
     last_input: Instant,
 }
 
-async fn end_turn(socket: &mut Socket) -> SessionResult<Instant> {
+async fn end_turn(socket: &mut Socket, boundary: Boundary) -> SessionResult<Instant> {
     io_deadline(
         socket.send(Message::Text(
             json!({"realtimeInput":{"activityEnd":{}}})
@@ -51,7 +70,7 @@ async fn end_turn(socket: &mut Socket) -> SessionResult<Instant> {
         )),
     )
     .await?;
-    Ok(Instant::now() + FINAL_TIMEOUT)
+    Ok(Instant::now() + boundary.final_timeout())
 }
 
 #[derive(Default)]
@@ -84,7 +103,18 @@ pub(super) async fn session(
     let work = async {
         let socket = open_socket(config, api_key, endpoint, None, true).await?;
         emit(&events, ProviderEvent::Connected).await?;
-        run(socket, &mut audio, &events, config.vad_silence_ms).await
+        // The caller already bounded this retained window. Keep its overflow
+        // capture chunk and quiet tail in the same explicit activity; splitting
+        // again at five seconds can strand a tiny, unacknowledged second turn.
+        run_live(
+            socket,
+            &mut audio,
+            &events,
+            config.vad_silence_ms,
+            &mut State::default(),
+            Boundary::Window,
+        )
+        .await
     };
     tokio::select! {
         biased;
@@ -100,7 +130,15 @@ pub(super) async fn run(
     events: &mpsc::Sender<ProviderEvent>,
     silence_ms: u32,
 ) -> SessionResult<()> {
-    run_live(socket, audio, events, silence_ms, &mut State::default()).await
+    run_live(
+        socket,
+        audio,
+        events,
+        silence_ms,
+        &mut State::default(),
+        Boundary::Streaming,
+    )
+    .await
 }
 
 async fn run_live(
@@ -109,6 +147,7 @@ async fn run_live(
     events: &mpsc::Sender<ProviderEvent>,
     silence_ms: u32,
     state: &mut State,
+    boundary: Boundary,
 ) -> SessionResult<()> {
     let silence = Duration::from_millis(u64::from(silence_ms.clamp(100, 2000)));
     let silence_samples = silence.as_millis() as usize * 16;
@@ -132,16 +171,16 @@ async fn run_live(
             _ = heartbeat.tick() => {
                 before_final_deadline(final_deadline, io_deadline(socket.send(Message::Ping(Vec::new().into())))).await?;
             }
-            _ = idle.tick(), if state.turn.is_some() && final_deadline.is_none() => {
+            _ = idle.tick(), if boundary == Boundary::Streaming && state.turn.is_some() && final_deadline.is_none() => {
                 if state.turn.as_ref().is_some_and(|turn| turn.last_input.elapsed() >= silence) {
-                    final_deadline = Some(end_turn(&mut socket).await?);
+                    final_deadline = Some(end_turn(&mut socket, boundary).await?);
                 }
             }
             samples = audio.recv(), if !state.eof && final_deadline.is_none() => {
                 let Some(samples) = samples else {
                     state.eof = true;
                     if state.turn.is_none() { return Ok(()); }
-                    final_deadline = Some(end_turn(&mut socket).await?);
+                    final_deadline = Some(end_turn(&mut socket, boundary).await?);
                     continue;
                 };
                 if samples.len() > MAX_INPUT_SAMPLES {
@@ -150,6 +189,9 @@ async fn run_live(
                 if samples.is_empty() { continue; }
                 let start = state.position;
                 state.position = state.position.saturating_add(samples.len() as u64);
+                if boundary == Boundary::Window && state.position > MAX_WINDOW_SAMPLES {
+                    return Err(Failure::fatal("Gemini retained transcription window exceeds 31 seconds"));
+                }
                 // Never classify quiet speech as silence. Only exact digital
                 // zero is known empty, and its duration still advances offsets.
                 if state.turn.is_none() && samples.iter().all(|sample| *sample == 0) {
@@ -162,15 +204,19 @@ async fn run_live(
                 let zeros = samples.iter().rev().take_while(|sample| **sample == 0).count();
                 current.trailing_zeros = if zeros == samples.len() { current.trailing_zeros + zeros } else { zeros };
                 current.last_input = Instant::now();
-                let ending = current.samples >= MAX_TURN_SAMPLES || current.trailing_zeros >= silence_samples;
+                let ending = boundary == Boundary::Streaming && (current.samples >= MAX_TURN_SAMPLES || current.trailing_zeros >= silence_samples);
                 if starting {
                     io_deadline(socket.send(Message::Text(
                         json!({"realtimeInput":{"activityStart":{}}}).to_string().into()
                     ))).await?;
                 }
-                io_deadline(socket.send(audio_message(&samples)?)).await?;
+                // The official Live Transcribe guidance recommends 100 ms
+                // PCM messages, including replay of retained originals.
+                for chunk in samples.chunks(STREAM_CHUNK_SAMPLES) {
+                    io_deadline(socket.send(audio_message(chunk)?)).await?;
+                }
                 if ending {
-                    final_deadline = Some(end_turn(&mut socket).await?);
+                    final_deadline = Some(end_turn(&mut socket, boundary).await?);
                 }
             }
             incoming = socket.next() => {

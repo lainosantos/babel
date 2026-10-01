@@ -665,6 +665,9 @@ pub async fn capture(
         if !send_capture_bytes(&bytes, options, &sink, &stats) {
             break Ok(());
         }
+        // Buffered IPC can make consecutive reads immediately ready. Let the
+        // switching/forwarding tasks drain bounded queues between full frames.
+        tokio::task::yield_now().await;
     };
     let aligned =
         filled / (usize::from(options.channels) * 4) * (usize::from(options.channels) * 4);

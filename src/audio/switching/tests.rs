@@ -345,6 +345,81 @@ async fn capture_congestion_is_distinct_from_playback_discard() {
     assert_eq!(stats.capture_lost_frames.load(Ordering::Relaxed), 1);
 }
 
+struct BurstBackend;
+#[async_trait]
+impl Backend for BurstBackend {
+    async fn capture(
+        &self,
+        _: &str,
+        options: AudioOptions,
+        output: mpsc::Sender<OriginalFrame>,
+        cancel: CancellationToken,
+        stats: Arc<AudioStats>,
+    ) -> Result<()> {
+        // Deliver a 200 ms device batch in one poll, without waiting for readers.
+        for index in 0..20 {
+            if output
+                .try_send(OriginalFrame {
+                    samples: vec![index as f32].into(),
+                    sample_rate: options.sample_rate,
+                    channels: options.channels,
+                    captured_at: Instant::now(),
+                })
+                .is_err()
+            {
+                stats.record_capture_loss();
+            }
+        }
+        cancel.cancelled().await;
+        Ok(())
+    }
+    async fn playback(
+        &self,
+        _: &str,
+        _: AudioOptions,
+        _: mpsc::Receiver<PlaybackCommand>,
+        _: CancellationToken,
+        _: Arc<AudioStats>,
+    ) -> Result<()> {
+        unreachable!("Capture-only fixture")
+    }
+}
+
+#[tokio::test]
+async fn configured_capture_window_preserves_batched_device_frames() {
+    let (_device, selected) = watch::channel("fixture".to_owned());
+    let (output, mut originals) = mpsc::channel(20);
+    let cancel = CancellationToken::new();
+    let stats = Arc::new(AudioStats::default());
+    let worker_cancel = cancel.clone();
+    let worker_stats = stats.clone();
+    let worker = tokio::spawn(async move {
+        capture_with(
+            &BurstBackend,
+            "fixture",
+            AudioOptions {
+                frame_ms: 10,
+                ..options()
+            },
+            output,
+            selected,
+            worker_cancel,
+            worker_stats,
+        )
+        .await
+    });
+    tokio::time::timeout(Duration::from_secs(1), async {
+        for index in 0..20 {
+            assert_eq!(originals.recv().await.unwrap().samples[0], index as f32);
+        }
+    })
+    .await
+    .unwrap();
+    cancel.cancel();
+    worker.await.unwrap().unwrap();
+    assert_eq!(stats.capture_lost_frames.load(Ordering::Relaxed), 0);
+}
+
 struct ShutdownTailBackend;
 #[async_trait]
 impl Backend for ShutdownTailBackend {

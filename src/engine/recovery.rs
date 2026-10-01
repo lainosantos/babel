@@ -14,8 +14,41 @@ pub(super) struct Archive {
     history: crate::history::HistorySnapshot,
     error: Arc<StdMutex<Option<String>>>,
     recovering: Arc<AtomicBool>,
-    pub(super) outputs_committed: Arc<AtomicBool>,
-    pub(super) translations_committed: [Arc<AtomicBool>; 2],
+    pub(super) progress: Arc<SessionProgress>,
+}
+
+/// Each model and file confirms its own work. A failure in one feature must
+/// not replay another feature's completed inference or rewrite synced files.
+#[derive(Default)]
+pub(super) struct SessionProgress {
+    pub(super) recording: Arc<AtomicBool>,
+    pub(super) transcript: Arc<AtomicBool>,
+    pub(super) recognition: [Arc<AtomicBool>; 2],
+    pub(super) translation: [Arc<AtomicBool>; 2],
+}
+impl SessionProgress {
+    fn pending_config(&self, config: &AppConfig) -> AppConfig {
+        let mut pending = config.clone();
+        pending.microphone.enabled &= !self.translation[0].load(Ordering::Acquire);
+        pending.speaker.enabled &= !self.translation[1].load(Ordering::Acquire);
+        pending.recording.enabled &= !self.recording.load(Ordering::Acquire);
+        let saved = self.transcript.load(Ordering::Acquire);
+        pending.transcription.microphone &= !config.microphone_uses_speaker()
+            && (!saved || !self.recognition[0].load(Ordering::Acquire));
+        pending.transcription.speaker &= !saved || !self.recognition[1].load(Ordering::Acquire);
+        pending.transcription.enabled &=
+            pending.transcription.microphone || pending.transcription.speaker;
+        pending
+    }
+    fn complete(&self, config: &AppConfig) -> bool {
+        let pending = self.pending_config(config);
+        !pending.recording.enabled
+            && !pending.transcription.enabled
+            && (!config.microphone.enabled
+                || config.microphone_uses_speaker()
+                || self.translation[0].load(Ordering::Acquire))
+            && (!config.speaker.enabled || self.translation[1].load(Ordering::Acquire))
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -46,8 +79,7 @@ impl Archive {
             history,
             error: Arc::default(),
             recovering: Arc::default(),
-            outputs_committed: Arc::default(),
-            translations_committed: std::array::from_fn(|_| Arc::default()),
+            progress: Arc::default(),
         }
     }
 
@@ -102,7 +134,7 @@ pub(super) async fn finish_archive(
     // Retention is released only after every selected consumer has committed,
     // including translated playback, not merely after the files close.
     let error = retained.error.or_else(|| {
-        (!archive.outputs_committed.load(Ordering::Acquire)).then(|| {
+        (!archive.progress.complete(&archive.config)).then(|| {
             status
                 .last_error
                 .clone()
@@ -154,7 +186,7 @@ impl Controller {
             .into_iter()
             .enumerate()
             .any(|(index, enabled)| {
-                enabled && !archive.translations_committed[index].load(Ordering::Acquire)
+                enabled && !archive.progress.translation[index].load(Ordering::Acquire)
             });
             if translation_pending {
                 ensure!(
@@ -192,7 +224,7 @@ impl Controller {
                 }
                 let _guard = Guard(archive.recovering.clone());
                 let work = async {
-                    let config = archive.config.clone();
+                    let config = archive.progress.pending_config(&archive.config);
                     let (config, _lease) =
                         runtime.resolve(&config, CancellationToken::new()).await?;
                     let recovered = crate::session::SessionIdentity::new_with_language(
@@ -243,7 +275,11 @@ async fn replay(
     files: SessionFiles,
     usage: watch::Receiver<audio::activity::EndpointUse>,
 ) -> Result<()> {
-    let mut originals = archive.originals.snapshot()?;
+    let mut originals = files
+        .audio
+        .as_ref()
+        .map(|_| archive.originals.snapshot())
+        .transpose()?;
     let mut workers = JoinSet::new();
     let cancellation = CancellationToken::new();
     let _cancel = cancellation.clone().drop_guard();
@@ -253,14 +289,14 @@ async fn replay(
     ] {
         if !route.enabled
             || (index == 0 && config.microphone_uses_speaker())
-            || archive.translations_committed[index].load(Ordering::Acquire)
+            || archive.progress.translation[index].load(Ordering::Acquire)
         {
             continue;
         }
         let config = config.clone();
         let route = route.clone();
         let originals = archive.originals.clone();
-        let committed = archive.translations_committed[index].clone();
+        let committed = archive.progress.translation[index].clone();
         let usage = usage.clone();
         workers.spawn(async move {
             let (_devices, playback) = watch::channel(route.playback_device.clone());
@@ -281,7 +317,17 @@ async fn replay(
     }
     let transcript = if let Some(writer) = files.transcript {
         let (sender, received) = mpsc::channel(128);
-        workers.spawn(writer.run(received));
+        workers.spawn(commit_writer(
+            history::write_transcript(
+                writer,
+                received,
+                config.clone(),
+                archive.history.clone(),
+                Arc::new(AtomicBool::new(true)),
+                Some(archive.originals.transcripts.clone()),
+            ),
+            Some(archive.progress.transcript.clone()),
+        ));
         sender.send(TranscriptRecord::Section(format!(
             "Recovered originals from session {}. New files preserve the earlier partial files.", archive.session.id
         ))).await.context("Recovered transcript closed")?;
@@ -291,48 +337,44 @@ async fn replay(
     };
     let audio = if let Some(writer) = files.audio {
         let (sender, received) = mpsc::channel(128);
-        workers.spawn(writer.run(received));
+        workers.spawn(commit_writer(
+            writer.run(received),
+            Some(archive.progress.recording.clone()),
+        ));
         Some(sender)
     } else {
         None
     };
-    let mut inputs = [None, None];
-    for (index, origin, enabled, recognition) in [
+    for (index, origin, enabled) in [
         (
             0,
             TranscriptOrigin::Microphone,
             config.transcription.microphone && !config.microphone_uses_speaker(),
-            &config.transcription.microphone_recognition,
         ),
-        (
-            1,
-            TranscriptOrigin::Speaker,
-            config.transcription.speaker,
-            &config.transcription.speaker_recognition,
-        ),
+        (1, TranscriptOrigin::Speaker, config.transcription.speaker),
     ] {
-        if enabled && let Some(transcript) = transcript.clone() {
-            let provider = provider::stt::create(recognition, &config.transcription.providers)?;
-            let settings =
-                provider::stt::session_config(recognition, &config.transcription.providers)?;
-            let (sender, received) = mpsc::channel(8);
-            inputs[index] = Some(sender);
-            workers.spawn(transcribe(
-                provider,
-                settings,
-                received,
-                transcript,
-                origin,
-                cancellation.child_token(),
+        if enabled && let Some(sender) = transcript.clone() {
+            workers.spawn(commit_writer(
+                recognition::start_retained(
+                    config.clone(),
+                    TranscriptSink {
+                        sender,
+                        origin,
+                        retained: Some(archive.originals.clone()),
+                    },
+                    Arc::default(),
+                    archive.origin,
+                    archive.originals.clone(),
+                ),
+                Some(archive.progress.recognition[index].clone()),
             ));
         }
     }
     drop(transcript);
-    let mut next = [0u64; 2];
     let mut pending = Box::pin(async {
         let mut history = archive.history.frames.iter();
         let mut history_reader = crate::history::HistoryReader::default();
-        loop {
+        while let Some(originals) = &mut originals {
             let frame = match history.next() {
                 Some(frame) => AudioRecord {
                     lane: frame.lane,
@@ -349,9 +391,6 @@ async fn replay(
             } else {
                 1
             };
-            if let Some(sender) = &inputs[lane] {
-                feed(sender, &frame, archive.origin, &mut next[lane]).await?;
-            }
             let record_lane = if lane == 0 {
                 config.recording.microphone && !config.microphone_uses_speaker()
             } else {
@@ -364,7 +403,6 @@ async fn replay(
                     .context("Recovered audio writer closed")?;
             }
         }
-        drop(inputs);
         drop(audio);
         Ok::<_, anyhow::Error>(())
     });
@@ -385,42 +423,6 @@ async fn replay(
     Ok(())
 }
 
-async fn feed(
-    sender: &mpsc::Sender<Vec<i16>>,
-    frame: &AudioRecord,
-    origin: Instant,
-    next: &mut u64,
-) -> Result<()> {
-    let end = (frame
-        .captured_at
-        .saturating_duration_since(origin)
-        .as_nanos()
-        * 16_000
-        / 1_000_000_000) as u64;
-    let candidate = end.saturating_sub(frame.samples.len() as u64);
-    let start = if *next > 0 && candidate <= next.saturating_add(800) {
-        *next
-    } else {
-        candidate
-    };
-    while *next < start {
-        let count = (start - *next).min(16_000) as usize;
-        sender
-            .send(vec![0; count])
-            .await
-            .context("Recovery recognizer closed")?;
-        *next += count as u64;
-    }
-    for chunk in frame.samples.chunks(16_000) {
-        sender
-            .send(chunk.to_vec())
-            .await
-            .context("Recovery recognizer closed")?;
-        *next += chunk.len() as u64;
-    }
-    Ok(())
-}
-
 pub(super) async fn transcribe(
     provider: Arc<dyn provider::SpeechProvider>,
     settings: SessionConfig,
@@ -428,6 +430,7 @@ pub(super) async fn transcribe(
     transcript: mpsc::Sender<TranscriptRecord>,
     origin: TranscriptOrigin,
     cancel: CancellationToken,
+    cache: Option<Arc<transcription_cache::Cache>>,
 ) -> Result<()> {
     let mut position = 0u64;
     let mut ended = false;
@@ -446,7 +449,7 @@ pub(super) async fn transcribe(
         }
         let offset = position / 16;
         position += pcm.len() as u64;
-        if pcm.iter().all(|sample| *sample == 0) {
+        if provider.is_silent_window(&pcm) {
             continue;
         }
         transcribe_window(
@@ -457,6 +460,7 @@ pub(super) async fn transcribe(
             origin,
             offset,
             cancel.child_token(),
+            cache.as_ref(),
         )
         .await?;
     }
@@ -472,7 +476,22 @@ async fn transcribe_window(
     origin: TranscriptOrigin,
     offset: u64,
     cancel: CancellationToken,
+    cache: Option<&Arc<transcription_cache::Cache>>,
 ) -> Result<()> {
+    let namespace = transcription_cache::Namespace::History(origin);
+    let end = offset.saturating_add((pcm.len() as u64).div_ceil(16));
+    if let Some(cache) = cache
+        && let Some((cached_end, records)) = cache.get(namespace, offset).await?
+    {
+        ensure!(cached_end == end, "Confirmed history range changed");
+        for record in records {
+            transcript
+                .send(record)
+                .await
+                .context("Recovered transcript closed")?;
+        }
+        return Ok(());
+    }
     let mut attempts = 0u32;
     let retries = settings.max_reconnect_attempts;
     let mut settings = settings;
@@ -496,6 +515,7 @@ async fn transcribe_window(
             }
         }
     };
+    let mut records = Vec::new();
     for event in results {
         let record = match event {
             ProviderEvent::Transcript {
@@ -521,11 +541,17 @@ async fn transcribe_window(
             }
             _ => continue,
         };
+        records.push(TranscriptRecord::Routed {
+            origin,
+            record: Box::new(record),
+        });
+    }
+    if let Some(cache) = cache {
+        cache.put(namespace, offset, end, &records).await?;
+    }
+    for record in records {
         transcript
-            .send(TranscriptRecord::Routed {
-                origin,
-                record: Box::new(record),
-            })
+            .send(record)
             .await
             .context("Recovered transcript closed")?;
     }

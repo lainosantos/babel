@@ -79,7 +79,10 @@ The API receives Base64-encoded little-endian binary PCM in `realtimeInput.audio
 Input begins only after `setupComplete`. The engine uses 100 ms frames in
 continuous translation mode. A response may contain several audio fragments in
 one event; all are processed. Output plays as it arrives, without waiting for
-`turnComplete`. That event only signals generation completion to consumers.
+`turnComplete`. The dedicated interpreter drains through `generationComplete`;
+the conversational Live agent also requires `turnComplete`. A late conversational
+marker cannot acknowledge the interpreter's next input epoch. The final response
+wait is bounded to 30 seconds; a missing final leaves originals recoverable.
 
 Translation sessions disable `input_transcription`: STS input text does not
 feed the TXT. Native translated audio plays directly, without another synthesis
@@ -101,9 +104,14 @@ The legacy `providers.gemini.transcription_model` field does not control the new
 running profile; see [STT configuration and migration](transcription.md).
 See the [official Live Transcribe guide](https://ai.google.dev/gemini-api/docs/live-api/live-transcribe).
 
-The adapter ignores partial hypotheses to avoid duplicating TXT content. It
-bounds explicit Live turns to five seconds plus at most one input chunk and
-waits up to five seconds for a final result, including a valid empty result.
+The adapter ignores partial hypotheses to avoid duplicating TXT content. The
+engine collects normal windows of five seconds plus at most one capture chunk.
+Each retained window uses one explicit Live turn, ending only at input EOF;
+the adapter does not split off its small overflow or quiet tail. History and
+explicit recovery windows contain at most 31 seconds of originals. Audio is
+sent in PCM messages of at most 100 ms, following the Live Transcribe guidance.
+The adapter waits up to 30 seconds after the boundary for a final result,
+including an explicitly returned empty result. Missing results remain errors.
 If Live stalls, disconnects or requests rotation, Babel retains all unconfirmed
 original PCM and retries the affected window through the same configured Live
 Transcribe model. Normal transcription, retained history, and explicit session
@@ -118,12 +126,30 @@ drains already captured originals while original routing can restart
 independently. WAV recording remains a separate path. See
 [recovery bounds and behavior](transcription.md#gemini-live-transcribe).
 
-During active capture, transient window failures keep retrying with a 30-second
-cooldown after the initial reconnect budget. After Stop, failed attempts are
-bounded by the profile's reconnect budget (at least three retries). Permanent
+Missing transcription finals extend the unconfirmed PCM with following originals
+up to 30 seconds plus one capture chunk, within a bounded retry budget. Unresolved
+intervals are marked in the transcript and retained for explicit recovery while
+later audio continues through recognition. During active capture, transient
+transport failures keep retrying with a 30-second
+cooldown after the initial reconnect budget. After Stop, transient transport attempts are
+bounded by the profile's reconnect budget. Zero disables automatic retries. A missing
+transcription final gets at most one additional attempt with following retained
+context, up to 30 seconds; identical PCM without new context is not replayed.
+An unresolved interval is retained and marked rather than retried for minutes. Permanent
 Gemini authentication and protocol failures pause immediately. The dashboard
 reports the sanitized cause, and incomplete originals
 remain retained for explicit recovery rather than generating endless requests.
+Gemini transcription avoids requesting speech finals for windows classified as
+non-speech by a local voice activity detector. It uses Earshot, a small bundled
+Rust classifier, with a conservative 0.35 speech threshold and a separate low
+PCM background floor. Non-floor windows shorter than half a second remain
+eligible for recognition. This is a signal heuristic, not another transcription
+model or paid API; very quiet or unusual speech can be misclassified. WAV and
+encrypted retention preserve every original sample unchanged. Continuous
+translation also forwards unchanged PCM, but non-speech does not create new
+pending speech work. A received server response still requires completion even
+if the local detector found no voice. Timeout alone never confirms pending
+speech. See [transcription tail handling](transcription.md#gemini-live-transcribe).
 Translation checks output selection before retry inference. During capture it
 waits locally for reselection; after Stop it pauses unselected work for explicit
 recovery. Neither case makes paid requests while unselected. Catch-up only

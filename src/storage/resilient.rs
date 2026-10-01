@@ -6,6 +6,23 @@ use tokio::{
     io::{AsyncSeekExt, AsyncWriteExt},
 };
 
+/// Authentication, malformed data and permanent filesystem failures cannot be
+/// repaired by replaying the same read indefinitely. Preserve the journal and
+/// surface the failure; retry only actual transient I/O.
+pub(crate) fn retryable_read(error: &anyhow::Error) -> bool {
+    error.downcast_ref::<io::Error>().is_some_and(|error| {
+        !matches!(
+            error.kind(),
+            io::ErrorKind::InvalidInput
+                | io::ErrorKind::InvalidData
+                | io::ErrorKind::UnexpectedEof
+                | io::ErrorKind::NotFound
+                | io::ErrorKind::PermissionDenied
+                | io::ErrorKind::Unsupported
+        )
+    })
+}
+
 const CAPACITY: usize = 64 * 1024;
 pub(crate) type RecoveryObserver = Arc<dyn Fn(bool) + Send + Sync>;
 
@@ -122,7 +139,10 @@ impl ResilientFile {
     async fn retry(&self, error: io::Error, attempts: &mut u32) -> io::Result<()> {
         if matches!(
             error.kind(),
-            io::ErrorKind::InvalidInput | io::ErrorKind::InvalidData | io::ErrorKind::Unsupported
+            io::ErrorKind::InvalidInput
+                | io::ErrorKind::InvalidData
+                | io::ErrorKind::Unsupported
+                | io::ErrorKind::PermissionDenied
         ) {
             return Err(error);
         }
@@ -141,6 +161,25 @@ impl ResilientFile {
 mod tests {
     use super::*;
     use std::sync::Mutex;
+
+    #[test]
+    fn corrupt_or_permanently_unreadable_journals_do_not_retry_forever() {
+        for kind in [
+            io::ErrorKind::InvalidData,
+            io::ErrorKind::UnexpectedEof,
+            io::ErrorKind::PermissionDenied,
+            io::ErrorKind::NotFound,
+        ] {
+            let error = anyhow::Error::new(io::Error::from(kind)).context("Encrypted read failed");
+            assert!(!retryable_read(&error));
+        }
+        assert!(!retryable_read(&anyhow::anyhow!(
+            "Synthetic authentication failure"
+        )));
+        assert!(retryable_read(&anyhow::Error::new(io::Error::from(
+            io::ErrorKind::Interrupted
+        ))));
+    }
 
     #[tokio::test(start_paused = true)]
     async fn partial_writes_retry_at_the_same_offset_and_header_rewrites_preserve_the_tail() {

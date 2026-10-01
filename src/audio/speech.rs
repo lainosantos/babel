@@ -2,6 +2,87 @@
 use super::{OriginalFrame, PcmFrame, resample::Resampler};
 use std::time::{Duration, Instant};
 
+/// Conservative PCM16 background floor, checked in 20 ms blocks so a short
+/// quiet sound cannot be diluted by a long silent window. This is a signal
+/// heuristic, not a speech recognizer. Keep originals unchanged in the journal
+/// and recording; use it only on speech-processing workers.
+pub(crate) fn below_background_floor(samples: &[i16]) -> bool {
+    samples.chunks(320).all(|block| {
+        block.iter().all(|sample| sample.unsigned_abs() <= 16)
+            && block
+                .iter()
+                .map(|sample| i64::from(*sample).pow(2))
+                .sum::<i64>()
+                <= block.len() as i64 * 4 * 4
+    })
+}
+
+/// Classify a complete retained window on a processing worker. The conservative
+/// threshold keeps uncertain speech eligible for ASR. Originals are never edited.
+pub(crate) fn likely_non_speech(samples: &[i16]) -> bool {
+    if below_background_floor(samples) {
+        return true;
+    }
+    // A very short tail has insufficient context for a VAD decision.
+    if samples.len() < 16_000 / 2 {
+        return false;
+    }
+    let mut detector = earshot::Detector::default();
+    for block in samples.chunks(256) {
+        let mut padded = [0; 256];
+        padded[..block.len()].copy_from_slice(block);
+        if detector.predict_i16(&padded) >= 0.35 {
+            return false;
+        }
+    }
+    true
+}
+
+/// Per-source streaming VAD. Only controls whether remote speech work is pending;
+/// it does not remove samples from provider input, recording, or encrypted history.
+pub(crate) struct VoiceActivity {
+    detector: earshot::Detector,
+    frame: [i16; 256],
+    filled: usize,
+    voiced: bool,
+    analyzed: bool,
+    ever_voiced: bool,
+}
+impl Default for VoiceActivity {
+    fn default() -> Self {
+        Self {
+            detector: Default::default(),
+            frame: [0; 256],
+            filled: 0,
+            voiced: true,
+            analyzed: false,
+            ever_voiced: false,
+        }
+    }
+}
+impl VoiceActivity {
+    pub(crate) fn speech(&mut self, samples: &[i16]) -> bool {
+        let mut speech = false;
+        for &sample in samples {
+            self.frame[self.filled] = sample;
+            self.filled += 1;
+            if self.filled == self.frame.len() {
+                self.voiced = self.detector.predict_i16(&self.frame) >= 0.35;
+                self.analyzed = true;
+                self.ever_voiced |= self.voiced;
+                speech |= self.voiced;
+                self.filled = 0;
+            }
+        }
+        (speech || self.voiced) && !below_background_floor(samples)
+    }
+    pub(crate) fn no_detected_speech(&self) -> bool {
+        self.analyzed
+            && !self.ever_voiced
+            && (self.filled == 0 || below_background_floor(&self.frame[..self.filled]))
+    }
+}
+
 pub struct SpeechTap {
     resampler: Option<Resampler>,
     format: Option<(u32, u16)>,
@@ -119,6 +200,51 @@ impl SpeechTap {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn local_voice_detection_keeps_short_and_uncertain_audio_eligible() {
+        assert!(likely_non_speech(&[17; 16000]));
+        assert!(!below_background_floor(&[17; 16000]));
+        assert!(!likely_non_speech(&[17; 100]));
+        assert!(!likely_non_speech(&[1000; 16000]));
+        assert!(likely_non_speech(&[0; 16000]));
+    }
+
+    #[test]
+    fn streaming_voice_detection_preserves_input_and_unknown_partial_tail() {
+        let samples = vec![17; 256 * 32];
+        let before = samples.clone();
+        let mut activity = VoiceActivity::default();
+        for chunk in samples.chunks(100) {
+            activity.speech(chunk);
+        }
+        assert_eq!(samples, before);
+        assert!(activity.no_detected_speech());
+        activity.speech(&[7000; 37]);
+        assert!(!activity.no_detected_speech());
+        let mut voiced = VoiceActivity::default();
+        assert!(voiced.speech(&[5000; 16000]));
+        assert!(!voiced.no_detected_speech());
+        voiced.speech(&[0; 16000]);
+        assert!(!voiced.no_detected_speech());
+    }
+
+    #[test]
+    fn background_floor_is_local_and_preserves_short_or_quiet_signal() {
+        assert!(below_background_floor(&[2, -2].repeat(8000)));
+        assert!(below_background_floor(&[]));
+        assert!(!below_background_floor(&[5, -5].repeat(8000)));
+        for value in [17, -17, i16::MIN, i16::MAX] {
+            let mut samples = vec![0; 16000 * 10];
+            samples[12345] = value;
+            assert!(!below_background_floor(&samples));
+        }
+        // Low peak, but concentrated energy above the floor in one 20 ms
+        // block: do not dilute a short quiet sound over the whole window.
+        let mut samples = vec![0; 16000 * 10];
+        samples[320..640].copy_from_slice(&[8; 320]);
+        assert!(!below_background_floor(&samples));
+    }
+
     #[test]
     fn speech_conversion_downmixes_without_modifying_original_channels() {
         let original = OriginalFrame {

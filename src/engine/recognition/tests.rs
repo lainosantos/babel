@@ -244,7 +244,7 @@ async fn retained_transcription_failure_stops_retrying_without_acknowledging_or_
         &config.transcription.providers,
     )
     .unwrap();
-    settings.max_reconnect_attempts = 0;
+    settings.max_reconnect_attempts = 3;
     let (text, mut records) = mpsc::channel(1);
     let metrics = Arc::new(RouteMetrics::default());
     let error = tokio::time::timeout(
@@ -299,7 +299,7 @@ async fn active_transcription_keeps_retrying_and_stop_wakes_its_cooldown_without
         &config.transcription.providers,
     )
     .unwrap();
-    settings.max_reconnect_attempts = 0;
+    settings.max_reconnect_attempts = 3;
     let (text, _records) = mpsc::channel(1);
     let metrics = Arc::new(RouteMetrics::default());
     let task = tokio::spawn(run_retained(
@@ -1350,4 +1350,713 @@ async fn retained_transcription_retries_only_the_unconfirmed_segment_then_contin
     assert_eq!(metrics.reconnects.load(Ordering::Relaxed), 1);
     assert!(!originals.capture_requires_stop());
     server.abort();
+}
+
+#[derive(Default)]
+struct ContextRecognizer {
+    inputs: StdMutex<Vec<(String, Vec<i16>)>>,
+    confirmed: Notify,
+}
+#[async_trait]
+impl SpeechProvider for ContextRecognizer {
+    fn id(&self) -> &'static str {
+        "gemini"
+    }
+    async fn run_history(
+        &self,
+        config: SessionConfig,
+        audio: mpsc::Receiver<Vec<i16>>,
+        events: mpsc::Sender<ProviderEvent>,
+        cancel: CancellationToken,
+    ) -> Result<()> {
+        self.run(config, audio, events, cancel).await
+    }
+    async fn run(
+        &self,
+        config: SessionConfig,
+        mut audio: mpsc::Receiver<Vec<i16>>,
+        events: mpsc::Sender<ProviderEvent>,
+        _: CancellationToken,
+    ) -> Result<()> {
+        let mut pcm = Vec::new();
+        while let Some(samples) = audio.recv().await {
+            pcm.extend(samples);
+        }
+        self.inputs
+            .lock()
+            .unwrap()
+            .push((config.source_language.clone(), pcm.clone()));
+        let Some(_) = pcm.iter().position(|value| value.abs() > 1) else {
+            // Exercise the actual typed Gemini timeout, rather than a generic
+            // transport failure that must retry the same exact window.
+            return Err(crate::provider::missing_transcription_final());
+        };
+        let mut previous = 0;
+        for (position, &value) in pcm.iter().enumerate() {
+            if value.abs() > 1 && value != previous {
+                events
+                    .send(ProviderEvent::Transcript {
+                        input: true,
+                        text: format!("Confirmed {} source {}.", config.source_language, value),
+                        metadata: TranscriptMetadata {
+                            alignment_ms: Some(position as u64 * 1000 / u64::from(INPUT_RATE)),
+                            ..Default::default()
+                        },
+                    })
+                    .await?;
+            }
+            previous = value;
+        }
+        events.send(ProviderEvent::TurnComplete).await?;
+        self.confirmed.notify_one();
+        Ok(())
+    }
+}
+
+#[tokio::test]
+async fn missing_final_extends_only_unconfirmed_originals_and_preserves_both_languages() {
+    for (source, language, value) in [
+        (TranscriptOrigin::Microphone, "pt-BR", 42),
+        (TranscriptOrigin::Speaker, "en-US", -42),
+    ] {
+        let directory = tempfile::tempdir().unwrap();
+        let store =
+            crate::retention::SessionRetention::create_in(directory.path(), "context-originals")
+                .await
+                .unwrap();
+        let origin = Instant::now();
+        let originals =
+            retained::RetainedSession::new(store, origin, &tokio::runtime::Handle::current());
+        for second in 1..=15 {
+            originals
+                .capture(
+                    &frame(
+                        origin,
+                        second * 1000,
+                        16000,
+                        if second <= 5 {
+                            1
+                        } else if second <= 10 {
+                            value
+                        } else {
+                            90
+                        },
+                    ),
+                    source,
+                )
+                .unwrap();
+        }
+        originals.close_capture();
+        let config = AppConfig::default();
+        let mut settings = provider::stt::session_config(
+            &config.transcription.microphone_recognition,
+            &config.transcription.providers,
+        )
+        .unwrap();
+        settings.source_language = language.into();
+        let processor = Arc::new(ContextRecognizer::default());
+        let (text, mut records) = mpsc::channel(32);
+        let metrics = Arc::new(RouteMetrics::default());
+        run_retained(
+            processor.clone(),
+            settings,
+            TranscriptSink {
+                retained: Some(originals.clone()),
+                sender: text,
+                origin: source,
+            },
+            metrics.clone(),
+            origin,
+            originals.clone(),
+        )
+        .await
+        .unwrap();
+        {
+            let inputs = processor.inputs.lock().unwrap();
+            assert_eq!(inputs.len(), 2);
+            assert_eq!(inputs[0], (language.into(), vec![1; 80000]));
+            assert_eq!(
+                inputs[1],
+                (
+                    language.into(),
+                    [vec![1; 80000], vec![value; 80000], vec![90; 80000]].concat()
+                )
+            );
+        }
+        let mut saved = Vec::new();
+        while let Some(TranscriptRecord::Routed {
+            origin: received_source,
+            record,
+        }) = records.recv().await
+        {
+            assert_eq!(received_source, source);
+            if let TranscriptRecord::Text { text, metadata, .. } = *record {
+                saved.push((text, metadata.alignment_ms));
+            }
+        }
+        assert_eq!(
+            saved,
+            vec![
+                (format!("Confirmed {language} source {value}."), Some(5000)),
+                (format!("Confirmed {language} source 90."), Some(10000))
+            ]
+        );
+        assert!(metrics.snapshot().processing_error.is_none());
+        assert_eq!(originals.status().frames, 15);
+        assert!(!originals.status().completed);
+    }
+}
+
+#[tokio::test]
+async fn unconfirmed_context_is_deferred_without_blocking_later_speech_during_capture() {
+    let directory = tempfile::tempdir().unwrap();
+    let store =
+        crate::retention::SessionRetention::create_in(directory.path(), "deferred-originals")
+            .await
+            .unwrap();
+    let origin = Instant::now();
+    let originals =
+        retained::RetainedSession::new(store, origin, &tokio::runtime::Handle::current());
+    for second in 1..=25 {
+        originals
+            .capture(
+                &frame(
+                    origin,
+                    second * 1000,
+                    16000,
+                    if second <= 20 { 1 } else { 42 },
+                ),
+                TranscriptOrigin::Microphone,
+            )
+            .unwrap();
+    }
+    let config = AppConfig::default();
+    let mut settings = provider::stt::session_config(
+        &config.transcription.microphone_recognition,
+        &config.transcription.providers,
+    )
+    .unwrap();
+    settings.source_language = "pt-BR".into();
+    settings.max_reconnect_attempts = 3;
+    let processor = Arc::new(ContextRecognizer::default());
+    let (text, mut records) = mpsc::channel(32);
+    let metrics = Arc::new(RouteMetrics::default());
+    let task = tokio::spawn(run_retained(
+        processor.clone(),
+        settings,
+        TranscriptSink {
+            retained: Some(originals.clone()),
+            sender: text,
+            origin: TranscriptOrigin::Microphone,
+        },
+        metrics.clone(),
+        origin,
+        originals.clone(),
+    ));
+    tokio::time::timeout(Duration::from_secs(6), processor.confirmed.notified())
+        .await
+        .expect("Later speech must reach recognition while capture is still active");
+    assert!(!originals.status().capture_closed);
+    originals.close_capture();
+    let error = tokio::time::timeout(Duration::from_secs(2), task)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("1 original transcription windows remain unconfirmed")
+    );
+    assert_eq!(
+        processor
+            .inputs
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(_, pcm)| pcm.len())
+            .collect::<Vec<_>>(),
+        [80000, 160000, 240000, 320000, 80000]
+    );
+    let mut sections = Vec::new();
+    let mut saved = Vec::new();
+    while let Some(TranscriptRecord::Routed { record, .. }) = records.recv().await {
+        match *record {
+            TranscriptRecord::Section(text) => sections.push(text),
+            TranscriptRecord::Text { text, metadata, .. } => {
+                saved.push((text, metadata.alignment_ms))
+            }
+            _ => {}
+        }
+    }
+    assert_eq!(sections.len(), 1);
+    assert!(sections[0].contains("for microphone at +0.000s to +20.000s"));
+    assert_eq!(
+        saved,
+        vec![("Confirmed pt-BR source 42.".into(), Some(20000))]
+    );
+    assert!(
+        metrics
+            .snapshot()
+            .processing_error
+            .unwrap()
+            .contains("remain unconfirmed")
+    );
+    assert!(metrics.snapshot().recovering.is_empty());
+    assert_eq!(originals.status().frames, 25);
+    assert!(!originals.status().completed);
+    assert!(
+        originals
+            .status()
+            .error
+            .unwrap()
+            .contains("no final acknowledgement")
+    );
+}
+
+#[tokio::test]
+async fn missing_final_context_never_grows_past_thirty_seconds_before_later_speech() {
+    let directory = tempfile::tempdir().unwrap();
+    let store =
+        crate::retention::SessionRetention::create_in(directory.path(), "context-size-limit")
+            .await
+            .unwrap();
+    let origin = Instant::now();
+    let originals =
+        retained::RetainedSession::new(store, origin, &tokio::runtime::Handle::current());
+    for second in 1..=35 {
+        originals
+            .capture(
+                &frame(
+                    origin,
+                    second * 1000,
+                    16000,
+                    if second <= 30 { 1 } else { -42 },
+                ),
+                TranscriptOrigin::Speaker,
+            )
+            .unwrap();
+    }
+    originals.close_capture();
+    let config = AppConfig::default();
+    let mut settings = provider::stt::session_config(
+        &config.transcription.speaker_recognition,
+        &config.transcription.providers,
+    )
+    .unwrap();
+    settings.source_language = "en-US".into();
+    settings.max_reconnect_attempts = 10;
+    let processor = Arc::new(ContextRecognizer::default());
+    let (text, mut records) = mpsc::channel(32);
+    let metrics = Arc::new(RouteMetrics::default());
+    let error = tokio::time::timeout(
+        Duration::from_secs(15),
+        run_retained(
+            processor.clone(),
+            settings,
+            TranscriptSink {
+                retained: Some(originals.clone()),
+                sender: text,
+                origin: TranscriptOrigin::Speaker,
+            },
+            metrics,
+            origin,
+            originals.clone(),
+        ),
+    )
+    .await
+    .unwrap()
+    .unwrap_err();
+    assert!(error.to_string().contains("remain unconfirmed"));
+    assert_eq!(
+        processor
+            .inputs
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(_, pcm)| pcm.len())
+            .collect::<Vec<_>>(),
+        [80000, 480000, 80000]
+    );
+    let mut found = false;
+    while let Some(TranscriptRecord::Routed { record, .. }) = records.recv().await {
+        if let TranscriptRecord::Text { text, metadata, .. } = *record {
+            assert_eq!(text, "Confirmed en-US source -42.");
+            assert_eq!(metadata.alignment_ms, Some(30000));
+            found = true;
+        }
+    }
+    assert!(found);
+    assert_eq!(originals.status().frames, 35);
+    assert!(!originals.status().completed);
+}
+
+#[derive(Default)]
+struct EndingRecognizer {
+    calls: AtomicU64,
+    tail_started: Notify,
+    release_tail: Notify,
+    wait: bool,
+}
+#[async_trait]
+impl SpeechProvider for EndingRecognizer {
+    fn id(&self) -> &'static str {
+        "gemini"
+    }
+    async fn run_history(
+        &self,
+        config: SessionConfig,
+        audio: mpsc::Receiver<Vec<i16>>,
+        events: mpsc::Sender<ProviderEvent>,
+        cancel: CancellationToken,
+    ) -> Result<()> {
+        self.run(config, audio, events, cancel).await
+    }
+    fn is_silent_window(&self, samples: &[i16]) -> bool {
+        samples.iter().all(|sample| sample.unsigned_abs() <= 17)
+    }
+    async fn run(
+        &self,
+        _: SessionConfig,
+        mut audio: mpsc::Receiver<Vec<i16>>,
+        events: mpsc::Sender<ProviderEvent>,
+        _: CancellationToken,
+    ) -> Result<()> {
+        let mut pcm = Vec::new();
+        while let Some(samples) = audio.recv().await {
+            pcm.extend(samples);
+        }
+        self.calls.fetch_add(1, Ordering::Relaxed);
+        if pcm.iter().all(|value| *value == 42) {
+            events
+                .send(ProviderEvent::Transcript {
+                    input: true,
+                    text: "Confirmed speech.".into(),
+                    metadata: Default::default(),
+                })
+                .await?;
+            events.send(ProviderEvent::TurnComplete).await?;
+            return Ok(());
+        }
+        self.tail_started.notify_one();
+        if self.wait {
+            self.release_tail.notified().await;
+        }
+        Err(crate::provider::missing_transcription_final())
+    }
+}
+
+#[tokio::test]
+async fn confirmed_source_background_tail_finishes_but_unconfirmed_audible_tail_remains_retained() {
+    for (tail, expected_calls, succeeds) in [(2, 1, true), (17, 1, true), (1000, 2, false)] {
+        let directory = tempfile::tempdir().unwrap();
+        let store = crate::retention::SessionRetention::create_in(directory.path(), "closing-tail")
+            .await
+            .unwrap();
+        let origin = Instant::now();
+        let originals =
+            retained::RetainedSession::new(store, origin, &tokio::runtime::Handle::current());
+        for second in 1..=10 {
+            originals
+                .capture(
+                    &frame(
+                        origin,
+                        second * 1000,
+                        16000,
+                        if second <= 5 { 42 } else { tail },
+                    ),
+                    TranscriptOrigin::Microphone,
+                )
+                .unwrap();
+        }
+        originals.close_capture();
+        let config = AppConfig::default();
+        let mut settings = provider::stt::session_config(
+            &config.transcription.microphone_recognition,
+            &config.transcription.providers,
+        )
+        .unwrap();
+        settings.max_reconnect_attempts = 3;
+        let processor = Arc::new(EndingRecognizer::default());
+        let (sender, mut records) = mpsc::channel(16);
+        let metrics = Arc::new(RouteMetrics::default());
+        let result = run_retained(
+            processor.clone(),
+            settings,
+            TranscriptSink {
+                retained: Some(originals.clone()),
+                sender,
+                origin: TranscriptOrigin::Microphone,
+            },
+            metrics.clone(),
+            origin,
+            originals.clone(),
+        )
+        .await;
+        assert_eq!(result.is_ok(), succeeds);
+        assert_eq!(processor.calls.load(Ordering::Relaxed), expected_calls);
+        assert_eq!(metrics.snapshot().processing_error.is_none(), succeeds);
+        assert_eq!(originals.status().error.is_none(), succeeds);
+        assert_eq!(originals.status().frames, 10);
+        let mut texts = Vec::new();
+        while let Some(TranscriptRecord::Routed { record, .. }) = records.recv().await {
+            if let TranscriptRecord::Text { text, .. } = *record {
+                texts.push(text);
+            }
+        }
+        assert_eq!(texts, ["Confirmed speech."]);
+    }
+}
+
+#[tokio::test]
+async fn background_after_confirmed_speech_needs_no_remote_request_before_stop() {
+    let directory = tempfile::tempdir().unwrap();
+    let store =
+        crate::retention::SessionRetention::create_in(directory.path(), "closing-inflight-tail")
+            .await
+            .unwrap();
+    let origin = Instant::now();
+    let originals =
+        retained::RetainedSession::new(store, origin, &tokio::runtime::Handle::current());
+    for second in 1..=10 {
+        originals
+            .capture(
+                &frame(
+                    origin,
+                    second * 1000,
+                    16000,
+                    if second <= 5 { 42 } else { 2 },
+                ),
+                TranscriptOrigin::Speaker,
+            )
+            .unwrap();
+    }
+    let config = AppConfig::default();
+    let settings = provider::stt::session_config(
+        &config.transcription.speaker_recognition,
+        &config.transcription.providers,
+    )
+    .unwrap();
+    let processor = Arc::new(EndingRecognizer {
+        wait: true,
+        ..Default::default()
+    });
+    let (sender, mut records) = mpsc::channel(16);
+    let metrics = Arc::new(RouteMetrics::default());
+    let task = tokio::spawn(run_retained(
+        processor.clone(),
+        settings,
+        TranscriptSink {
+            retained: Some(originals.clone()),
+            sender,
+            origin: TranscriptOrigin::Speaker,
+        },
+        metrics.clone(),
+        origin,
+        originals.clone(),
+    ));
+    tokio::time::timeout(Duration::from_secs(2), records.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(!task.is_finished(), "The source remains live until Stop");
+    originals.close_capture();
+    // Background after recognized speech does not create another remote turn.
+    tokio::time::timeout(Duration::from_secs(2), task)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert_eq!(processor.calls.load(Ordering::Relaxed), 1);
+    assert!(metrics.snapshot().processing_error.is_none());
+    assert!(metrics.snapshot().recovering.is_empty());
+    assert!(originals.status().error.is_none());
+    assert_eq!(originals.status().frames, 10);
+    while let Some(TranscriptRecord::Routed { record, .. }) = records.recv().await {
+        assert!(!matches!(
+            *record,
+            TranscriptRecord::Gap | TranscriptRecord::Section(_)
+        ));
+    }
+}
+
+#[derive(Default)]
+struct CachedRecognizer {
+    calls: StdMutex<Vec<i16>>,
+    fail_second: AtomicBool,
+}
+#[async_trait]
+impl SpeechProvider for CachedRecognizer {
+    fn id(&self) -> &'static str {
+        "confirmed-cache-fixture"
+    }
+    async fn run(
+        &self,
+        _: SessionConfig,
+        _: mpsc::Receiver<Vec<i16>>,
+        _: mpsc::Sender<ProviderEvent>,
+        _: CancellationToken,
+    ) -> Result<()> {
+        bail!("Original recognition requires its finite protocol")
+    }
+    async fn run_history(
+        &self,
+        _: SessionConfig,
+        mut audio: mpsc::Receiver<Vec<i16>>,
+        events: mpsc::Sender<ProviderEvent>,
+        _: CancellationToken,
+    ) -> Result<()> {
+        let mut pcm = Vec::new();
+        while let Some(samples) = audio.recv().await {
+            pcm.extend(samples);
+        }
+        assert_eq!(pcm.len(), 80000);
+        let value = pcm[0];
+        assert!(pcm.iter().all(|sample| *sample == value));
+        self.calls.lock().unwrap().push(value);
+        if value == 2 && self.fail_second.swap(false, Ordering::AcqRel) {
+            return Err(provider::permanent_error(anyhow!(
+                "Synthetic recognition failure"
+            )));
+        }
+        events
+            .send(ProviderEvent::Transcript {
+                input: true,
+                text: format!("Confirmed original {value}."),
+                metadata: TranscriptMetadata {
+                    alignment_ms: Some(0),
+                    ..Default::default()
+                },
+            })
+            .await?;
+        events.send(ProviderEvent::TurnComplete).await?;
+        Ok(())
+    }
+}
+
+#[tokio::test]
+async fn recovery_reuses_confirmed_windows_and_transcribes_only_missing_originals() {
+    let folder = tempfile::tempdir().unwrap();
+    let store = crate::retention::SessionRetention::create_in(folder.path(), "cached-originals")
+        .await
+        .unwrap();
+    let origin = Instant::now();
+    let originals =
+        retained::RetainedSession::new(store, origin, &tokio::runtime::Handle::current());
+    for second in 0..15 {
+        originals
+            .capture(
+                &frame(origin, (second + 1) * 1000, 16000, (second / 5 + 1) as i16),
+                TranscriptOrigin::Microphone,
+            )
+            .unwrap();
+    }
+    originals.close_capture();
+    let config = AppConfig::default();
+    let settings = provider::stt::session_config(
+        &config.transcription.microphone_recognition,
+        &config.transcription.providers,
+    )
+    .unwrap();
+    let provider = Arc::new(CachedRecognizer::default());
+    provider.fail_second.store(true, Ordering::Release);
+    for recovery in [false, true, true] {
+        let (text, mut records) = mpsc::channel(32);
+        let result = run_retained(
+            provider.clone(),
+            settings.clone(),
+            TranscriptSink {
+                sender: text,
+                origin: TranscriptOrigin::Microphone,
+                retained: Some(originals.clone()),
+            },
+            Arc::default(),
+            origin,
+            originals.clone(),
+        )
+        .await;
+        assert_eq!(result.is_ok(), recovery);
+        let mut saved = Vec::new();
+        while let Some(TranscriptRecord::Routed {
+            origin: source,
+            record,
+        }) = records.recv().await
+        {
+            assert_eq!(source, TranscriptOrigin::Microphone);
+            if let TranscriptRecord::Text { text, metadata, .. } = *record {
+                saved.push((text, metadata.alignment_ms));
+            }
+        }
+        let expected = if recovery { 3 } else { 1 };
+        assert_eq!(saved.len(), expected);
+        for (index, (text, clock)) in saved.iter().enumerate() {
+            assert_eq!(text, &format!("Confirmed original {}.", index + 1));
+            assert_eq!(*clock, Some(index as u64 * 5000));
+        }
+    }
+    assert_eq!(*provider.calls.lock().unwrap(), vec![1, 2, 2, 3]);
+    assert_eq!(originals.status().frames, 15);
+    assert!(!originals.status().completed);
+}
+
+#[tokio::test]
+async fn confirmed_inference_survives_txt_delivery_failure_without_another_model_call() {
+    let folder = tempfile::tempdir().unwrap();
+    let store = crate::retention::SessionRetention::create_in(folder.path(), "cached-delivery")
+        .await
+        .unwrap();
+    let origin = Instant::now();
+    let originals =
+        retained::RetainedSession::new(store, origin, &tokio::runtime::Handle::current());
+    for second in 1..=5 {
+        originals
+            .capture(
+                &frame(origin, second * 1000, 16000, 1),
+                TranscriptOrigin::Speaker,
+            )
+            .unwrap();
+    }
+    originals.close_capture();
+    let config = AppConfig::default();
+    let settings = provider::stt::session_config(
+        &config.transcription.speaker_recognition,
+        &config.transcription.providers,
+    )
+    .unwrap();
+    let provider = Arc::new(CachedRecognizer::default());
+    let (text, records) = mpsc::channel(8);
+    drop(records);
+    let result = run_retained(
+        provider.clone(),
+        settings.clone(),
+        TranscriptSink {
+            sender: text,
+            origin: TranscriptOrigin::Speaker,
+            retained: Some(originals.clone()),
+        },
+        Arc::default(),
+        origin,
+        originals.clone(),
+    )
+    .await;
+    assert!(result.is_err());
+    let (text, mut records) = mpsc::channel(8);
+    run_retained(
+        provider.clone(),
+        settings,
+        TranscriptSink {
+            sender: text,
+            origin: TranscriptOrigin::Speaker,
+            retained: Some(originals.clone()),
+        },
+        Arc::default(),
+        origin,
+        originals,
+    )
+    .await
+    .unwrap();
+    assert!(
+        matches!(records.recv().await, Some(TranscriptRecord::Routed { record, .. }) if matches!(*record, TranscriptRecord::Text { .. }))
+    );
+    assert_eq!(*provider.calls.lock().unwrap(), vec![1]);
 }

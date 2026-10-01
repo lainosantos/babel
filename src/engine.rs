@@ -9,6 +9,7 @@ mod resilience;
 mod retained;
 mod route;
 mod routing;
+mod transcription_cache;
 mod translation;
 pub use recovery::RetainedSessionStatus;
 use route::run_route;
@@ -208,11 +209,13 @@ impl RouteMetrics {
             .unwrap_or_else(|e| e.into_inner());
         if !recovery_errors.is_empty() {
             let mut errors = status.processing_error.into_iter().collect::<Vec<_>>();
-            errors.extend(
-                recovery_errors
-                    .iter()
-                    .map(|(feature, error)| format!("{feature}: {error}")),
-            );
+            for (feature, error) in recovery_errors.iter() {
+                // A failed worker promotes the transient cause to its terminal
+                // diagnostic. Do not display that same cause twice.
+                if !errors.iter().any(|existing| existing.contains(error)) {
+                    errors.push(format!("{feature}: {error}"));
+                }
+            }
             status.processing_error = Some(errors.join("; "));
         }
         drop(recovery_errors);
@@ -224,6 +227,11 @@ impl RouteMetrics {
         let playback_stats = translated.as_ref().unwrap_or(&self.audio);
         status.captured_frames = self.audio.captured_frames.load(Ordering::Relaxed);
         status.dropped_frames = playback_stats.dropped_frames.load(Ordering::Relaxed);
+        if translated.is_some() {
+            status.dropped_frames = status
+                .dropped_frames
+                .saturating_add(self.audio.capture_lost_frames.load(Ordering::Relaxed));
+        }
         status.processing_dropped_frames =
             self.audio.processing_dropped_frames.load(Ordering::Relaxed);
         status.underruns = playback_stats.underruns.load(Ordering::Relaxed);
@@ -976,12 +984,7 @@ impl Controller {
                 history_transcription_pending: history_transcription_pending.clone(),
                 routes_closed: routes_closed.clone(),
                 retained,
-                outputs_committed: archive
-                    .as_ref()
-                    .map(|archive| archive.outputs_committed.clone()),
-                translations_committed: archive
-                    .as_ref()
-                    .map(|archive| archive.translations_committed.clone()),
+                progress: archive.as_ref().map(|archive| archive.progress.clone()),
             },
         ));
         state.running = Some(Running {
@@ -1162,8 +1165,7 @@ struct SessionIo {
     history_transcription_pending: Arc<AtomicBool>,
     routes_closed: Arc<RoutesClosed>,
     retained: Option<Arc<retained::RetainedSession>>,
-    outputs_committed: Option<Arc<AtomicBool>>,
-    translations_committed: Option<[Arc<AtomicBool>; 2]>,
+    progress: Option<Arc<recovery::SessionProgress>>,
 }
 
 #[derive(Clone)]
@@ -1198,10 +1200,7 @@ async fn run_session(
     let control_handle = tokio::runtime::Handle::current();
     let mut routes = JoinSet::new();
     let mut writers = JoinSet::new();
-    let committed_writers = Arc::new(AtomicU64::new(0));
-    let mut expected_writers = 0;
     let transcript_tx = if let Some(mut writer) = io.transcript {
-        expected_writers += 1;
         let (tx, rx) = mpsc::channel(128);
         let recent = io.recent.clone();
         let config = cfg.clone();
@@ -1217,13 +1216,24 @@ async fn run_session(
             }
         }));
         writers.spawn_on(
-            count_committed_writer(
+            commit_writer(
                 observe_session_writer(
-                    history::write_transcript(writer, rx, config, recent, pending),
+                    history::write_transcript(
+                        writer,
+                        rx,
+                        config,
+                        recent,
+                        pending,
+                        io.retained
+                            .as_ref()
+                            .map(|originals| originals.transcripts.clone()),
+                    ),
                     "Consolidated transcription",
                     affected,
                 ),
-                committed_writers.clone(),
+                io.progress
+                    .as_ref()
+                    .map(|progress| progress.transcript.clone()),
             ),
             &processing_handle,
         );
@@ -1232,7 +1242,6 @@ async fn run_session(
         None
     };
     if let Some(mut writer) = io.audio {
-        expected_writers += 1;
         let originals = io
             .retained
             .clone()
@@ -1254,7 +1263,7 @@ async fn run_session(
             }
         }));
         writers.spawn_on(
-            count_committed_writer(
+            commit_writer(
                 observe_session_writer(
                     async move {
                         let (tx, rx) = mpsc::channel(128);
@@ -1272,38 +1281,13 @@ async fn run_session(
                                 .await
                                 .context("Recording writer closed before history completion")?;
                             }
-                            let mut readers = [
-                                microphone.then(|| originals.reader(TranscriptOrigin::Microphone)),
-                                speaker_enabled
-                                    .then(|| originals.reader(TranscriptOrigin::Speaker)),
-                            ];
-                            let mut heads: [Option<AudioRecord>; 2] = [None, None];
-                            loop {
-                                // Merge original clocks, not task scheduling order. If one
-                                // source pauses, retention buffers the other until its next
-                                // frame or capture EOF establishes a safe ordering boundary.
-                                for index in 0..2 {
-                                    if heads[index].is_none()
-                                        && let Some(reader) = &mut readers[index]
-                                    {
-                                        heads[index] = reader.next().await?;
-                                        if heads[index].is_none() {
-                                            readers[index] = None;
-                                        }
-                                    }
-                                }
-                                let selected = heads
-                                    .iter()
-                                    .enumerate()
-                                    .filter_map(|(index, frame)| {
-                                        frame.as_ref().map(|frame| (index, frame.captured_at))
-                                    })
-                                    .min_by_key(|(_, time)| *time)
-                                    .map(|(index, _)| index);
-                                let Some(selected) = selected else {
-                                    break;
-                                };
-                                tx.send(heads[selected].take().unwrap())
+                            let mut reader = retained::RecordingReader::new(
+                                originals,
+                                microphone,
+                                speaker_enabled,
+                            );
+                            while let Some(frame) = reader.next().await? {
+                                tx.send(frame)
                                     .await
                                     .context("Recording writer closed before completion")?;
                             }
@@ -1317,7 +1301,9 @@ async fn run_session(
                     "Mixed original audio recording",
                     affected,
                 ),
-                committed_writers.clone(),
+                io.progress
+                    .as_ref()
+                    .map(|progress| progress.recording.clone()),
             ),
             &processing_handle,
         );
@@ -1398,7 +1384,6 @@ async fn run_session(
                 None
             };
             if let Some(transcript) = transcript {
-                expected_writers += 1;
                 let originals = io
                     .retained
                     .clone()
@@ -1411,25 +1396,31 @@ async fn run_session(
                     originals,
                 );
                 writers.spawn_on(
-                    count_committed_writer(
+                    commit_writer(
                         observe_session_writer(
                             worker,
                             "Original speech transcription",
                             [Some(metrics.clone()), None],
                         ),
-                        committed_writers.clone(),
+                        io.progress.as_ref().map(|progress| {
+                            progress.recognition[if origin == TranscriptOrigin::Microphone {
+                                0
+                            } else {
+                                1
+                            }]
+                            .clone()
+                        }),
                     ),
                     &processing_handle,
                 );
             }
             if route.enabled {
-                expected_writers += 1;
                 let originals = io
                     .retained
                     .clone()
                     .context("Translation requires original retention")?;
-                let committed = io.translations_committed.as_ref().map(|flags| {
-                    flags[if origin == TranscriptOrigin::Microphone {
+                let committed = io.progress.as_ref().map(|progress| {
+                    progress.translation[if origin == TranscriptOrigin::Microphone {
                         0
                     } else {
                         1
@@ -1447,19 +1438,13 @@ async fn run_session(
                     usage.clone(),
                 );
                 writers.spawn_on(
-                    count_committed_writer(
+                    commit_writer(
                         observe_session_writer(
-                            async move {
-                                translation.await?;
-                                if let Some(committed) = committed {
-                                    committed.store(true, Ordering::Release);
-                                }
-                                Ok(())
-                            },
+                            translation,
                             "Speech translation",
                             [Some(metrics.clone()), None],
                         ),
-                        committed_writers.clone(),
+                        committed,
                     ),
                     &processing_handle,
                 );
@@ -1494,7 +1479,7 @@ async fn run_session(
     // Workers finish only after every route has released its sender. This lets
     // disk writers drain and finalize their files after audio/network shutdown.
     drop(transcript_tx);
-    let result = supervise_session(
+    supervise_session(
         routes,
         writers,
         cancel,
@@ -1502,23 +1487,18 @@ async fn run_session(
         [mic, speaker],
         io.retained.clone(),
     )
-    .await;
-    if let Some(committed) = io.outputs_committed {
-        committed.store(
-            committed_writers.load(Ordering::Acquire) == expected_writers,
-            Ordering::Release,
-        );
-    }
-    result
+    .await
 }
 
-async fn count_committed_writer(
+async fn commit_writer(
     writer: impl Future<Output = Result<()>>,
-    count: Arc<AtomicU64>,
+    committed: Option<Arc<AtomicBool>>,
 ) -> Result<()> {
     let result = writer.await;
-    if result.is_ok() {
-        count.fetch_add(1, Ordering::Release);
+    if result.is_ok()
+        && let Some(committed) = committed
+    {
+        committed.store(true, Ordering::Release);
     }
     result
 }
@@ -1886,6 +1866,35 @@ mod isolation_tests;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn translated_route_reports_capture_and_playback_losses_without_double_counting() {
+        let metrics = RouteMetrics::default();
+        metrics
+            .audio
+            .capture_lost_frames
+            .store(2, Ordering::Relaxed);
+        metrics.audio.dropped_frames.store(2, Ordering::Relaxed);
+        assert_eq!(metrics.snapshot().dropped_frames, 2);
+        let playback = Arc::new(AudioStats::default());
+        playback.dropped_frames.store(3, Ordering::Relaxed);
+        *metrics.translated_audio.lock().unwrap() = Some(playback);
+        assert_eq!(metrics.snapshot().dropped_frames, 5);
+    }
+
+    #[test]
+    fn terminal_processing_error_does_not_repeat_its_transient_cause() {
+        let metrics = RouteMetrics::default();
+        let cause = "Gemini transcription final acknowledgement timed out";
+        metrics.recovery_error("transcription", Some(cause));
+        metrics.report_processing_error(&format!(
+            "Original speech transcription: {cause}. Automatic recovery paused"
+        ));
+        metrics.recovery_error("translation", Some("Independent translation failure"));
+        let message = metrics.snapshot().processing_error.unwrap();
+        assert_eq!(message.matches(cause).count(), 1);
+        assert!(message.contains("Independent translation failure"));
+    }
 
     #[test]
     fn speaker_mirror_modes_revoke_physical_commands_and_have_only_the_chosen_speaker_tap() {

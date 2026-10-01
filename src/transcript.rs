@@ -11,6 +11,7 @@ use tokio::{
     sync::mpsc,
 };
 
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 pub enum TranscriptRecord {
     Routed {
         origin: TranscriptOrigin,
@@ -27,7 +28,7 @@ pub enum TranscriptRecord {
     Section(String),
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum TranscriptOrigin {
     Microphone,
     Speaker,

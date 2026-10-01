@@ -4,6 +4,8 @@
 //! bounded channels and cancel a session before changing its configuration.
 
 mod deepgram;
+mod failure;
+use failure::Failure;
 mod gemini;
 mod local;
 mod openai;
@@ -14,7 +16,27 @@ pub(crate) use gemini::translation_target_language as gemini_translation_target_
 /// Unknown provider failures use the supervisor's bounded retry policy.
 /// A known permanent failure must not be retried as a network interruption.
 pub(crate) fn retryable_error(error: &anyhow::Error) -> bool {
-    gemini::retryable_error(error).unwrap_or(true)
+    error
+        .downcast_ref::<Failure>()
+        .is_none_or(|failure| failure.retryable)
+}
+
+/// Configuration and missing credentials require user changes, not reconnects.
+pub(crate) fn permanent_error(error: anyhow::Error) -> anyhow::Error {
+    error.context(Failure::fatal(
+        "Provider configuration or credentials are invalid",
+    ))
+}
+
+pub(crate) fn transcription_needs_context(error: &anyhow::Error) -> bool {
+    error
+        .downcast_ref::<Failure>()
+        .is_some_and(|failure| failure.needs_transcription_context)
+}
+
+#[cfg(test)]
+pub(crate) fn missing_transcription_final() -> anyhow::Error {
+    gemini::missing_transcription_final()
 }
 
 use std::sync::Arc;
@@ -75,7 +97,7 @@ pub enum ProviderEvent {
 /// submitted to finite STT, never inferred from text or receipt time.
 /// Current Gemini Live models do not promise speaker IDs or word timestamps;
 /// the optional fields preserve actual metadata if it is supplied in a reply.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct TranscriptMetadata {
     pub speaker: Option<String>,
     /// Offset from the start of provider-session audio, not wall-clock time.
@@ -148,6 +170,12 @@ fn known_model_family(model: &str, family: &str) -> bool {
 #[async_trait]
 pub trait SpeechProvider: Send + Sync {
     fn id(&self) -> &'static str;
+
+    /// Dedicated ASR can use local VAD to avoid asking a remote recognizer to
+    /// acknowledge background-only windows. Originals remain stored unchanged.
+    fn is_silent_window(&self, samples: &[i16]) -> bool {
+        samples.iter().all(|sample| *sample == 0)
+    }
 
     /// Runs until input EOF, cancellation, or an error. EOF flushes pending
     /// speech and drains final output before success. Cancellation forcibly

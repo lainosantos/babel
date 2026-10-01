@@ -32,6 +32,13 @@ independent feature. The affected file may be incomplete until recovery.
 Processing-copy losses have a counter separate from
 capture/playback losses. History may also contain gaps if processing cannot
 keep up with capture.
+Translated capture uses `audio.capture_queue_ms` at each capture handoff, separate
+from playback buffering. Linux capture yields between frames already buffered by
+IPC so forwarding can drain those bounded queues. An upstream queue loss marks
+the session incomplete and keeps the retained originals available, but capture
+continues for subsequent speech. Missing frames themselves cannot be recovered.
+Capture stops if the encrypted store's bounded staging capacity is exhausted or
+its worker has ended, because accepting further originals would be unsafe.
 Fatal translation or transport failures can still end the session. The monitor
 restores original routing after streams close, checking that state every
 250 ms. This can produce a gap. Physical-device failures have their own recovery:
@@ -460,20 +467,56 @@ no blanket 15/30-second deadline for finalization. Per-request provider failures
 never acknowledge completion. Transcription buffers results until whole-window
 success, retries the same original PCM on failure, then advances its capture clock.
 Gemini normal windows, history, and recovery all use the configured Live
-Transcribe model. A failed window is replayed to that same model; no hidden
-file-transcription model or alternate API is selected. Active capture keeps retrying transient failures with a longer cooldown
-after the initial budget. Stop wakes that cooldown and bounds failed attempts
-for finalization; permanent Gemini failures pause immediately. Processing status
+Transcribe model. Each finite window has one explicit activity boundary at EOF,
+including its overflow capture chunk and quiet tail, with 100 ms PCM messages
+and up to 30 seconds for its final acknowledgement. A failed window is replayed
+to that same model; no hidden file-transcription model or alternate API is selected. Missing transcription finals
+extend the same unconfirmed prefix with later originals, up to 30 seconds plus
+one capture chunk. Size and retry limits defer the unresolved interval, preserving
+an incomplete-session diagnostic and its encrypted originals while later windows
+continue through recognition. Active capture keeps retrying transient transport
+failures with a longer cooldown after the initial budget. Stop wakes that cooldown and bounds failed attempts
+for finalization. Missing finals after Stop allow one context retry only when
+following retained audio is available; permanent Gemini failures pause immediately. Processing status
 retains the sanitized failure per feature.
 Once automatic attempts are exhausted, originals remain available for explicit
 recovery, allowing the finalizer to finish without an endless paid request loop.
+A bundled local Earshot VAD evaluates PCM on speech-processing workers only,
+with a conservative 0.35 speech threshold. Gemini transcription can skip
+non-speech windows without opening another paid request. Windows shorter than
+half a second remain eligible unless they meet the low PCM background floor.
+These are heuristics, not guarantees for every quiet voice. Translation still
+forwards every sample unchanged, but non-speech does not create a new pending
+generation. A received response remains pending until its completion marker.
+The dedicated interpreter uses generationComplete; generic Live agents use
+the conversational turnComplete boundary. Finals have a 30-second response
+bound. Missing acknowledgements retain unfinished originals rather than
+confirming success. None of this modifies original routing, recordings, or the
+encrypted journal.
+Confirmed transcription results share the original encrypted journal and RAM-only
+key. Recovery uses the same retained-reader pipeline as normal transcription and
+loads confirmed results before invoking inference. Compact range indexes, rather
+than the whole transcript, remain in memory. WAV sync, TXT sync, each recognized
+source and each translated direction confirm independently, so failure in one
+feature does not repeat completed work in another.
+
+Retry classification survives provider boundaries: invalid configuration,
+authentication and permanent protocol failures pause immediately. The engine owns
+the retry budget without nested provider reconnects; zero disables automatic
+retries, and transient active-session failures use a cooldown after their budget.
+Whisper has three engine retries because its profile has no reconnect setting.
+Corrupt encrypted input and permanent filesystem read failures pause without an
+endless read loop. Recording drains whichever selected source currently has audio
+without waiting for the other source to become active.
+
 File writers retry the same buffered bytes at an absolute confirmed offset after
 partial I/O. These consumers backpressure their own readers, never original routing.
 Translation defaults to recent speech after failure, reporting skipped work while
 all originals stay available to transcription and recording. An explicit per-route
 `replay_translation_backlog` opt-in uses finite windows, whole-window playback
 checkpoints and 1.5x PCM playback while behind. A playback failure can repeat the
-unconfirmed window; previously completed windows remain committed. Translation
+unconfirmed window; its delivered cursor is session-owned and survives worker
+failure, so explicit recovery skips previously completed windows. Translation
 routes already completed are not repeated during file recovery.
 Catch-up moves only forward; a drained reader never jumps back into the final
 second after capture EOF. Recovery checks endpoint selection before inference.

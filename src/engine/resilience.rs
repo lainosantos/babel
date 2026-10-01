@@ -9,9 +9,9 @@ pub(super) fn delay(attempt: u32) -> Duration {
 }
 
 /// Limit failed attempts, not the duration of successful session finalization.
-/// Providers without a reconnect setting still get three transient retries.
+/// Honor the selected profile, including zero automatic retries.
 pub(super) fn retry(error: &anyhow::Error, attempt: u32, configured: u32) -> Result<()> {
-    if !provider::retryable_error(error) || attempt > configured.max(3) {
+    if !provider::retryable_error(error) || attempt > configured {
         bail!(
             "{error:#}. Automatic recovery paused; original audio remains available for explicit recovery"
         );
@@ -25,7 +25,7 @@ pub(super) fn retry_live(
     configured: u32,
     closed: bool,
 ) -> Result<()> {
-    if closed || !provider::retryable_error(error) {
+    if closed || configured == 0 || !provider::retryable_error(error) {
         retry(error, attempt, configured)?;
     }
     Ok(())
@@ -33,7 +33,7 @@ pub(super) fn retry_live(
 
 pub(super) async fn backoff(originals: &retained::RetainedSession, attempt: u32, configured: u32) {
     let closed = originals.status().capture_closed;
-    let delay = if !closed && attempt > configured.max(3) {
+    let delay = if !closed && attempt > configured {
         Duration::from_secs(30)
     } else {
         delay(attempt)
@@ -207,14 +207,16 @@ mod tests {
     fn automatic_recovery_is_bounded_and_feature_errors_clear_independently() {
         let error = anyhow!("Synthetic transient failure");
         for attempt in 1..=3 {
-            assert!(retry(&error, attempt, 0).is_ok());
+            assert!(retry(&error, attempt, 3).is_ok());
         }
         assert!(
-            retry(&error, 4, 0)
+            retry(&error, 4, 3)
                 .unwrap_err()
                 .to_string()
                 .contains("original audio remains available")
         );
+        assert!(retry(&error, 1, 0).is_err());
+        assert!(retry_live(&error, 1, 0, false).is_err());
         assert!(retry(&error, 5, 5).is_ok());
         assert!(retry(&error, 6, 5).is_err());
         let metrics = RouteMetrics::default();

@@ -4,17 +4,25 @@ use super::*;
 #[cfg(test)]
 mod tests;
 
-const FINAL_TIMEOUT: Duration = Duration::from_secs(120);
+const FINAL_TIMEOUT: Duration = Duration::from_secs(30);
 
 pub(super) async fn run(
     socket: Socket,
     audio: &mut mpsc::Receiver<Vec<i16>>,
     events: &mpsc::Sender<ProviderEvent>,
-    _config: &SessionConfig,
+    config: &SessionConfig,
     resume_handle: &mut Option<String>,
 ) -> SessionResult<()> {
     let mut submitted = false;
-    let result = continuous(socket, audio, events, resume_handle, &mut submitted).await;
+    let result = continuous(
+        socket,
+        audio,
+        events,
+        resume_handle,
+        &mut submitted,
+        is_translation_model(config),
+    )
+    .await;
     result.map_err(|mut failure| {
         // A fresh connection cannot replay PCM already consumed from the
         // retained stream cursor. Surface failure so its original stays saved.
@@ -89,7 +97,8 @@ async fn dispatch(
 }
 
 /// Live Translate is continuous. End its audio stream, keep receiving PCM and
-/// text, and require the terminal generation/turn acknowledgement. Once an
+/// text, and require generationComplete for the dedicated interpreter, or the
+/// conversational turnComplete for a generic Live agent. Once an
 /// inactivity boundary is sent, do not submit a new stream epoch until that
 /// acknowledgement arrives; otherwise an older final could consume newer EOF.
 async fn continuous(
@@ -98,13 +107,16 @@ async fn continuous(
     events: &mpsc::Sender<ProviderEvent>,
     resume_handle: &mut Option<String>,
     submitted: &mut bool,
+    translation_pipeline: bool,
 ) -> SessionResult<()> {
     let mut eof = false;
     let mut pending = false;
+    let mut response_pending = false;
     let mut input_revision = 0u64;
     let mut generation_revision = None;
     let mut flushing = false;
     let mut last_audio = Instant::now();
+    let mut activity = crate::audio::speech::VoiceActivity::default();
     let mut heartbeat = tokio::time::interval(Duration::from_secs(15));
     heartbeat.tick().await;
     let mut inactivity = tokio::time::interval(Duration::from_secs(1));
@@ -119,8 +131,11 @@ async fn continuous(
                         if samples.is_empty() { continue; }
                         *submitted = true;
                         io_deadline(socket.send(audio_message(&samples)?)).await?;
-                        // Exact digital silence creates no speech generation.
-                        if samples.iter().any(|sample| *sample != 0) {
+                        // Forward unchanged PCM, but residual hardware noise
+                        // must not create a new generation revision after a
+                        // completed speech turn. Audible new input still waits
+                        // for its own terminal acknowledgement.
+                        if activity.speech(&samples) {
                             input_revision = input_revision.saturating_add(1);
                             pending = true;
                         }
@@ -128,6 +143,9 @@ async fn continuous(
                     }
                     None => {
                         eof = true;
+                        if translation_pipeline && activity.no_detected_speech() && !response_pending {
+                            pending = false;
+                        }
                         if !pending { return Ok(()); }
                         end_stream(&mut socket).await?;
                         flushing = true;
@@ -139,13 +157,28 @@ async fn continuous(
                 let value = value?;
                 dispatch(&value, events, resume_handle).await?;
                 let content = &value["serverContent"];
-                // turnComplete is the boundary after all generation output.
-                // A generationComplete may precede its turnComplete; consuming
-                // both as separate finals would acknowledge the next epoch.
-                if content["generationComplete"] == true {
-                    generation_revision = Some(input_revision);
+                if content.get("modelTurn").is_some() || content.get("inputTranscription").is_some() || content.get("outputTranscription").is_some() {
+                    response_pending = true;
                 }
-                if content["turnComplete"] == true {
+                // Use one completion boundary per model protocol. Consuming
+                // generationComplete and its later turnComplete as separate
+                // finals would acknowledge the next input epoch.
+                if content["generationComplete"] == true {
+                    if translation_pipeline {
+                        // The dedicated interpreter completes generation without
+                        // requiring a conversational turn/playback acknowledgement.
+                        pending = false;
+                        response_pending = false;
+                        flushing = false;
+                        if content["turnComplete"] != true {
+                            emit(events, ProviderEvent::TurnComplete).await?;
+                        }
+                        if eof { return Ok(()); }
+                    } else {
+                        generation_revision = Some(input_revision);
+                    }
+                }
+                if !translation_pipeline && content["turnComplete"] == true {
                     // generationComplete can precede turnComplete by playback
                     // time. Audio submitted between those markers belongs to
                     // later work and must not be acknowledged by the old turn.
@@ -155,7 +188,7 @@ async fn continuous(
                         flushing = false;
                         if eof { return Ok(()); }
                     }
-                } else if content.get("modelTurn").is_some() || content.get("outputTranscription").is_some() {
+                } else if content["generationComplete"] != true && (content.get("modelTurn").is_some() || content.get("outputTranscription").is_some()) {
                     pending = true;
                 }
             }

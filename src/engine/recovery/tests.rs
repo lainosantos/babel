@@ -121,7 +121,7 @@ async fn a_successful_session_acknowledges_originals_after_final_output_sync() {
     replay(&archive, &archive.config, files, usage)
         .await
         .unwrap();
-    archive.outputs_committed.store(true, Ordering::Release);
+    archive.progress.recording.store(true, Ordering::Release);
     let mut status = stopped_status();
     finish_archive(
         &mut *controller.state.lock().await,
@@ -428,7 +428,8 @@ async fn recognize_fixture_windows(
                 received,
                 text,
                 origin,
-                CancellationToken::new()
+                CancellationToken::new(),
+                None
             ),
             consume
         )
@@ -529,7 +530,7 @@ async fn translation_failure_does_not_retain_already_committed_original_outputs(
     replay(&archive, &archive.config, files, usage)
         .await
         .unwrap();
-    archive.outputs_committed.store(true, Ordering::Release);
+    archive.progress.recording.store(true, Ordering::Release);
     let mut status = stopped_status();
     status.last_error = Some("Translation provider disconnected".into());
     status.speaker.processing_error = Some("Translation could not continue".into());
@@ -549,4 +550,75 @@ async fn translation_failure_does_not_retain_already_committed_original_outputs(
     );
     wait_for_cleanup(&archive).await;
     assert!(archive.originals.status().completed);
+}
+
+#[test]
+fn recovery_tracks_file_source_and_translation_completion_independently() {
+    let mut config = AppConfig::default();
+    config.recording.enabled = true;
+    config.transcription.enabled = true;
+    let progress = SessionProgress::default();
+    progress.recording.store(true, Ordering::Release);
+    progress.recognition[0].store(true, Ordering::Release);
+    progress.translation[0].store(true, Ordering::Release);
+    let pending = progress.pending_config(&config);
+    assert!(!pending.recording.enabled);
+    assert!(
+        pending.transcription.microphone,
+        "A failed TXT needs cached microphone text"
+    );
+    progress.transcript.store(true, Ordering::Release);
+    let pending = progress.pending_config(&config);
+    assert!(!pending.transcription.microphone);
+    assert!(pending.transcription.speaker);
+    assert!(!progress.complete(&config));
+    progress.recognition[1].store(true, Ordering::Release);
+    progress.translation[1].store(true, Ordering::Release);
+    assert!(progress.complete(&config));
+    config.audio.microphone_source = crate::config::MicrophoneSource::SpeakerOutput;
+    progress.recognition[0].store(false, Ordering::Release);
+    progress.translation[0].store(false, Ordering::Release);
+    assert!(
+        progress.complete(&config),
+        "Mirrored microphone is not a separate inference source"
+    );
+}
+
+#[tokio::test]
+async fn confirmed_history_is_reused_without_paying_for_another_recognition_request() {
+    let folder = tempfile::tempdir().unwrap();
+    let store = crate::retention::SessionRetention::create_in(folder.path(), "cached-history")
+        .await
+        .unwrap();
+    let cache = Arc::new(transcription_cache::Cache::new(store));
+    let provider: Arc<dyn provider::SpeechProvider> = Arc::new(WindowRecognizer::default());
+    let config = AppConfig::default();
+    let settings = provider::stt::session_config(
+        &config.transcription.microphone_recognition,
+        &config.transcription.providers,
+    )
+    .unwrap();
+    for _ in 0..2 {
+        let (text, mut records) = mpsc::channel(8);
+        transcribe_window(
+            &provider,
+            settings.clone(),
+            &[7; 16000],
+            &text,
+            TranscriptOrigin::Microphone,
+            2000,
+            CancellationToken::new(),
+            Some(&cache),
+        )
+        .await
+        .unwrap();
+        drop(text);
+        let mut saved = Vec::new();
+        while let Some(TranscriptRecord::Routed { record, .. }) = records.recv().await {
+            if let TranscriptRecord::Text { text, metadata, .. } = *record {
+                saved.push((text, metadata.alignment_ms));
+            }
+        }
+        assert_eq!(saved, vec![("Original window 1.".into(), Some(2200))]);
+    }
 }

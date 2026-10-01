@@ -68,6 +68,7 @@ async fn run_inner(
     usage: watch::Receiver<audio::activity::EndpointUse>,
 ) -> Result<()> {
     let mut reader = retained.reader(origin);
+    reader.rewind(retained.translation_checkpoint(origin));
     if !route.replay_translation_backlog {
         let result = streaming(
             cfg.clone(),
@@ -184,6 +185,7 @@ async fn run_inner(
         .await;
         match result {
             Ok(()) => {
+                retained.confirm_translation(origin, reader.bookmark());
                 attempts = 0;
                 metrics.recovery_error("translation", None);
                 if !route.replay_translation_backlog
@@ -409,6 +411,7 @@ async fn streaming(
     mut usage: watch::Receiver<audio::activity::EndpointUse>,
 ) -> Result<()> {
     let mut reader = retained.reader(origin);
+    reader.rewind(retained.translation_checkpoint(origin));
     let Some(first) = reader.next().await? else {
         return Ok(());
     };
@@ -433,7 +436,9 @@ async fn streaming(
         prompt: route.prompt.clone(),
         vad_silence_ms: cfg.audio.quality.vad_silence_ms(),
         connect_timeout_secs: profile.connect_timeout_secs,
-        max_reconnect_attempts: profile.max_reconnect_attempts,
+        // Session supervision owns retries; provider reconnects must not
+        // multiply the budget or reuse unconfirmed playback epochs.
+        max_reconnect_attempts: 0,
         input_transcription: false,
         output_transcription: false,
     };

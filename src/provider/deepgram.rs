@@ -22,7 +22,7 @@ use tokio_tungstenite::{
 };
 use tokio_util::sync::CancellationToken;
 
-use super::{ProviderEvent, SessionConfig, SpeechProvider, TranscriptMetadata};
+use super::{Failure, ProviderEvent, SessionConfig, SpeechProvider, TranscriptMetadata};
 use crate::config::DeepgramSttConfig;
 
 const MAX_MESSAGE: usize = 256 * 1024;
@@ -196,26 +196,6 @@ fn endpoint(value: &str) -> Result<Url> {
     Ok(url)
 }
 
-#[derive(Debug)]
-struct Failure {
-    message: &'static str,
-    retryable: bool,
-}
-impl Failure {
-    fn fatal(message: &'static str) -> Self {
-        Self {
-            message,
-            retryable: false,
-        }
-    }
-    fn retry(message: &'static str) -> Self {
-        Self {
-            message,
-            retryable: true,
-        }
-    }
-}
-
 #[async_trait]
 impl SpeechProvider for DeepgramProvider {
     fn id(&self) -> &'static str {
@@ -228,9 +208,12 @@ impl SpeechProvider for DeepgramProvider {
         events: mpsc::Sender<ProviderEvent>,
         cancel: CancellationToken,
     ) -> Result<()> {
-        let url = self.url(&config.source_language)?;
+        let url = self
+            .url(&config.source_language)
+            .map_err(super::permanent_error)?;
         // Translation-specific SessionConfig fields and its credentials are never used.
-        let key = crate::credentials::get(&self.config.api_key_env)?;
+        let key =
+            crate::credentials::get(&self.config.api_key_env).map_err(super::permanent_error)?;
         ensure!(key.len() <= 4096, "Deepgram API key exceeds the limit");
         let mut attempts = 0u32;
         loop {
@@ -245,20 +228,22 @@ impl SpeechProvider for DeepgramProvider {
             // Once the source closes, reconnecting cannot recover unacknowledged
             // final audio. Never accept an empty replacement session as success.
             if !failure.retryable || audio.is_closed() {
-                bail!("{}", failure.message);
+                return Err(anyhow::Error::new(failure));
             }
             if started.elapsed() >= Duration::from_secs(60) {
                 attempts = 0;
             }
             if attempts >= self.config.max_reconnect_attempts {
-                bail!("{}; reconnect budget exhausted", failure.message);
+                return Err(
+                    anyhow::Error::new(failure).context("Deepgram reconnect budget exhausted")
+                );
             }
             attempts += 1;
             tokio::select! {
                 biased;
                 _ = cancel.cancelled() => return Ok(()),
                 result = emit(&events, ProviderEvent::Reconnecting { attempt: attempts }) =>
-                    result.map_err(|error| anyhow::anyhow!(error.message))?,
+                    result.map_err(anyhow::Error::new)?,
             }
             tokio::select! {
                 biased;
@@ -266,7 +251,7 @@ impl SpeechProvider for DeepgramProvider {
                 _ = tokio::time::sleep(Duration::from_millis((250u64 << (attempts - 1).min(5)).min(5000))) => (),
             }
             if audio.is_closed() {
-                bail!("{}", failure.message);
+                return Err(anyhow::Error::new(failure));
             }
             discard_audio(&mut audio);
         }
@@ -279,14 +264,17 @@ impl SpeechProvider for DeepgramProvider {
         events: mpsc::Sender<ProviderEvent>,
         cancel: CancellationToken,
     ) -> Result<()> {
-        let url = self.url(&config.source_language)?;
-        let key = crate::credentials::get(&self.config.api_key_env)?;
+        let url = self
+            .url(&config.source_language)
+            .map_err(super::permanent_error)?;
+        let key =
+            crate::credentials::get(&self.config.api_key_env).map_err(super::permanent_error)?;
         ensure!(key.len() <= 4096, "Deepgram API key exceeds the limit");
         tokio::select! {
             biased;
             _ = cancel.cancelled() => bail!("historical transcription was cancelled"),
             result = self.connection_mode(&url, &key, &mut audio, &events, true) =>
-                result.map_err(|failure| anyhow::anyhow!(failure.message)),
+                result.map_err(anyhow::Error::new),
         }
     }
 }

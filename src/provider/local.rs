@@ -125,7 +125,10 @@ impl LocalProvider {
         let key = if self.whisper_api_key_env.is_empty() {
             None
         } else {
-            Some(crate::credentials::get(&self.whisper_api_key_env)?)
+            Some(
+                crate::credentials::get(&self.whisper_api_key_env)
+                    .map_err(super::permanent_error)?,
+            )
         };
         while let Some(segment) = segments.recv().await {
             let wav = encode_wav(&segment.samples)?;
@@ -396,11 +399,12 @@ async fn bounded_body(
     service: &'static str,
 ) -> Result<Vec<u8>> {
     let response=request.send().await.map_err(|_|anyhow::anyhow!("{service} request failed or timed out; verify its configured endpoint and running service"))?;
-    ensure!(
-        response.status().is_success(),
-        "{service} returned HTTP {}",
-        response.status().as_u16()
-    );
+    if !response.status().is_success() {
+        return Err(anyhow::Error::new(super::Failure::http(
+            service,
+            response.status().as_u16(),
+        )));
+    }
     ensure!(
         response
             .content_length()
@@ -421,12 +425,13 @@ async fn bounded_body(
 }
 async fn bounded_json(request: RequestBuilder, service: &'static str) -> Result<Value> {
     let bytes = bounded_body(request, MAX_JSON_BYTES, service).await?;
-    serde_json::from_slice(&bytes).map_err(|_| anyhow::anyhow!("{service} returned invalid JSON"))
+    serde_json::from_slice(&bytes)
+        .map_err(|_| super::permanent_error(anyhow::anyhow!("{service} returned invalid JSON")))
 }
 fn required_text<'a>(value: &'a Value, service: &'static str) -> Result<&'a str> {
-    let text = value
-        .as_str()
-        .ok_or_else(|| anyhow::anyhow!("{service} returned no transcript text"))?;
+    let text = value.as_str().ok_or_else(|| {
+        super::permanent_error(anyhow::anyhow!("{service} returned no transcript text"))
+    })?;
     ensure!(
         text.len() <= MAX_TEXT_BYTES,
         "{service} text exceeds the memory limit"
@@ -1550,10 +1555,11 @@ mod tests {
         assert!(error.contains("memory limit"));
         let error = bounded_json(client.post(format!("{base}/error")), "mock")
             .await
-            .unwrap_err()
-            .to_string();
-        assert!(error.contains("HTTP 400"));
-        assert!(!error.contains("secret") && !error.contains("private"));
+            .unwrap_err();
+        assert!(!crate::provider::retryable_error(&error));
+        let diagnostic = error.to_string();
+        assert!(diagnostic.contains("HTTP 400"));
+        assert!(!diagnostic.contains("secret") && !diagnostic.contains("private"));
         server.abort();
     }
 
