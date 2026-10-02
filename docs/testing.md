@@ -660,6 +660,15 @@ phrase; verify the saved synthetic output for completeness.
 First sound also does not establish translation accuracy or the time needed to
 understand a full phrase. Listen to the optional synthetic output for that check.
 
+The Gemini interpreter regression fixtures model a real connection that never
+sent generationComplete or turnComplete, and continued emitting zero PCM after
+audioStreamEnd. They verify the extended four-second EOF quiet tail, delivery of
+late audible output, suppression of silent stopped playback, uninterrupted input
+after a pause, and retention on missing translated audio or a 30-second drain
+timeout. Generic Live agents retain their explicit turn-completion tests. Live
+Transcribe uses its authoritative inputTranscription instead; it does not need
+either conversational completion marker to commit the final original text.
+
 On normal completion or interruption, the script stops only its own session,
 restores its changed configuration fields using revision checks, and removes
 only modules whose identity still matches its unique devices. Concurrent user

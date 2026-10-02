@@ -487,12 +487,16 @@ non-speech windows without opening another paid request. Windows shorter than
 half a second remain eligible unless they meet the low PCM background floor.
 These are heuristics, not guarantees for every quiet voice. Translation still
 forwards every sample unchanged, but non-speech does not create a new pending
-generation. A received response remains pending until its completion marker.
-The dedicated interpreter uses generationComplete; generic Live agents use
-the conversational turnComplete boundary. Finals have a 30-second response
-bound. Missing acknowledgements retain unfinished originals rather than
-confirming success. None of this modifies original routing, recordings, or the
-encrypted journal.
+generation. Generic Live agents require the conversational turnComplete
+boundary. The dedicated interpreter sends continuous output and may continue
+sending silent PCM indefinitely after audioStreamEnd, without a terminal marker.
+Its EOF drain observes four seconds after EOF and after the last audible output
+or translated text, suppressing silent translated playback during this drain.
+New input after a capture pause is never blocked waiting for a nonexistent
+interpreter final. Pending speech without translated audio and drains exceeding
+30 seconds remain recoverable. The quiet-tail interval is a heuristic, not a
+provider acknowledgement or a guarantee that every word was translated. None of
+this modifies original routing, recordings, or the encrypted journal.
 Confirmed transcription results share the original encrypted journal and RAM-only
 key. Recovery uses the same retained-reader pipeline as normal transcription and
 loads confirmed results before invoking inference. Compact range indexes, rather

@@ -1,6 +1,7 @@
 //! Drain translated speech through explicit input and output boundaries.
 use super::*;
 
+mod interpreter;
 #[cfg(test)]
 mod tests;
 
@@ -14,19 +15,16 @@ pub(super) async fn run(
     resume_handle: &mut Option<String>,
 ) -> SessionResult<()> {
     let mut submitted = false;
-    let result = continuous(
-        socket,
-        audio,
-        events,
-        resume_handle,
-        &mut submitted,
-        is_translation_model(config),
-    )
-    .await;
+    let result = if is_translation_model(config) {
+        interpreter::run(socket, audio, events, resume_handle, &mut submitted).await
+    } else {
+        conversational(socket, audio, events, resume_handle, &mut submitted).await
+    };
     result.map_err(|mut failure| {
-        // A fresh connection cannot replay PCM already consumed from the
-        // retained stream cursor. Surface failure so its original stays saved.
-        if submitted {
+        // Provider-owned reconnects cannot replay consumed PCM. With that
+        // budget disabled, preserve the transient classification so the engine
+        // can supervise recovery from its retained original cursor instead.
+        if submitted && config.max_reconnect_attempts != 0 {
             failure.retryable = false;
         }
         failure
@@ -60,7 +58,9 @@ async fn dispatch(
     value: &Value,
     events: &mpsc::Sender<ProviderEvent>,
     resume_handle: &mut Option<String>,
-) -> SessionResult<()> {
+    discard_silence: bool,
+) -> SessionResult<bool> {
+    let mut audible = false;
     if let Some(update) = value.get("sessionResumptionUpdate") {
         if update["resumable"] == true {
             if let Some(handle) = update["newHandle"].as_str() {
@@ -84,6 +84,15 @@ async fn dispatch(
             ));
         }
         for event in decode_content(content)? {
+            if let ProviderEvent::Audio { samples, .. } = &event {
+                let silent = crate::audio::speech::below_background_floor(samples);
+                audible |= !silent;
+                // A continuous interpreter can send zero PCM indefinitely,
+                // even after audioStreamEnd. Do not refill stopped playback.
+                if discard_silence && silent {
+                    continue;
+                }
+            }
             emit(events, event).await?;
         }
     }
@@ -93,25 +102,21 @@ async fn dispatch(
     if value.get("toolCall").is_some() {
         return Err(Failure::fatal("Gemini requested an unsupported tool call"));
     }
-    Ok(())
+    Ok(audible)
 }
 
-/// Live Translate is continuous. End its audio stream, keep receiving PCM and
-/// text, and require generationComplete for the dedicated interpreter, or the
-/// conversational turnComplete for a generic Live agent. Once an
+/// Conversational Live agents require turnComplete. Once an
 /// inactivity boundary is sent, do not submit a new stream epoch until that
 /// acknowledgement arrives; otherwise an older final could consume newer EOF.
-async fn continuous(
+async fn conversational(
     mut socket: Socket,
     audio: &mut mpsc::Receiver<Vec<i16>>,
     events: &mpsc::Sender<ProviderEvent>,
     resume_handle: &mut Option<String>,
     submitted: &mut bool,
-    translation_pipeline: bool,
 ) -> SessionResult<()> {
     let mut eof = false;
     let mut pending = false;
-    let mut response_pending = false;
     let mut input_revision = 0u64;
     let mut generation_revision = None;
     let mut flushing = false;
@@ -143,9 +148,6 @@ async fn continuous(
                     }
                     None => {
                         eof = true;
-                        if translation_pipeline && activity.no_detected_speech() && !response_pending {
-                            pending = false;
-                        }
                         if !pending { return Ok(()); }
                         end_stream(&mut socket).await?;
                         flushing = true;
@@ -155,30 +157,15 @@ async fn continuous(
             }
             value = receive(&mut socket) => {
                 let value = value?;
-                dispatch(&value, events, resume_handle).await?;
+                dispatch(&value, events, resume_handle, false).await?;
                 let content = &value["serverContent"];
-                if content.get("modelTurn").is_some() || content.get("inputTranscription").is_some() || content.get("outputTranscription").is_some() {
-                    response_pending = true;
-                }
                 // Use one completion boundary per model protocol. Consuming
                 // generationComplete and its later turnComplete as separate
                 // finals would acknowledge the next input epoch.
                 if content["generationComplete"] == true {
-                    if translation_pipeline {
-                        // The dedicated interpreter completes generation without
-                        // requiring a conversational turn/playback acknowledgement.
-                        pending = false;
-                        response_pending = false;
-                        flushing = false;
-                        if content["turnComplete"] != true {
-                            emit(events, ProviderEvent::TurnComplete).await?;
-                        }
-                        if eof { return Ok(()); }
-                    } else {
-                        generation_revision = Some(input_revision);
-                    }
+                    generation_revision = Some(input_revision);
                 }
-                if !translation_pipeline && content["turnComplete"] == true {
+                if content["turnComplete"] == true {
                     // generationComplete can precede turnComplete by playback
                     // time. Audio submitted between those markers belongs to
                     // later work and must not be acknowledged by the old turn.

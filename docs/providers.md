@@ -79,10 +79,18 @@ The API receives Base64-encoded little-endian binary PCM in `realtimeInput.audio
 Input begins only after `setupComplete`. The engine uses 100 ms frames in
 continuous translation mode. A response may contain several audio fragments in
 one event; all are processed. Output plays as it arrives, without waiting for
-`turnComplete`. The dedicated interpreter drains through `generationComplete`;
-the conversational Live agent also requires `turnComplete`. A late conversational
-marker cannot acknowledge the interpreter's next input epoch. The final response
-wait is bounded to 30 seconds; a missing final leaves originals recoverable.
+`turnComplete`. The dedicated interpreter is a continuous pipeline: an observed
+Live Translate connection sent no terminal generation or turn marker, and kept
+sending zero PCM after `audioStreamEnd`. At input EOF, Babel observes at least
+four seconds and extends that window after audible output or translated text.
+Silent translated PCM does not refill stopped playback. Pending speech without
+translated audio cannot finish successfully; the entire drain is bounded to
+30 seconds and an unfinished drain leaves originals recoverable. This quiet-tail
+rule is a completion heuristic, not a provider acknowledgement or proof of
+translation completeness. It follows the observation interval in Google's
+[translation example](https://github.com/google-gemini/gemini-live-api-examples/blob/main/command-line/python/translate.py),
+extending it for late audio. The conversational Live agent still requires
+`turnComplete`; its late markers cannot acknowledge newer input.
 
 Translation sessions disable `input_transcription`: STS input text does not
 feed the TXT. Native translated audio plays directly, without another synthesis
