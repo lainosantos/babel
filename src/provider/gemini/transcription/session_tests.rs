@@ -345,3 +345,134 @@ async fn cancellation_returns_incomplete_instead_of_successful_empty_transcripti
     )));
     server.await.unwrap();
 }
+
+async fn activity_end(socket: &mut Server, offset: &str) {
+    socket.send(Message::Text(json!({"serverContent":{},"voiceActivity":{"type":"ACTIVITY_END","audioOffset":offset}}).to_string().into())).await.unwrap();
+}
+
+#[tokio::test]
+async fn wordless_window_finishes_on_the_matching_server_audio_boundary() {
+    let (listener, endpoint) = bind().await;
+    let server = AbortOnDropHandle::new(tokio::spawn(async move {
+        let mut socket = accept(&listener, true).await;
+        assert_eq!(turn(&mut socket).await, vec![1000; 16000]);
+        // The skipped zero prefix advances capture alignment, but is not in
+        // the server's submitted-audio clock. No empty transcript is emitted.
+        activity_end(&mut socket, "1s").await;
+        while let Some(Ok(_)) = socket.next().await {}
+    }));
+    let (result, events) = window(&endpoint, vec![1000; 16000], CancellationToken::new()).await;
+    result.unwrap();
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| matches!(event, ProviderEvent::TurnComplete))
+            .count(),
+        1
+    );
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, ProviderEvent::Transcript { .. }))
+    );
+    server.await.unwrap();
+}
+
+#[tokio::test]
+async fn recognized_words_still_require_the_final_after_activity_end() {
+    let (listener, endpoint) = bind().await;
+    let server = AbortOnDropHandle::new(tokio::spawn(async move {
+        let mut socket = accept(&listener, true).await;
+        turn(&mut socket).await;
+        socket.send(Message::Text(json!({"serverContent":{"interimInputTranscription":{"text":"Pending recognized words."}}}).to_string().into())).await.unwrap();
+        activity_end(&mut socket, "0.1s").await;
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        socket.send(Message::Text(json!({"serverContent":{"inputTranscription":{"text":"Delayed authoritative words."}}}).to_string().into())).await.unwrap();
+    }));
+    let (result, events) = window(&endpoint, vec![420; 1600], CancellationToken::new()).await;
+    result.unwrap();
+    assert_eq!(events.iter().filter(|event| matches!(event, ProviderEvent::Transcript { text, .. } if text == "Delayed authoritative words.")).count(), 1);
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| matches!(event, ProviderEvent::TurnComplete))
+            .count(),
+        1
+    );
+    server.await.unwrap();
+}
+
+#[tokio::test]
+async fn activity_end_cannot_complete_an_unfinished_hypothesis() {
+    let (listener, endpoint) = bind().await;
+    let server = AbortOnDropHandle::new(tokio::spawn(async move {
+        let mut socket = accept(&listener, true).await;
+        turn(&mut socket).await;
+        socket.send(Message::Text(json!({"serverContent":{"interimInputTranscription":{"text":"Unconfirmed words."}}}).to_string().into())).await.unwrap();
+        activity_end(&mut socket, "0.1s").await;
+        while let Some(Ok(_)) = socket.next().await {}
+    }));
+    let (result, events) = window(&endpoint, vec![420; 1600], CancellationToken::new()).await;
+    assert!(
+        result
+            .unwrap_err()
+            .to_string()
+            .contains("final acknowledgement timed out")
+    );
+    assert!(!events.iter().any(|event| matches!(
+        event,
+        ProviderEvent::Transcript { .. } | ProviderEvent::TurnComplete
+    )));
+    server.await.unwrap();
+}
+
+#[tokio::test]
+async fn activity_boundaries_for_other_audio_cannot_complete_the_current_window() {
+    let (listener, endpoint) = bind().await;
+    let server = AbortOnDropHandle::new(tokio::spawn(async move {
+        let mut socket = accept(&listener, true).await;
+        turn(&mut socket).await;
+        for offset in ["0s", "0.2s", "0.099999s", "invalid"] {
+            activity_end(&mut socket, offset).await;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        socket.send(Message::Text(json!({"serverContent":{"inputTranscription":{"text":"The entire current window."}}}).to_string().into())).await.unwrap();
+    }));
+    let (result, events) = window(&endpoint, vec![420; 1600], CancellationToken::new()).await;
+    result.unwrap();
+    assert_eq!(events.iter().filter(|event| matches!(event, ProviderEvent::Transcript { text, .. } if text == "The entire current window.")).count(), 1);
+    server.await.unwrap();
+}
+
+#[test]
+fn server_audio_boundaries_require_exact_submitted_sample_offsets() {
+    for offset in ["0.0000625s", "0.000062500s"] {
+        assert!(activity_end_matches(
+            &json!({"voiceActivity":{"type":"ACTIVITY_END","audioOffset":offset}}),
+            1
+        ));
+    }
+    for offset in [
+        "0.000062499s",
+        "0.000062501s",
+        "-1s",
+        "1e2s",
+        "1.0000000001s",
+        "s",
+        ".1s",
+        "18446744073709551615s",
+    ] {
+        assert!(!activity_end_matches(
+            &json!({"voiceActivity":{"type":"ACTIVITY_END","audioOffset":offset}}),
+            1
+        ));
+    }
+    assert!(!activity_end_matches(
+        &json!({"voiceActivity":{"type":"ACTIVITY_START","audioOffset":"1s"}}),
+        16000
+    ));
+    assert!(!activity_end_matches(
+        &json!({"voiceActivity":{"type":"ACTIVITY_END"}}),
+        16000
+    ));
+}

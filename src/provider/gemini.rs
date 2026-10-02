@@ -49,10 +49,6 @@ impl SpeechProvider for GeminiTranscriptionProvider {
         "gemini"
     }
 
-    fn is_silent_window(&self, samples: &[i16]) -> bool {
-        crate::audio::speech::likely_non_speech(samples)
-    }
-
     async fn run(
         &self,
         mut config: SessionConfig,

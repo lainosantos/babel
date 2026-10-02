@@ -1,6 +1,7 @@
 //! Persistent original-audio recognition with explicit, acknowledged turns.
 //! Manual VAD limits recognition to one unacknowledged turn. Its final
-//! inputTranscription may be empty when no speech was recognized.
+//! inputTranscription commits words. A matching server activity end can close
+//! a wordless turn without an empty transcript object.
 //! https://ai.google.dev/gemini-api/docs/live-api/live-transcribe#manual-vad-push-to-talk
 use super::*;
 
@@ -59,6 +60,46 @@ struct Turn {
     samples: usize,
     trailing_zeros: usize,
     last_input: Instant,
+    interim_text: bool,
+}
+
+/// The wire duration is relative to submitted PCM, excluding locally skipped
+/// leading zeros. Reject malformed, rounded, old, or future activity boundaries.
+fn activity_end_matches(value: &Value, submitted_samples: u64) -> bool {
+    let activity = &value["voiceActivity"];
+    if activity["type"] != "ACTIVITY_END" {
+        return false;
+    }
+    let Some(offset) = activity["audioOffset"]
+        .as_str()
+        .and_then(|text| text.strip_suffix('s'))
+    else {
+        return false;
+    };
+    if offset.len() > 32 {
+        return false;
+    }
+    let (seconds, fraction) = offset.split_once('.').unwrap_or((offset, ""));
+    if seconds.is_empty()
+        || !seconds.bytes().all(|byte| byte.is_ascii_digit())
+        || fraction.len() > 9
+        || !fraction.bytes().all(|byte| byte.is_ascii_digit())
+    {
+        return false;
+    }
+    let nanos = seconds
+        .parse::<u64>()
+        .ok()
+        .and_then(|seconds| seconds.checked_mul(1_000_000_000))
+        .and_then(|seconds| {
+            let fractional = if fraction.is_empty() {
+                0
+            } else {
+                fraction.parse::<u64>().ok()? * 10u64.pow(9 - fraction.len() as u32)
+            };
+            seconds.checked_add(fractional)
+        });
+    nanos.is_some_and(|nanos| nanos % 62_500 == 0 && nanos / 62_500 == submitted_samples)
 }
 
 async fn end_turn(socket: &mut Socket, boundary: Boundary) -> SessionResult<Instant> {
@@ -77,6 +118,7 @@ async fn end_turn(socket: &mut Socket, boundary: Boundary) -> SessionResult<Inst
 struct State {
     turn: Option<Turn>,
     position: u64,
+    submitted_samples: u64,
     eof: bool,
 }
 impl Turn {
@@ -86,6 +128,7 @@ impl Turn {
             samples: 0,
             trailing_zeros: 0,
             last_input: Instant::now(),
+            interim_text: false,
         }
     }
 }
@@ -214,6 +257,7 @@ async fn run_live(
                 // PCM messages, including replay of retained originals.
                 for chunk in samples.chunks(STREAM_CHUNK_SAMPLES) {
                     io_deadline(socket.send(audio_message(chunk)?)).await?;
+                    state.submitted_samples = state.submitted_samples.saturating_add(chunk.len() as u64);
                 }
                 if ending {
                     final_deadline = Some(end_turn(&mut socket, boundary).await?);
@@ -245,6 +289,12 @@ async fn run_live(
                         return Err(Failure::retry("Gemini interrupted original transcription"));
                     }
                     let final_text = transcription_final(content)?;
+                    if content["interimInputTranscription"]["text"].as_str().is_some_and(|text| !text.trim().is_empty())
+                        && let Some(turn) = state.turn.as_mut() {
+                        turn.interim_text = true;
+                        // Once any words were hypothesized, only an authoritative
+                        // final can commit this turn, never an activity marker.
+                    }
                     let decoded = decode_transcription_content(content)?;
                     if final_text && final_deadline.is_none() {
                         return Err(Failure::fatal("Gemini ASR finalized before the explicit audio boundary"));
@@ -272,6 +322,18 @@ async fn run_live(
                         final_deadline = None;
                         if state.eof { return Ok(()); }
                     }
+                }
+                if final_deadline.is_some()
+                    && state.turn.as_ref().is_some_and(|turn| !turn.interim_text)
+                    && activity_end_matches(&value, state.submitted_samples)
+                {
+                    // Live Transcribe can emit only a timestamped activity end
+                    // for wordless audio. This observed server boundary, rather
+                    // than silence, VAD, or timeout alone, permits an empty result.
+                    before_final_deadline(final_deadline, emit(events, ProviderEvent::TurnComplete)).await?;
+                    state.turn = None;
+                    final_deadline = None;
+                    if state.eof { return Ok(()); }
                 }
             }
         }

@@ -17,27 +17,6 @@ pub(crate) fn below_background_floor(samples: &[i16]) -> bool {
     })
 }
 
-/// Classify a complete retained window on a processing worker. The conservative
-/// threshold keeps uncertain speech eligible for ASR. Originals are never edited.
-pub(crate) fn likely_non_speech(samples: &[i16]) -> bool {
-    if below_background_floor(samples) {
-        return true;
-    }
-    // A very short tail has insufficient context for a VAD decision.
-    if samples.len() < 16_000 / 2 {
-        return false;
-    }
-    let mut detector = earshot::Detector::default();
-    for block in samples.chunks(256) {
-        let mut padded = [0; 256];
-        padded[..block.len()].copy_from_slice(block);
-        if detector.predict_i16(&padded) >= 0.35 {
-            return false;
-        }
-    }
-    true
-}
-
 /// Per-source streaming VAD. Only controls whether remote speech work is pending;
 /// it does not remove samples from provider input, recording, or encrypted history.
 pub(crate) struct VoiceActivity {
@@ -200,15 +179,6 @@ impl SpeechTap {
 #[cfg(test)]
 mod tests {
     use super::*;
-    #[test]
-    fn local_voice_detection_keeps_short_and_uncertain_audio_eligible() {
-        assert!(likely_non_speech(&[17; 16000]));
-        assert!(!below_background_floor(&[17; 16000]));
-        assert!(!likely_non_speech(&[17; 100]));
-        assert!(!likely_non_speech(&[1000; 16000]));
-        assert!(likely_non_speech(&[0; 16000]));
-    }
-
     #[test]
     fn streaming_voice_detection_preserves_input_and_unknown_partial_tail() {
         let samples = vec![17; 256 * 32];

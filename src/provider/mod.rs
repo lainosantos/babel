@@ -171,8 +171,8 @@ fn known_model_family(model: &str, family: &str) -> bool {
 pub trait SpeechProvider: Send + Sync {
     fn id(&self) -> &'static str;
 
-    /// Dedicated ASR can use local VAD to avoid asking a remote recognizer to
-    /// acknowledge background-only windows. Originals remain stored unchanged.
+    /// Skip only exact digital silence by default. A provider override must
+    /// preserve its recognition contract. Originals remain stored unchanged.
     fn is_silent_window(&self, samples: &[i16]) -> bool {
         samples.iter().all(|sample| *sample == 0)
     }

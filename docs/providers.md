@@ -119,7 +119,12 @@ the adapter does not split off its small overflow or quiet tail. History and
 explicit recovery windows contain at most 31 seconds of originals. Audio is
 sent in PCM messages of at most 100 ms, following the Live Transcribe guidance.
 The adapter waits up to 30 seconds after the boundary for a final result,
-including an explicitly returned empty result. Missing results remain errors.
+including an explicitly returned empty result. Live Transcribe can instead end
+wordless audio with a top-level `voiceActivity` event: `ACTIVITY_END` and an
+`audioOffset` matching every submitted PCM sample. Babel accepts that explicit
+server boundary only when no interim words remain unfinalized. It does not infer
+completion from quiet audio or a timeout. A missing boundary, a mismatched offset,
+or interim words without authoritative final text remains an error.
 If Live stalls, disconnects or requests rotation, Babel retains all unconfirmed
 original PCM and retries the affected window through the same configured Live
 Transcribe model. Normal transcription, retained history, and explicit session
@@ -147,17 +152,13 @@ An unresolved interval is retained and marked rather than retried for minutes. P
 Gemini authentication and protocol failures pause immediately. The dashboard
 reports the sanitized cause, and incomplete originals
 remain retained for explicit recovery rather than generating endless requests.
-Gemini transcription avoids requesting speech finals for windows classified as
-non-speech by a local voice activity detector. It uses Earshot, a small bundled
-Rust classifier, with a conservative 0.35 speech threshold and a separate low
-PCM background floor. Non-floor windows shorter than half a second remain
-eligible for recognition. This is a signal heuristic, not another transcription
-model or paid API; very quiet or unusual speech can be misclassified. WAV and
-encrypted retention preserve every original sample unchanged. Continuous
-translation also forwards unchanged PCM, but non-speech does not create new
-pending speech work. A received server response still requires completion even
-if the local detector found no voice. Timeout alone never confirms pending
-speech. See [transcription tail handling](transcription.md#gemini-live-transcribe).
+Gemini transcription skips only exact digital silence. Every nonzero original
+window is submitted unchanged, including low-level background and quiet speech;
+the configured recognizer determines its text and completion. No local voice
+classifier acknowledges or discards a transcription window. WAV and encrypted
+retention preserve every original sample. Continuous translation uses its own
+pending-work detector and forwards unchanged PCM. See
+[transcription tail handling](transcription.md#gemini-live-transcribe).
 Translation checks output selection before retry inference. During capture it
 waits locally for reselection; after Stop it pauses unselected work for explicit
 recovery. Neither case makes paid requests while unselected. Catch-up only

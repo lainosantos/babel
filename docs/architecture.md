@@ -469,7 +469,11 @@ success, retries the same original PCM on failure, then advances its capture clo
 Gemini normal windows, history, and recovery all use the configured Live
 Transcribe model. Each finite window has one explicit activity boundary at EOF,
 including its overflow capture chunk and quiet tail, with 100 ms PCM messages
-and up to 30 seconds for its final acknowledgement. A failed window is replayed
+and up to 30 seconds for its final acknowledgement. A timestamped server
+`voiceActivity: ACTIVITY_END` can finish wordless input without an empty
+transcript object, only when it covers the exact submitted PCM and no interim
+words remain unfinalized. Neither VAD nor timeout alone acknowledges the turn.
+A failed window is replayed
 to that same model; no hidden file-transcription model or alternate API is selected. Missing transcription finals
 extend the same unconfirmed prefix with later originals, up to 30 seconds plus
 one capture chunk. Size and retry limits defer the unresolved interval, preserving
@@ -481,11 +485,11 @@ following retained audio is available; permanent Gemini failures pause immediate
 retains the sanitized failure per feature.
 Once automatic attempts are exhausted, originals remain available for explicit
 recovery, allowing the finalizer to finish without an endless paid request loop.
-A bundled local Earshot VAD evaluates PCM on speech-processing workers only,
-with a conservative 0.35 speech threshold. Gemini transcription can skip
-non-speech windows without opening another paid request. Windows shorter than
-half a second remain eligible unless they meet the low PCM background floor.
-These are heuristics, not guarantees for every quiet voice. Translation still
+Gemini transcription sends every nonzero window to its configured recognizer;
+only exact digital silence can skip a request. Its completion comes from model
+responses, without a local speech-classification heuristic. A bundled Earshot
+VAD remains on the translation processing worker to track pending speech.
+Translation still
 forwards every sample unchanged, but non-speech does not create a new pending
 generation. Generic Live agents require the conversational turnComplete
 boundary. The dedicated interpreter sends continuous output and may continue

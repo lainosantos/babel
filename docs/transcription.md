@@ -131,6 +131,14 @@ has a 30-second deadline after the complete window is submitted; a delayed resul
 within that limit can finish without reconnecting. This is a per-window failure
 bound, not a time limit on successful session finalization. Absence of a final
 result is never treated as proof of silence or successful recognition.
+For wordless input, the server can omit an empty transcript and send only
+`voiceActivity: ACTIVITY_END`, with the submitted audio's exact ending offset.
+The adapter accepts this explicit boundary when no interim words remain pending.
+Offsets use the provider's submitted PCM clock, independently of skipped leading
+digital zeros and the original capture alignment. Activity start, an old or
+future offset, and a missing boundary cannot acknowledge the window. Interim
+words still require authoritative `inputTranscription`; an activity event never
+turns a partial hypothesis into final text.
 
 During normal session transcription, a missing final acknowledgement has a
 separate recovery policy: the engine keeps the unconfirmed PCM prefix and appends the next five seconds of originals,
@@ -145,18 +153,12 @@ Later confirmed text is saved, but the session remains incomplete and keeps its
 encrypted originals for explicit recovery. Successfully confirmed windows are
 never included in the expanded window.
 
-Normal Gemini transcription uses a local voice activity detector to avoid
-opening speech requests for non-speech windows, including initial background
-and closing tails. Earshot's bundled Rust classifier evaluates 16 ms PCM frames
-on the processing worker with a conservative speech threshold of 0.35 (below
-its usual 0.5 threshold). Any frame above this threshold keeps the window
-eligible. Windows shorter than half a second remain eligible unless they meet
-the background floor: every 20 ms block has RMS at most 4 PCM16 units and every
-sample has magnitude at most 16 units. The detector is a heuristic; it can miss
-very quiet or unusual speech. It does not recognize words, select another model,
-or contact another API. Recording and encrypted retention preserve unchanged
-originals, including windows classified as non-speech. Failed audible windows
-remain unconfirmed; a timeout never proves silence.
+Normal Gemini transcription sends every nonzero retained window unchanged to
+its configured recognizer. It does not classify quiet speech or background noise
+locally to declare recognition complete. Only exact digital silence can avoid a
+paid request. Authoritative text and matching server activity boundaries control
+completion; neither signal level nor elapsed time proves a successful result.
+Recording and encrypted retention preserve every original sample.
 
 Every window, including history and explicit session recovery, uses the selected
 `transcription.providers.gemini.model` over the Live API. Recovery opens a new

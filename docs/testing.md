@@ -668,6 +668,10 @@ after a pause, and retention on missing translated audio or a 30-second drain
 timeout. Generic Live agents retain their explicit turn-completion tests. Live
 Transcribe uses its authoritative inputTranscription instead; it does not need
 either conversational completion marker to commit the final original text.
+Transcription fixtures also cover the observed wordless `voiceActivity` response
+without an empty transcript object, exact submitted-audio offsets despite a
+skipped zero prefix, and rejection of old, future, or malformed boundaries.
+Interim words still require authoritative final text even after activity end.
 
 On normal completion or interruption, the script stops only its own session,
 restores its changed configuration fields using revision checks, and removes
