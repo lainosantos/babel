@@ -702,5 +702,12 @@
   "credentials.saved_available": "Também há uma chave salva disponível.",
   "session.elapsed": "Tempo de sessão",
   "history.buffer_recovering": "Armazenamento criptografado do histórico em recuperação; o áudio original continua",
-  "history.buffer_gap": "O histórico recente contém lacunas após uma falha de armazenamento; o áudio original continua"
+  "history.buffer_gap": "O histórico recente contém lacunas após uma falha de armazenamento; o áudio original continua",
+  "session.finalizing_pending": "Pendências: {tasks}",
+  "session.work.microphone_translation": "tradução do microfone",
+  "session.work.speaker_translation": "tradução do áudio recebido",
+  "session.work.microphone_recognition": "transcrição original do microfone",
+  "session.work.speaker_recognition": "transcrição original do áudio recebido",
+  "session.work.transcript_file": "salvamento da transcrição",
+  "session.work.recording": "salvamento da gravação"
 }

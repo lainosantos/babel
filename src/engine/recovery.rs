@@ -27,6 +27,36 @@ pub(super) struct SessionProgress {
     pub(super) translation: [Arc<AtomicBool>; 2],
 }
 impl SessionProgress {
+    fn pending_work(&self, config: &AppConfig) -> Vec<&'static str> {
+        let mut work = Vec::new();
+        if config.microphone.enabled
+            && !config.microphone_uses_speaker()
+            && !self.translation[0].load(Ordering::Acquire)
+        {
+            work.push("microphone_translation");
+        }
+        if config.speaker.enabled && !self.translation[1].load(Ordering::Acquire) {
+            work.push("speaker_translation");
+        }
+        if config.transcription.enabled {
+            if config.transcription.microphone
+                && !config.microphone_uses_speaker()
+                && !self.recognition[0].load(Ordering::Acquire)
+            {
+                work.push("microphone_recognition");
+            }
+            if config.transcription.speaker && !self.recognition[1].load(Ordering::Acquire) {
+                work.push("speaker_recognition");
+            }
+            if !self.transcript.load(Ordering::Acquire) {
+                work.push("transcript_file");
+            }
+        }
+        if config.recording.enabled && !self.recording.load(Ordering::Acquire) {
+            work.push("recording");
+        }
+        work
+    }
     fn pending_config(&self, config: &AppConfig) -> AppConfig {
         let mut pending = config.clone();
         pending.microphone.enabled &= !self.translation[0].load(Ordering::Acquire);
@@ -63,6 +93,13 @@ pub struct RetainedSessionStatus {
 }
 
 impl Archive {
+    pub(super) fn pending_work(&self, models_stopped: bool) -> Vec<&'static str> {
+        let mut work = self.progress.pending_work(&self.config);
+        if models_stopped {
+            work.retain(|task| matches!(*task, "transcript_file" | "recording"));
+        }
+        work
+    }
     pub(super) fn new(
         session: crate::session::SessionIdentity,
         config: AppConfig,

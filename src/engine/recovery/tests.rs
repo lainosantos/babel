@@ -77,6 +77,7 @@ async fn stopping_inference_keeps_manual_recovery_available_without_a_failure() 
     archive.config.transcription.microphone = true;
     archive.config.speaker.enabled = true;
     archive.progress.recording.store(true, Ordering::Release);
+    assert_eq!(archive.pending_work(true), vec!["transcript_file"]);
     archive.progress.transcript.store(true, Ordering::Release);
     let mut status = stopped_status();
     finish_archive(
@@ -649,4 +650,46 @@ async fn confirmed_history_is_reused_without_paying_for_another_recognition_requ
         }
         assert_eq!(saved, vec![("Original window 1.".into(), Some(2200))]);
     }
+}
+
+#[test]
+fn finalization_work_tracks_selected_sources_and_actual_commits() {
+    let mut config = AppConfig::default();
+    config.microphone.enabled = true;
+    config.speaker.enabled = true;
+    config.transcription.enabled = true;
+    config.transcription.microphone = true;
+    config.transcription.speaker = true;
+    config.recording.enabled = true;
+    let progress = SessionProgress::default();
+    assert_eq!(
+        progress.pending_work(&config),
+        [
+            "microphone_translation",
+            "speaker_translation",
+            "microphone_recognition",
+            "speaker_recognition",
+            "transcript_file",
+            "recording"
+        ]
+    );
+    progress.translation[1].store(true, Ordering::Release);
+    progress.recognition[1].store(true, Ordering::Release);
+    assert_eq!(
+        progress.pending_work(&config),
+        [
+            "microphone_translation",
+            "microphone_recognition",
+            "transcript_file",
+            "recording"
+        ]
+    );
+    config.audio.microphone_source = crate::config::MicrophoneSource::SpeakerOutput;
+    assert_eq!(
+        progress.pending_work(&config),
+        ["transcript_file", "recording"]
+    );
+    progress.transcript.store(true, Ordering::Release);
+    progress.recording.store(true, Ordering::Release);
+    assert!(progress.pending_work(&config).is_empty());
 }

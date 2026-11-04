@@ -2527,3 +2527,17 @@ test('encrypted history recovery and capture gaps are visible without changing l
   await p.poll();
   assert.equal(p.byId('history-buffer-update').textContent, 'Updated every second');
 });
+
+test('finalization shows remaining work, updates completion, and localizes safe task labels', async t => {
+  const pending = { session_id: 'pending-work', session_name: 'Pending work', pending_work: ['speaker_translation', 'speaker_recognition', 'transcript_file', '<img src=x>'] };
+  const p = await page(t, { language: 'en', finalizingSessions: [pending] });
+  assert.match(p.byId('finalizing-sessions').textContent, /received-audio translation/);
+  assert.match(p.byId('finalizing-sessions').textContent, /original received-audio transcription/);
+  assert.equal(p.byId('finalizing-sessions').querySelector('img'), null);
+  p.finalizing([{ ...pending, pending_work: ['speaker_recognition'] }]); await p.poll();
+  assert.doesNotMatch(p.byId('finalizing-sessions').textContent, /received-audio translation|saving the transcript/);
+  p.byId('interface-language').value = 'pt';
+  p.byId('interface-language').dispatchEvent(new p.window.Event('change', { bubbles: true }));
+  await settle(() => /transcrição original do áudio recebido/.test(p.byId('finalizing-sessions').textContent));
+  assert.match(p.byId('finalizing-sessions').textContent, /Pendências:/);
+});

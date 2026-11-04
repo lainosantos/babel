@@ -99,6 +99,7 @@ pub struct FinalizingSessionStatus {
     pub microphone: RouteStatus,
     pub speaker: RouteStatus,
     pub last_error: Option<String>,
+    pub pending_work: Vec<&'static str>,
 }
 
 #[derive(Default)]
@@ -631,6 +632,9 @@ impl Controller {
                     microphone: snapshot.microphone,
                     speaker: snapshot.speaker,
                     last_error: snapshot.last_error,
+                    pending_work: session.retained.as_ref().map_or_else(Vec::new, |archive| {
+                        archive.pending_work(session.stop_models.is_cancelled())
+                    }),
                 }
             })
             .collect();

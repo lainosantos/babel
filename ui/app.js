@@ -786,7 +786,11 @@
         finalizingNodes.set(session.session_id, row); byId('finalizing-sessions').append(node);
       }
       row.name.textContent = session.session_name || session.session_id;
-      row.status.textContent = t('session.finalizing');
+      const knownWork = new Set(['microphone_translation', 'speaker_translation', 'microphone_recognition', 'speaker_recognition', 'transcript_file', 'recording']);
+      const pending = Array.isArray(session.pending_work) ? session.pending_work.filter(work => knownWork.has(work)) : [];
+      row.status.textContent = pending.length
+        ? t('session.finalizing_pending', { tasks: pending.map(work => t(`session.work.${work}`)).join(', ') })
+        : t('session.finalizing');
       row.error.textContent = session.last_error || '';
       row.error.hidden = !session.last_error;
     }

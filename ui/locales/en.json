@@ -702,5 +702,12 @@
   "credentials.saved_available": "A saved key is also available.",
   "session.elapsed": "Session time",
   "history.buffer_recovering": "Encrypted history storage is recovering; original audio continues",
-  "history.buffer_gap": "Recent history has gaps after a storage failure; original audio continues"
+  "history.buffer_gap": "Recent history has gaps after a storage failure; original audio continues",
+  "session.finalizing_pending": "Pending: {tasks}",
+  "session.work.microphone_translation": "microphone translation",
+  "session.work.speaker_translation": "received-audio translation",
+  "session.work.microphone_recognition": "original microphone transcription",
+  "session.work.speaker_recognition": "original received-audio transcription",
+  "session.work.transcript_file": "saving the transcript",
+  "session.work.recording": "saving the recording"
 }
