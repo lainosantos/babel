@@ -1,5 +1,5 @@
-//! Recording-only level balance. No model, microphone gate, automatic gain,
-//! routing mutation or source-audio mutation occurs in this mixer.
+//! Recording-only level balance. No model, microphone gate, routing mutation
+//! or source-audio mutation occurs in this mixer.
 use super::RecordingMixConfig;
 use std::collections::VecDeque;
 
@@ -72,10 +72,7 @@ pub(super) struct RecordingMixer {
     gains: [f64; 2],
     transparent: bool,
     priority: MicrophonePriority,
-    limit: bool,
-    limiter_gain: f64,
-    limiter_release: f64,
-    lookahead: VecDeque<f64>,
+    limiter: Option<PeakLimiter<1>>,
 }
 
 impl RecordingMixer {
@@ -114,10 +111,10 @@ impl RecordingMixer {
                 attack: smoothing(15.0),
                 release: smoothing(300.0),
             },
-            limit: gains.iter().any(|gain| *gain > 1.0),
-            limiter_gain: 1.0,
-            limiter_release: smoothing(100.0),
-            lookahead: VecDeque::with_capacity(LOOKAHEAD + 1),
+            limiter: gains
+                .iter()
+                .any(|gain| *gain > 1.0)
+                .then(|| PeakLimiter::new(true)),
         }
     }
 
@@ -138,34 +135,186 @@ impl RecordingMixer {
         let output_gain = self.priority.next_gain(microphone);
         let mixed = (microphone * self.gains[0] + speaker * self.gains[1] * output_gain)
             / f64::from(self.divisor);
-        if !self.limit {
-            return Some(quantize(mixed));
+        match &mut self.limiter {
+            Some(limiter) => limiter.push([mixed]).map(|[sample]| sample),
+            None => Some(quantize(mixed)),
         }
-        self.lookahead.push_back(mixed);
-        (self.lookahead.len() > LOOKAHEAD).then(|| self.render_oldest())
     }
 
     pub(super) fn finish_sample(&mut self) -> Option<i16> {
+        self.limiter.as_mut()?.finish_frame().map(|[sample]| sample)
+    }
+}
+
+pub(super) struct StereoRecordingLevels {
+    gains: [f64; 2],
+    auto_level: Option<MicrophoneAutoLevel>,
+    limiters: Option<[PeakLimiter<2>; 2]>,
+}
+
+impl StereoRecordingLevels {
+    pub(super) fn new(config: &RecordingMixConfig, microphone: bool, speaker: bool) -> Self {
+        let automatic = microphone && config.microphone_auto_level;
+        let gains = [
+            if microphone && !automatic {
+                amplitude(config.microphone_gain_db)
+            } else {
+                1.0
+            },
+            if speaker {
+                amplitude(config.speaker_gain_db)
+            } else {
+                1.0
+            },
+        ];
+        let protected = [automatic || gains[0] > 1.0, gains[1] > 1.0];
+        Self {
+            gains,
+            auto_level: automatic.then(MicrophoneAutoLevel::new),
+            // Keep the two source pairs on the same timeline if either needs
+            // lookahead. An unboosted pair uses its queue only as a delay.
+            limiters: protected
+                .into_iter()
+                .any(|protect| protect)
+                .then(|| protected.map(PeakLimiter::new)),
+        }
+    }
+
+    pub(super) fn push(&mut self, sources: [[i16; 2]; 2]) -> Option<[[i16; 2]; 2]> {
+        let [mic, output] = sources;
+        let mic = mic.map(|sample| f64::from(sample) / 32768.0);
+        let [manual_mic_gain, output_gain] = self.gains;
+        let mic_gain = self
+            .auto_level
+            .as_mut()
+            .map_or(manual_mic_gain, |level| level.next_gain(mic));
+        let scaled = [
+            mic.map(|sample| sample * mic_gain),
+            output.map(|sample| f64::from(sample) / 32768.0 * output_gain),
+        ];
+        match &mut self.limiters {
+            Some([microphone, speaker]) => microphone
+                .push(scaled[0])
+                .zip(speaker.push(scaled[1]))
+                .map(|(mic, output)| [mic, output]),
+            None => Some(scaled.map(|pair| pair.map(quantize))),
+        }
+    }
+
+    pub(super) fn finish_frame(&mut self) -> Option<[[i16; 2]; 2]> {
+        let [microphone, speaker] = self.limiters.as_mut()?;
+        microphone
+            .finish_frame()
+            .zip(speaker.finish_frame())
+            .map(|(mic, output)| [mic, output])
+    }
+}
+
+struct MicrophoneAutoLevel {
+    power: f64,
+    gain: f64,
+    threshold_power: f64,
+    target_level: f64,
+    min_gain: f64,
+    max_gain: f64,
+    detect_rise: f64,
+    detect_fall: f64,
+    raise_gain: f64,
+    lower_gain: f64,
+}
+
+impl MicrophoneAutoLevel {
+    fn new() -> Self {
+        Self {
+            power: 0.0,
+            gain: 1.0,
+            threshold_power: amplitude(-52.0).powi(2),
+            target_level: amplitude(-24.0),
+            min_gain: amplitude(-12.0),
+            max_gain: amplitude(18.0),
+            detect_rise: smoothing(80.0),
+            detect_fall: smoothing(400.0),
+            raise_gain: smoothing(450.0),
+            lower_gain: smoothing(100.0),
+        }
+    }
+
+    fn next_gain(&mut self, [left, right]: [f64; 2]) -> f64 {
+        // Use the stronger channel so a quiet or disconnected side cannot
+        // drive the gain up. Apply one gain to preserve the stereo balance.
+        let power = left.powi(2).max(right.powi(2));
+        let detect = if power > self.power {
+            self.detect_rise
+        } else {
+            self.detect_fall
+        };
+        self.power += detect * (power - self.power);
+        let target = if self.power >= self.threshold_power {
+            (self.target_level / self.power.sqrt()).clamp(self.min_gain, self.max_gain)
+        } else {
+            // Return to unity in quiet gaps without muting the microphone.
+            1.0
+        };
+        let adjustment = if target < self.gain {
+            self.lower_gain
+        } else {
+            self.raise_gain
+        };
+        self.gain += adjustment * (target - self.gain);
+        self.gain
+    }
+}
+
+struct PeakLimiter<const CHANNELS: usize> {
+    protect: bool,
+    gain: f64,
+    release: f64,
+    lookahead: VecDeque<([f64; CHANNELS], f64)>,
+}
+
+impl<const CHANNELS: usize> PeakLimiter<CHANNELS> {
+    fn new(protect: bool) -> Self {
+        Self {
+            protect,
+            gain: 1.0,
+            release: smoothing(100.0),
+            lookahead: VecDeque::with_capacity(LOOKAHEAD + 1),
+        }
+    }
+
+    fn push(&mut self, frame: [f64; CHANNELS]) -> Option<[i16; CHANNELS]> {
+        let peak = if self.protect {
+            frame.iter().map(|sample| sample.abs()).fold(0.0, f64::max)
+        } else {
+            0.0
+        };
+        self.lookahead.push_back((frame, peak));
+        (self.lookahead.len() > LOOKAHEAD).then(|| self.render_oldest())
+    }
+
+    fn finish_frame(&mut self) -> Option<[i16; CHANNELS]> {
         (!self.lookahead.is_empty()).then(|| self.render_oldest())
     }
 
-    fn render_oldest(&mut self) -> i16 {
+    fn render_oldest(&mut self) -> [i16; CHANNELS] {
+        let (frame, oldest_peak) = self.lookahead.pop_front().unwrap();
+        if !self.protect {
+            return frame.map(quantize);
+        }
         // Each future over-limit peak imposes a linear gain ceiling that reaches
         // its required attenuation exactly when that sample is output. A newly
         // entering peak starts at unity, so attack ramps cannot jump on a later
-        // block boundary. Both sources share the same limiter after their mix.
-        let mut allowed_gain = 1.0_f64;
-        for (distance, sample) in self.lookahead.iter().enumerate() {
-            let peak = sample.abs();
+        // block boundary. Apply one gain to the entire frame to keep stereo balance.
+        let mut allowed_gain = (PEAK_CEILING / oldest_peak).min(1.0);
+        for (index, &(_, peak)) in self.lookahead.iter().enumerate() {
             if peak > PEAK_CEILING {
                 let required = PEAK_CEILING / peak;
-                let allowed = required + (1.0 - required) * distance as f64 / LOOKAHEAD as f64;
+                let allowed = required + (1.0 - required) * (index + 1) as f64 / LOOKAHEAD as f64;
                 allowed_gain = allowed_gain.min(allowed);
             }
         }
-        self.limiter_gain = (self.limiter_gain + self.limiter_release * (1.0 - self.limiter_gain))
-            .min(allowed_gain);
-        quantize(self.lookahead.pop_front().unwrap() * self.limiter_gain)
+        self.gain = (self.gain + self.release * (1.0 - self.gain)).min(allowed_gain);
+        frame.map(|sample| quantize(sample * self.gain))
     }
 }
 
@@ -186,7 +335,12 @@ mod tests {
             .iter()
             .filter_map(|samples| mixer.push(*samples))
             .collect();
-        assert!(mixer.lookahead.len() <= LOOKAHEAD);
+        assert!(
+            mixer
+                .limiter
+                .as_ref()
+                .is_none_or(|limiter| limiter.lookahead.len() <= LOOKAHEAD)
+        );
         while let Some(sample) = mixer.finish_sample() {
             output.push(sample);
         }
@@ -203,6 +357,47 @@ mod tests {
             imaginary += f64::from(sample) * angle.sin();
         }
         2.0 * real.hypot(imaginary) / samples.len() as f64
+    }
+
+    #[test]
+    fn automatic_microphone_level_adapts_to_input_without_changing_the_other_pair() {
+        let config = RecordingMixConfig {
+            microphone_auto_level: true,
+            microphone_gain_db: -24.0,
+            ..Default::default()
+        };
+        let mut levels = StereoRecordingLevels::new(&config, true, true);
+        let incoming = [i16::MAX, i16::MIN];
+        let mut output = Vec::new();
+        for (second, amplitude) in [40.0, 450.0, 450.0, 450.0, 7000.0, 7000.0, 7000.0]
+            .into_iter()
+            .enumerate()
+        {
+            for index in 0..16_000 {
+                let angle = TAU * 300.0 * f64::from(index) / SAMPLE_RATE;
+                let left = (amplitude * angle.sin()).round() as i16;
+                let mic = [left, left / 2];
+                if let Some(frame) = levels.push([mic, incoming]) {
+                    output.push(frame);
+                }
+            }
+            if second == 0 {
+                assert!(output.iter().all(|[mic, _]| mic[0].abs() <= 40));
+            }
+        }
+        while let Some(frame) = levels.finish_frame() {
+            output.push(frame);
+        }
+        assert_eq!(output.len(), 7 * 16_000);
+        assert!(output.iter().all(|frame| frame[1] == incoming));
+        for settled_second in [3, 6] {
+            let frames = &output[settled_second * 16_000..(settled_second + 1) * 16_000];
+            let left: Vec<_> = frames.iter().map(|frame| frame[0][0]).collect();
+            let right: Vec<_> = frames.iter().map(|frame| frame[0][1]).collect();
+            let level = component(&left, 300.0);
+            assert!((2200.0..3400.0).contains(&level), "{level}");
+            assert!((component(&right, 300.0) / level - 0.5).abs() < 0.01);
+        }
     }
 
     #[test]

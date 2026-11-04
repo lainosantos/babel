@@ -209,7 +209,7 @@ approximate alignment and local receipt time.
 
 Audio recording is a separate option, off by default. It saves originals in
 **one PCM16 WAV at 16 kHz**, with a stereo channel pair for each source.
-The optional mono mix offers recording-only gain and microphone priority.
+Both layouts offer recording-only gain. The optional mono mix also offers microphone priority.
 See [recording formats and balance](docs/recording.md#format-and-volume).
 Transcription and recording have independent source/folder selections. In
 **Settings → Session files**, `files.base_path` defines a shared base folder

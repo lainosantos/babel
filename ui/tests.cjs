@@ -23,7 +23,7 @@ function defaults() {
         whisper: { endpoint: 'auto', model: 'base', api_key_env: '', segment_ms: 2000, silence_ms: 300, vad_threshold: 0.01, request_timeout_secs: 30 },
       } },
     files: { base_path: '/home/test/Babel', name_pattern: '{date}-{time}-{session}-{id}' },
-    recording: { enabled: false, microphone: true, speaker: true, directory: 'recordings', layout: 'mixed', mix: { microphone_gain_db: 0, speaker_gain_db: 0, microphone_priority: true, ducking_db: 3, microphone_threshold_db: -50 } },
+    recording: { enabled: false, microphone: true, speaker: true, directory: 'recordings', layout: 'mixed', mix: { microphone_gain_db: 0, microphone_auto_level: false, speaker_gain_db: 0, microphone_priority: true, ducking_db: 3, microphone_threshold_db: -50 } },
     history: { enabled: true, duration_secs: 600 },
   };
 }
@@ -712,22 +712,33 @@ test('recording and original transcription save independently with one shared fi
   assert.equal(p.doc.querySelector('.recording-settings').textContent.includes('único WAV'), true);
 });
 
-test('separate WAV channels save their layout and keep the mixed recording settings', async t => {
-  const p = await page(t, { language: 'en', initialChange: config => { delete config.recording.layout; } });
+test('separate WAV channels default to automatic microphone level and save a manual override', async t => {
+  const p = await page(t, { language: 'en', initialChange: config => {
+    delete config.recording.layout;
+    delete config.recording.mix.microphone_auto_level;
+  } });
   const layout = p.byId('recording-layout');
   assert.equal(layout.value, 'separate_channels');
   p.set('recording-enabled', true);
-  p.set('recording-layout', 'mixed');
-  p.set('recording-microphone-gain', 6);
   p.set('recording-layout', 'separate_channels');
-  assert.equal(p.byId('recording-mix').hidden, true);
+  assert.equal(p.byId('recording-mono-controls').hidden, true);
+  assert.equal(p.byId('recording-microphone-priority').disabled, true);
+  assert.equal(p.byId('recording-auto-level-control').hidden, false);
+  assert.equal(p.byId('recording-microphone-auto-level').checked, true);
   assert.equal(p.byId('recording-microphone-gain').disabled, true);
+  assert.equal(p.byId('recording-speaker-gain').disabled, false);
+  p.set('recording-microphone-auto-level', false);
+  assert.equal(p.byId('recording-microphone-gain').disabled, false);
+  p.set('recording-microphone-gain', 6);
   p.byId('save').click();
   await settle(() => p.config().recording.layout === 'separate_channels' && !p.byId('settings').disabled);
   assert.equal(layout.value, 'separate_channels');
   assert.equal(p.config().recording.mix.microphone_gain_db, 6);
+  assert.equal(p.config().recording.mix.microphone_auto_level, false);
+  assert.equal(p.byId('recording-microphone-auto-level').checked, false);
   p.set('recording-layout', 'mixed');
-  assert.equal(p.byId('recording-mix').hidden, false);
+  assert.equal(p.byId('recording-mono-controls').hidden, false);
+  assert.equal(p.byId('recording-auto-level-control').hidden, true);
   assert.equal(p.byId('recording-microphone-gain').disabled, false);
   assert.equal(p.byId('recording-microphone-gain').value, '6');
 });
@@ -743,7 +754,7 @@ test('recording balance round-trips independently of translation, recognition, h
     p.set('recording-microphone-threshold', -55.5);
     p.byId('save').click();
     await settle(() => p.config().recording.mix.microphone_gain_db === 12.25 && !p.byId('settings').disabled);
-    assert.deepEqual(p.config().recording.mix, { microphone_gain_db: 12.25, speaker_gain_db: -3.125, microphone_priority: true, ducking_db: 16.125, microphone_threshold_db: -55.5 });
+    assert.deepEqual(p.config().recording.mix, { microphone_gain_db: 12.25, microphone_auto_level: false, speaker_gain_db: -3.125, microphone_priority: true, ducking_db: 16.125, microphone_threshold_db: -55.5 });
     for (const section of ['microphone', 'speaker', 'audio', 'history', 'transcription']) assert.deepEqual(p.config()[section], before[section], `${platform}: recording mix must not change ${section}`);
     const priority = p.byId('recording-microphone-priority');
     assert.ok(priority.closest('label.switch').querySelector('.switch-track'));
@@ -762,11 +773,11 @@ test('recording balance round-trips independently of translation, recognition, h
 test('recording balance disables excluded sources and inactive priority without losing their saved levels', async t => {
   const p = await page(t);
   const fields = [...p.doc.querySelectorAll('[data-recording-mix]')];
-  assert.equal(fields.length, 5);
+  assert.equal(fields.length, 6);
   for (const control of fields) assert.equal(control.disabled, true);
   assert.equal(p.byId('recording-priority-label').textContent, 'Manter o microfone audível');
   p.set('recording-enabled', true);
-  for (const control of fields) assert.equal(control.disabled, false);
+  for (const control of fields) assert.equal(control.disabled, control.id === 'recording-microphone-auto-level');
   p.set('recording-microphone-gain', 12);
   p.set('recording-speaker-gain', -6);
   p.set('recording-microphone', false);
@@ -783,7 +794,7 @@ test('recording balance disables excluded sources and inactive priority without 
   for (const id of ['recording-ducking', 'recording-microphone-threshold']) assert.equal(p.byId(id).disabled, true);
   p.byId('save').click();
   await settle(() => p.config().recording.mix.microphone_priority === false && !p.byId('settings').disabled);
-  assert.deepEqual(p.config().recording.mix, { microphone_gain_db: 12, speaker_gain_db: -6, microphone_priority: false, ducking_db: 3, microphone_threshold_db: -50 });
+  assert.deepEqual(p.config().recording.mix, { microphone_gain_db: 12, microphone_auto_level: false, speaker_gain_db: -6, microphone_priority: false, ducking_db: 3, microphone_threshold_db: -50 });
   p.set('recording-microphone-gain', 25);
   assert.equal(p.byId('recording-microphone-gain').checkValidity(), false);
   p.set('recording-microphone-gain', -24);
@@ -815,7 +826,7 @@ test('missing recording balance fields use subtle defaults while saved reduction
     p.set('recording-microphone-gain', 6);
     p.byId('save').click();
     await settle(() => p.config().recording.mix?.microphone_gain_db === 6);
-    assert.deepEqual(p.config().recording.mix, { ...defaults().recording.mix, microphone_gain_db: 6, ducking_db: reduction });
+    assert.deepEqual(p.config().recording.mix, { ...defaults().recording.mix, microphone_gain_db: 6, microphone_auto_level: true, ducking_db: reduction });
   }
 });
 

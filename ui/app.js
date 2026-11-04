@@ -286,7 +286,7 @@
     microphoneDraft.source = config.audio.microphone_source;
     microphoneDraft.device = config.microphone.capture_device || '';
     config.recording.layout ??= 'separate_channels';
-    config.recording.mix = { microphone_gain_db: 0, speaker_gain_db: 0, microphone_priority: true, ducking_db: 3, microphone_threshold_db: -50, ...config.recording.mix };
+    config.recording.mix = { microphone_gain_db: 0, microphone_auto_level: true, speaker_gain_db: 0, microphone_priority: true, ducking_db: 3, microphone_threshold_db: -50, ...config.recording.mix };
     state.config = config;
     writeValue(byId('files-base_path'), config.files?.base_path ?? '');
     document.querySelectorAll('[data-field]').forEach((element) => {
@@ -746,8 +746,13 @@
     const recordingEnabled = byId('recording-enabled').checked;
     byId('recording-layout').disabled = !recordingEnabled;
     const separateChannels = byId('recording-layout').value === 'separate_channels';
-    byId('recording-mix').hidden = separateChannels;
-    for (const route of routeNames) byId(`recording-${route}-gain`).disabled = separateChannels || !featureRoute('recording', route);
+    byId('recording-mono-controls').hidden = separateChannels;
+    byId('recording-auto-level-control').hidden = !separateChannels;
+    const microphoneRecording = featureRoute('recording', 'microphone');
+    const autoLevel = byId('recording-microphone-auto-level');
+    autoLevel.disabled = !separateChannels || !microphoneRecording;
+    byId('recording-microphone-gain').disabled = !microphoneRecording || (separateChannels && autoLevel.checked);
+    byId('recording-speaker-gain').disabled = !featureRoute('recording', 'speaker');
     const mixedRecording = !separateChannels && recordingEnabled && routeNames.every(route => featureRoute('recording', route));
     byId('recording-microphone-priority').disabled = !mixedRecording;
     for (const field of ['ducking', 'microphone-threshold']) byId(`recording-${field}`).disabled = !mixedRecording || !byId('recording-microphone-priority').checked;

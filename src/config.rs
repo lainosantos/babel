@@ -231,6 +231,7 @@ pub enum RecordingLayout {
 #[serde(default, deny_unknown_fields)]
 pub struct RecordingMixConfig {
     pub microphone_gain_db: f32,
+    pub microphone_auto_level: bool,
     pub speaker_gain_db: f32,
     pub microphone_priority: bool,
     pub ducking_db: f32,
@@ -240,6 +241,7 @@ impl Default for RecordingMixConfig {
     fn default() -> Self {
         Self {
             microphone_gain_db: 0.0,
+            microphone_auto_level: true,
             speaker_gain_db: 0.0,
             microphone_priority: true,
             ducking_db: 3.0,
@@ -251,6 +253,7 @@ impl RecordingMixConfig {
     /// The previous fixed-headroom sum, without added gain or priority.
     pub fn transparent() -> Self {
         Self {
+            microphone_auto_level: false,
             microphone_priority: false,
             ..Self::default()
         }
@@ -2087,15 +2090,18 @@ mod tests {
     fn recording_mix_defaults_and_roundtrip_are_independent_of_translation() {
         let legacy: RecordingConfig = toml::from_str("enabled = true\n").unwrap();
         assert_eq!(legacy.layout, RecordingLayout::SeparateChannels);
+        assert!(legacy.mix.microphone_auto_level);
         assert!(legacy.mix.microphone_priority);
         assert_eq!(legacy.mix.microphone_gain_db, 0.0);
         assert_eq!(legacy.mix.speaker_gain_db, 0.0);
         assert_eq!(legacy.mix.ducking_db, 3.0);
         let previous: RecordingConfig = toml::from_str("[mix]\nducking_db = 12.0\n").unwrap();
         assert_eq!(previous.mix.ducking_db, 12.0);
+        assert!(previous.mix.microphone_auto_level);
         let mut cfg = AppConfig::default();
         cfg.recording.layout = RecordingLayout::SeparateChannels;
         cfg.recording.mix.microphone_gain_db = 12.0;
+        cfg.recording.mix.microphone_auto_level = false;
         cfg.recording.mix.speaker_gain_db = -6.0;
         cfg.recording.mix.ducking_db = 18.0;
         cfg.recording.mix.microphone_threshold_db = -45.0;
@@ -2104,6 +2110,7 @@ mod tests {
         let restored: AppConfig = toml::from_str(&saved).unwrap();
         assert_eq!(restored.recording.layout, RecordingLayout::SeparateChannels);
         assert_eq!(restored.recording.mix.microphone_gain_db, 12.0);
+        assert!(!restored.recording.mix.microphone_auto_level);
         assert_eq!(restored.recording.mix.speaker_gain_db, -6.0);
         assert_eq!(restored.recording.mix.ducking_db, 18.0);
         assert_eq!(restored.recording.mix.microphone_threshold_db, -45.0);

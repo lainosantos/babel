@@ -5,7 +5,7 @@ WAV with the selected originals on a shared timeline.
 
 - **Separate stereo pairs (4 channels)** is the default. Channels 1–2 carry
   the microphone's left and right signals. Channels 3–4 carry the left and
-  right signals of incoming audio. Each source keeps its captured level.
+  right signals of incoming audio. Each source has an independent recording level.
   Mono sources fill both channels of their pair with the same signal.
   A disabled or absent source leaves its pair silent.
 - **Mixed (mono)** combines microphone and incoming audio in one channel.
@@ -33,6 +33,7 @@ layout = "separate_channels" # Use "mixed" for mono
 
 [recording.mix]
 microphone_gain_db = 0.0
+microphone_auto_level = true
 speaker_gain_db = 0.0
 microphone_priority = true
 ducking_db = 3.0
@@ -236,12 +237,23 @@ format independently. Recording precedes translation, synthesis and output gain.
 
 The two sources can have very different levels: a quiet microphone can become
 inaudible under louder music even though both original signals are present.
-**Recording → Recording balance** adjusts the saved WAV in mixed mode:
+**Recording → Recording balance** adjusts the saved WAV in either layout:
 
 - **Microphone level** and **Incoming audio level** independently adjust the original
   sources from −24 to +24 dB; both default to 0 dB. Increase the microphone gain
   when its original capture is too quiet. Positive gain also raises any noise
-  already captured by that microphone.
+  already captured by that microphone. In the four-channel layout, peak protection
+  applies the same gain to both channels of a boosted pair, independently of the
+  other source. A pair set to 0 dB retains its captured PCM samples exactly.
+- **Automatic microphone level** is available in the four-channel layout and
+  defaults to on. It gradually raises quieter microphone signals and reduces
+  louder ones, using a gain from −12 to +18 dB. Both microphone channels share
+  the same adjustment. The detector returns the gain toward 0 dB during quiet
+  gaps and leaves the incoming pair independent. It measures signal level,
+  so background noise above its detection threshold can affect the result.
+  Enabling it replaces the manual microphone gain and preserves its saved value.
+
+The mono layout also provides these controls:
 - **Keep microphone audible** is on by default. While the original microphone
   exceeds the activity threshold, Babel smoothly reduces the incoming source in
   the recording. It never mutes or gates the microphone. Attack, hold and release
@@ -267,11 +279,11 @@ unselected incoming source. No model, service or network request is involved.
 The mixer retains its fixed summing headroom: each selected source contributes
 0.5 when both are selected, or 1 with only one selected, before the recording
 gain and priority adjustments. With priority off and both gains at 0 dB, the
-previous fixed mix is preserved exactly. Added gains use linked peak protection
-with five milliseconds of lookahead inside the file worker, preserving relative
-levels without integer clipping. This introduces no latency into live routing.
-There is no automatic normalization of quiet microphone noise toward a target
-level. Turn priority off when you want fixed original-source levels.
+previous fixed mix is preserved exactly. In both layouts, boosts use five
+milliseconds of lookahead for peak protection inside the file worker. This
+introduces no latency into live routing.
+For fixed original levels, turn automatic microphone level off and set both
+gains to 0 dB. In the mono layout, also turn off microphone priority.
 
 The four-channel layout applies to new recordings. Disk use is approximately
 **461 MB per hour** in this layout and **115 MB per hour** for a mono mix.

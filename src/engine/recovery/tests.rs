@@ -182,6 +182,7 @@ async fn recording_recovery_keeps_original_lanes_in_separate_channels() {
 async fn verify_recording_recovery(layout: crate::config::RecordingLayout, frame: &[i16]) {
     let (directory, controller, mut archive) = fixture().await;
     archive.config.recording.layout = layout;
+    archive.config.recording.mix.microphone_auto_level = false;
     let mut expected = frame.repeat(320);
     if layout == crate::config::RecordingLayout::SeparateChannels {
         for (source, pair) in [

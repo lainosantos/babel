@@ -131,6 +131,7 @@ directory = "recordings"
 [recording.mix]
 # Saved WAV only: original live routing, STT and recent audio history stay unchanged.
 microphone_gain_db = 0.0 # -24..24 dB
+microphone_auto_level = true # Automatic microphone gain in the four-channel layout.
 speaker_gain_db = 0.0 # -24..24 dB
 microphone_priority = true
 ducking_db = 12.0 # Lower incoming audio by 0..30 dB during microphone activity.
