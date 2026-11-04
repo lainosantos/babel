@@ -182,17 +182,17 @@ This software-loopback probe does not establish Windows/macOS native latency.
 
 ## Local translation overload and recovery
 
-Portable Rust regressions cover a slow local inference request, replacement of
-old pending segments, expiration during silence, bounded synthesis backpressure,
-and speech resuming after overload. Other tests verify that provider task errors
+Portable Rust regressions cover slow local inference, preservation of accepted
+segments, idle boundaries, bounded synthesis backpressure, and speech resuming
+after overload. Other tests verify that provider task errors
 survive audio-channel closure, cancellation remains prompt, and live recognition
 warnings produce transcript gap markers without interrupting original transport.
 
 The native pipeline smoke uses the packaged Whisper, Qwen and Piper engines with
 synthetic Portuguese and English speech. It exercises two simultaneous routes,
-idle-to-speech transitions, accelerated continuous input, fresh speech after
-overload and cancellation. It never opens physical or virtual audio devices,
-reads user settings, or saves microphone/system audio:
+idle-to-speech transitions, 16 seconds of accelerated retained input per route,
+fresh speech after the backlog, and cancellation. It never opens physical or
+virtual audio devices, reads user settings, or saves microphone/system audio:
 
 ```sh
 cargo run --locked --example local_translation_smoke

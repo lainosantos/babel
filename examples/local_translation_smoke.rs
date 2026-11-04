@@ -58,7 +58,9 @@ fn ensure_running(workers: &mut JoinSet<Result<()>>) -> Result<()> {
 
 async fn send(route: &mut Route, samples: Vec<i16>) -> Result<()> {
     let size = samples.len();
-    timeout(Duration::from_secs(2), route.input.send(samples))
+    // Accepted originals apply backpressure while the bounded inference queue
+    // drains. Allow a complete local request rather than assuming live drops.
+    timeout(Duration::from_secs(30), route.input.send(samples))
         .await
         .context("Synthetic input stopped draining")?
         .context("Local route closed its synthetic input channel")?;
@@ -87,9 +89,9 @@ async fn utterance(route: &mut Route) -> Result<()> {
 }
 
 async fn stress(route: &mut Route) -> Result<()> {
-    // Deliver 64 seconds faster than real time. The live provider must shed
-    // excess work with a warning rather than close either live audio channel.
-    for second in 0..64 {
+    // Accelerate retained input beyond the bounded queue. The provider must
+    // preserve it with backpressure and keep both audio channels available.
+    for second in 0..16 {
         let samples = (0..RATE)
             .map(|index| route.speech[(second * RATE + index) % route.speech.len()])
             .collect();
@@ -281,11 +283,7 @@ async fn exercise(cfg: &AppConfig, cancel: CancellationToken) -> Result<()> {
     let [first, second] = &mut routes;
     tokio::try_join!(stress(first), stress(second))?;
     wait_audio(&routes, previous, &mut workers).await?;
-    ensure!(
-        routes.iter().all(|route| route.metrics.snapshot()[2] > 0),
-        "Stress did not exercise bounded overload warnings on both routes"
-    );
-    report("PASS accelerated continuous-input stress", &routes, started);
+    report("PASS accelerated retained-input stress", &routes, started);
 
     let started = Instant::now();
     let boundaries = routes

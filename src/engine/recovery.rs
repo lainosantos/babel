@@ -314,7 +314,9 @@ async fn replay(
         let usage = usage.clone();
         workers.spawn(async move {
             let (_devices, playback) = watch::channel(route.playback_device.clone());
-            translation::run(
+            // Explicit recovery owns a retained archive rather than live
+            // capture. Keep the full drain for this separately requested replay.
+            translation::run_retained(
                 config,
                 route,
                 origin,

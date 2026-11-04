@@ -33,7 +33,10 @@ pub(super) async fn run(
     mirror_metrics: Option<Arc<RouteMetrics>>,
     usage: watch::Receiver<audio::activity::EndpointUse>,
 ) -> Result<()> {
-    let result = run_inner(
+    let drain_timeout = (route.provider == "local" && !route.replay_translation_backlog)
+        .then(|| Duration::from_secs(cfg.providers.local.request_timeout_secs));
+    let originals = retained.clone();
+    let completion = run_retained(
         cfg,
         route,
         origin,
@@ -42,8 +45,11 @@ pub(super) async fn run(
         playback,
         mirror_metrics,
         usage,
-    )
-    .await;
+    );
+    let result = match drain_timeout {
+        Some(timeout) => complete_after_capture_stop(&originals, timeout, completion).await,
+        None => completion.await,
+    };
     metrics.recovery("translation", false);
     metrics.recovery_error(
         "translation",
@@ -56,8 +62,28 @@ pub(super) async fn run(
     result
 }
 
+/// Bound local live translation after an unexpected capture closure. Explicit
+/// Stop cancels the session model worker immediately. A timeout leaves
+/// unfinished work available for manual recovery.
+async fn complete_after_capture_stop<F>(
+    originals: &retained::RetainedSession,
+    timeout: Duration,
+    completion: F,
+) -> Result<()>
+where
+    F: Future<Output = Result<()>>,
+{
+    tokio::select! {
+        biased;
+        result = completion => result,
+        _ = async { originals.wait_capture_closed().await; tokio::time::sleep(timeout).await; } => {
+            bail!("Local translation did not finish within {} seconds after capture ended; original audio remains retained for recovery", timeout.as_secs());
+        }
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
-async fn run_inner(
+pub(super) async fn run_retained(
     cfg: AppConfig,
     route: RouteConfig,
     origin: TranscriptOrigin,
@@ -814,6 +840,78 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test(start_paused = true)]
+    async fn local_stop_deadline_cancels_only_translation_and_preserves_originals() {
+        let directory = tempfile::tempdir().unwrap();
+        let origin = Instant::now();
+        let store =
+            crate::retention::SessionRetention::create_in(directory.path(), "local-stop-deadline")
+                .await
+                .unwrap();
+        let originals =
+            retained::RetainedSession::new(store, origin, &tokio::runtime::Handle::current());
+        originals
+            .capture(
+                &crate::audio::PcmFrame {
+                    samples: vec![42; 160],
+                    sample_rate: INPUT_RATE,
+                    captured_at: origin,
+                },
+                TranscriptOrigin::Speaker,
+            )
+            .unwrap();
+        let translation_cancelled = CancellationToken::new();
+        let guard = translation_cancelled.clone().drop_guard();
+        let completion = async move {
+            let _guard = guard;
+            futures_util::future::pending::<Result<()>>().await
+        };
+        let finalizing =
+            complete_after_capture_stop(&originals, Duration::from_secs(30), completion);
+        tokio::pin!(finalizing);
+        assert!(futures_util::poll!(&mut finalizing).is_pending());
+        tokio::time::advance(Duration::from_secs(300)).await;
+        assert!(
+            futures_util::poll!(&mut finalizing).is_pending(),
+            "live inference must not use the Stop deadline"
+        );
+        originals.close_capture();
+        assert!(futures_util::poll!(&mut finalizing).is_pending());
+        tokio::time::advance(Duration::from_secs(31)).await;
+        assert!(
+            finalizing
+                .await
+                .unwrap_err()
+                .to_string()
+                .contains("original audio remains retained")
+        );
+        assert!(translation_cancelled.is_cancelled());
+        let mut reader = originals.reader(TranscriptOrigin::Speaker);
+        assert_eq!(reader.next().await.unwrap().unwrap().samples, vec![42; 160]);
+        assert!(!originals.status().missing_audio);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn local_stop_deadline_allows_a_complete_translation_tail() {
+        let directory = tempfile::tempdir().unwrap();
+        let store =
+            crate::retention::SessionRetention::create_in(directory.path(), "local-stop-tail")
+                .await
+                .unwrap();
+        let originals = retained::RetainedSession::new(
+            store,
+            Instant::now(),
+            &tokio::runtime::Handle::current(),
+        );
+        originals.close_capture();
+        complete_after_capture_stop(&originals, Duration::from_secs(30), async {
+            tokio::time::sleep(Duration::from_secs(29)).await;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    }
 
     #[tokio::test]
     async fn active_translation_waits_for_reselection_and_stop_parks_an_unselected_output() {

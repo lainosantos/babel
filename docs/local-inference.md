@@ -247,11 +247,11 @@ including translated playback. Babel saves the recording and text already
 received. Original audio for unfinished processing remains available for
 explicit recovery while Babel stays open.
 
-Live inference overload keeps the session active: old pending speech is skipped
-with a visible processing warning so recent speech can continue. This can leave
-gaps in translation or live transcription on slower hardware; transcription
-marks those gaps. Retained-history transcription waits for all segments instead.
-Service failures remain errors and include the failed processing stage.
+Local translation preserves accepted speech in bounded inference queues and
+backpressures its retained-input producer when processing falls behind. Original
+audio routing continues independently. This can increase translation delay on
+slower hardware; it does not silently discard accepted segments. Service failures
+remain errors and include the failed processing stage.
 
 Whisper transcription saves original text without diarization or word timestamps.
 Timing refers to captured segments. See [transcription](transcription.md) and
