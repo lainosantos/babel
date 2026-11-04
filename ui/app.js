@@ -723,7 +723,15 @@
     updateHistoryControls(unavailable, running);
     byId('interface-language').disabled = state.busy || state.syncing || !state.authenticated;
     byId('settings').disabled = running || unavailable;
-    for (const id of ['microphone-device-fields', 'speaker-device-fields', 'routing-tuning-fields']) byId(id).disabled = running || unavailable;
+    for (const id of ['microphone-device-fields', 'speaker-device-fields']) byId(id).disabled = unavailable;
+    for (const id of ['microphone-playback_device', 'speaker-capture_device', 'routing-tuning-fields']) byId(id).disabled = running || unavailable;
+    byId('microphone-capture_device').disabled = running && microphoneUsesSpeaker();
+    for (const option of byId('microphone-capture_device').options) {
+      if (option.dataset.microphoneSource || !option.value) option.disabled = running;
+    }
+    for (const option of byId('speaker-playback_device').options) {
+      if (!option.value || option.dataset.deviceVirtual === 'true' || option.dataset.deviceUnavailable === 'true') option.disabled = running;
+    }
     byId('session-name').disabled = running || unavailable;
     byId('save').disabled = running || unavailable || (!state.dirty && state.status?.local_runtime?.phase !== 'error') || state.configConflict;
     byId('start').disabled = running || unavailable || state.configConflict || !processingSelected;
@@ -763,7 +771,7 @@
       : state.configConflict
         ? t("ui.settings_changed_outside_this_dashboard_reload_saved_settings_before_saving")
       : running
-        ? t("ui.session_active_end_it_to_change_settings_physical_devices_can_be_switched_f")
+        ? t('routing.session_active')
       : state.status?.finalizing
         ? t('session.finalizing_hint')
       : state.status?.local_runtime?.phase === 'preparing'
@@ -1063,11 +1071,56 @@
     updateControls();
   }
 
+  function applyPhysicalDevice(direction, device) {
+    const input = direction === 'input';
+    const route = input ? 'microphone' : 'speaker';
+    const field = input ? 'capture_device' : 'playback_device';
+    const confirmed = state.config[route][field];
+    const restoreSelection = () => {
+      if (input) {
+        microphoneDraft.source = state.config.audio.microphone_source;
+        microphoneDraft.device = confirmed;
+        renderMicrophoneSources();
+        updateProviderControls();
+      } else {
+        byId('speaker-playback_device').value = confirmed;
+        renderOutputVolume();
+      }
+    };
+    if (device === confirmed) {
+      restoreSelection();
+      updateControls();
+      return;
+    }
+    return action(async () => {
+      try {
+        if (state.configConflict || state.configRevision === null) throw new Error(t("ui.reload_saved_settings_before_continuing"));
+        const result = await api('/physical-device', { method: 'POST', body: { direction, device }, revision: state.configRevision, snapshot: true });
+        state.configRevision = result.revision;
+        state.config[route][field] = device;
+      } catch (error) {
+        restoreSelection();
+        throw error;
+      }
+      if (input) {
+        microphoneDraft.source = 'physical_microphone';
+        microphoneDraft.device = device;
+        updateProviderControls();
+      }
+      renderStatus(await api('/status'));
+    });
+  }
+
   byId('microphone-capture_device').addEventListener('input', event => {
     const select = event.target;
     if (select.matches(':disabled')) return;
     const option = select.selectedOptions[0];
     if (!option || option.disabled) return;
+    if (option.dataset.physicalDevice && option.dataset.deviceUnavailable !== 'true'
+        && state.config.audio.microphone_source === 'physical_microphone') {
+      applyPhysicalDevice('input', option.dataset.physicalDevice);
+      return;
+    }
     if (option.dataset.microphoneSource) microphoneDraft.source = option.dataset.microphoneSource;
     else { microphoneDraft.source = 'physical_microphone'; microphoneDraft.device = option.dataset.physicalDevice || ''; }
     state.dirty = true;
@@ -1096,12 +1149,21 @@
   }));
   form.addEventListener('input', (event) => {
     if (!event.target.matches('[data-field]')) return;
+    if (event.target.id === 'speaker-playback_device') {
+      const select = event.target;
+      const option = select.selectedOptions[0];
+      if (select.matches(':disabled') || !option || option.disabled) return;
+      renderOutputVolume();
+      if (state.devices.some(device => device.direction === 'output' && !device.is_virtual && device.id === select.value)) {
+        applyPhysicalDevice('output', select.value);
+        return;
+      }
+    }
     state.dirty = true;
     updateGainLabels();
     if (['provider', 'enabled', 'engine', 'model', 'microphone_source'].includes(event.target.dataset.field) || event.target.dataset.section === 'transcription' || event.target.dataset.transcriptionProfile || event.target.dataset.profile === 'local') updateProviderControls();
     if (event.target.dataset.section === 'local_runtime') validateLocalDirectory();
     if (event.target.id === 'audio-quality') updateQualityHint();
-    if (event.target.id === 'speaker-playback_device') renderOutputVolume();
     if (['files-base_path', 'transcription-directory', 'recording-directory'].includes(event.target.id)) scheduleFilePathPreview();
     updateControls();
   });

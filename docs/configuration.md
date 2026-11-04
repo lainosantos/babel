@@ -678,9 +678,12 @@ occurs before translation and translated audio gain.
 You can record without transcribing, transcribe without recording, or enable both.
 Neither option depends on `microphone.enabled` or `speaker.enabled`: those fields
 enable only translation. A recording session without transcription or translation
-does not require an AI key. Switching physical devices through the tray retains
-the same session file, with a possible gap during switching. For format, mixing,
-disk failures, and limits, see [recording originals](recording.md).
+does not require an AI key. In **Routing**, selecting a physical microphone,
+headphones, or speakers applies the device immediately and saves that selection
+automatically. The same controls are available during a session using those
+physical routes. The tray can also switch physical devices. The session keeps
+writing to the same file, with a possible gap during switching. For format,
+mixing, disk failures, and limits, see [recording originals](recording.md).
 
 ## Tray and shutdown
 

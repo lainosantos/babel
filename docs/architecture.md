@@ -301,7 +301,7 @@ routes with a diagnostic rather than falling back to continuous capture.
 These queries do not capture audio or run in audio callbacks. Detection adds a
 small window when starting/stopping routing; it is not an instantaneous barrier.
 
-Physical microphone/output selections are updated through the tray. In original
+The dashboard and tray use the same live physical device selection. In original
 routing, changing capture closes that direction's streams, queries the new rate
 and channel count, and reopens capture/playback together while retaining the
 processing copy and files. Changing output alone replaces its stream, converting

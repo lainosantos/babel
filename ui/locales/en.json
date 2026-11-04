@@ -204,7 +204,7 @@
   "ui.settings_saved": "Settings saved",
   "ui.reopen_the_full_address_shown_in_the_terminal_to_connect_this_dashboard": "Reopen the full address shown in the terminal to connect this dashboard.",
   "ui.settings_changed_outside_this_dashboard_reload_saved_settings_before_saving": "Settings changed outside this dashboard. Reload saved settings before saving or starting.",
-  "ui.session_active_end_it_to_change_settings_physical_devices_can_be_switched_f": "Session active. End it to change settings; physical devices can be switched from the tray.",
+  "routing.session_active": "Session active. You can switch physical devices in Routing. End the session to edit the other routing settings.",
   "ui.original_audio_routing_works_without_a_session_enable_translation_transcrip": "Original audio routing works without a session. Enable translation, transcription or recording to start a session.",
   "ui.you_have_unsaved_settings_starting_the_session_also_saves_them": "You have unsaved settings. Starting the session also saves them.",
   "ui.choose_which_features_to_use_and_start_a_session_to_translate_transcribe_or": "Choose which features to use and start a session to translate, transcribe or record.",

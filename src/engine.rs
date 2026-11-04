@@ -751,7 +751,21 @@ impl Controller {
         direction: DeviceDirection,
         id: String,
     ) -> Result<()> {
+        self.select_physical_device_if_revision(direction, id, None)
+            .await
+            .map(|_| ())
+    }
+
+    pub(crate) async fn select_physical_device_if_revision(
+        &self,
+        direction: DeviceDirection,
+        id: String,
+        revision: Option<u64>,
+    ) -> Result<u64> {
         let mut state = self.state.lock().await;
+        if revision.is_some_and(|expected| expected != state.config_revision) {
+            return Err(ConfigurationChanged.into());
+        }
         reap(&mut state).await;
         let devices = audio::devices().await?;
         let route_was_configured = match direction {
@@ -760,6 +774,7 @@ impl Controller {
         };
         let mut config = state.config.clone();
         select_physical(&mut config, direction, &id, &devices)?;
+        config.validate_routing()?;
         config.save(&self.path)?;
         state.config = config;
         cancel_pending_start(&mut state);
@@ -775,7 +790,7 @@ impl Controller {
         if direction == DeviceDirection::Input && state.config.microphone_uses_speaker() {
             // Remember the physical selection for a later source change. The
             // active mirror is independent and must not restart speaker capture.
-            return Ok(());
+            return Ok(state.config_revision);
         }
         if direction == DeviceDirection::Output {
             for pending in &state.finalizing {
@@ -793,7 +808,10 @@ impl Controller {
         } else if !route_was_configured {
             // Configuring the second physical device must also start its bridge,
             // even if the other direction was already routing original audio.
-            stop_routing(&mut state).await?;
+            state.routing_error = stop_routing(&mut state)
+                .await
+                .err()
+                .map(|error| format!("{error:#}"));
             state.routing_retry_at = Instant::now();
             maintain_routing(&mut state).await;
         } else if let Some(routing) = &state.routing {
@@ -806,7 +824,7 @@ impl Controller {
             state.routing_retry_at = Instant::now();
             maintain_routing(&mut state).await;
         }
-        Ok(())
+        Ok(state.config_revision)
     }
     pub async fn start(&self) -> Result<()> {
         self.start_named(None).await
@@ -1050,7 +1068,7 @@ fn select_physical(
         devices
             .iter()
             .any(|device| device.id == id && device.direction == direction && !device.is_virtual),
-        "Physical device unavailable; refresh the list in the tray"
+        "Physical device unavailable; refresh the device list"
     );
     match direction {
         DeviceDirection::Input => config.microphone.capture_device = id.into(),

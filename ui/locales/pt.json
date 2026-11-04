@@ -204,7 +204,7 @@
   "ui.settings_saved": "Configuração salva",
   "ui.reopen_the_full_address_shown_in_the_terminal_to_connect_this_dashboard": "Reabra o endereço completo exibido no terminal para conectar este painel.",
   "ui.settings_changed_outside_this_dashboard_reload_saved_settings_before_saving": "A configuração mudou fora deste painel. Recarregue os ajustes salvos antes de salvar ou iniciar.",
-  "ui.session_active_end_it_to_change_settings_physical_devices_can_be_switched_f": "Sessão ativa. Encerre para alterar os ajustes; dispositivos físicos podem ser trocados pela bandeja.",
+  "routing.session_active": "Sessão ativa. Você pode trocar dispositivos físicos em Roteamento. Encerre a sessão para editar os demais ajustes de roteamento.",
   "ui.original_audio_routing_works_without_a_session_enable_translation_transcrip": "O roteamento original funciona sem sessão. Ative tradução, transcrição ou gravação para iniciar uma sessão.",
   "ui.you_have_unsaved_settings_starting_the_session_also_saves_them": "Há ajustes pendentes. Iniciar a sessão também salva a configuração.",
   "ui.choose_which_features_to_use_and_start_a_session_to_translate_transcribe_or": "Escolha quais recursos usar e inicie uma sessão para traduzir, transcrever ou gravar.",

@@ -75,6 +75,7 @@ async function page(t, options = {}) {
   let routingError = null;
   let outputVolume = options.outputVolume;
   const outputVolumeRequest = options.outputVolumeRequest;
+  const physicalDeviceRequest = options.physicalDeviceRequest;
   let statusResponse = options.statusResponse;
   let sessionName = null;
   let sessionId = null;
@@ -133,6 +134,18 @@ async function page(t, options = {}) {
       value = { ...historySession, history: audioHistory, local_runtime: localRuntime, running, finalizing: finalizingSessions.length > 0, finalizing_sessions: finalizingSessions, routing_active: routingActive, routing_error: routingError, output_volume: outputVolume, config_revision: revision, session_name: sessionName, session_id: sessionId, microphone: route('microphone'), speaker: route('speaker'), last_error: null };
       if (statusResponse) await statusResponse(value);
     }
+    else if (parsed.pathname === '/api/physical-device') {
+      if (physicalDeviceRequest) {
+        const response = await physicalDeviceRequest(body);
+        if (response instanceof Response) return response;
+      }
+      if (body.direction === 'input') config.microphone.capture_device = body.device;
+      else {
+        config.speaker.playback_device = body.device;
+        if (outputVolume) outputVolume = { ...outputVolume, device: body.device };
+      }
+      revision++;
+    }
     else if (parsed.pathname === '/api/output-volume') {
       if (outputVolumeRequest) { const response = await outputVolumeRequest(body); if (response instanceof Response) return response; }
       outputVolume = { ...outputVolume, ...body };
@@ -156,7 +169,7 @@ async function page(t, options = {}) {
     }
     else if (parsed.pathname === '/api/credentials') (body.storage === 'permanent' ? permanentCredentials : credentials).add(body.api_key_env);
     else if (parsed.pathname === '/api/credentials/clear') (body.storage === 'permanent' ? permanentCredentials : credentials).delete(body.api_key_env);
-    return new Response(JSON.stringify(value), { headers: { 'Content-Type': 'application/json', ...(parsed.pathname === '/api/config' ? { ETag: `"${revision}"` } : {}) } });
+    return new Response(JSON.stringify(value), { headers: { 'Content-Type': 'application/json', ...(['/api/config', '/api/physical-device'].includes(parsed.pathname) ? { ETag: `"${revision}"` } : {}) } });
   };
   window.eval(fs.readFileSync(path.join(__dirname, 'i18n.js'), 'utf8'));
   window.eval(fs.readFileSync(path.join(__dirname, 'app.js'), 'utf8'));
@@ -2183,7 +2196,7 @@ test('incoming audio after translation mirrors speaker processing without enabli
 });
 
 
-test('the unified source list preserves dirty physical drafts across speaker choices, refreshes and language changes', async t => {
+test('the unified source list remembers the physical selection across speaker choices, refreshes and language changes', async t => {
   const p = await page(t, { language: 'en', extraInputDevices: [{ id: 'physical-mic-two', name: 'USB microphone', direction: 'input', is_virtual: false }, { id: 'other-monitor', name: 'Other virtual monitor', direction: 'input', is_virtual: true }] });
   const source = p.byId('microphone-capture_device');
   assert.equal(source.hasAttribute('data-field'), false, 'source tokens are never copied to raw config by generic field collection');
@@ -2192,8 +2205,9 @@ test('the unified source list preserves dirty physical drafts across speaker cho
   assert.equal([...source.options].some(option => ['babel_speaker.monitor', 'other-monitor'].includes(option.value)), false);
   assert.equal([...p.byId('speaker-capture_device').options].some(option => option.value === 'babel_speaker.monitor'), true, 'the output capture selector is unchanged');
   p.set('microphone-capture_device', 'physical-mic-two');
+  await settle(() => p.config().microphone.capture_device === 'physical-mic-two' && !source.matches(':disabled'));
   const originalToken = selectSpeakerSource(p, 'speaker_original');
-  assert.equal(p.config().microphone.capture_device, 'physical-mic', 'unsaved physical drafts do not change persisted settings');
+  assert.equal(p.config().audio.microphone_source, 'physical_microphone', 'the mirror choice is a draft');
   p.byId('refresh-devices').click(); await settle(() => !p.byId('refresh-devices').disabled);
   assert.equal(selectedMicrophoneSource(p), 'speaker_original');
   p.set('interface-language', 'pt'); p.byId('interface-language').dispatchEvent(new p.window.Event('change', { bubbles: true }));
@@ -2335,7 +2349,8 @@ test('physical output volume remains usable during a session without saving conf
   assert.equal(p.byId('output-volume').matches(':disabled'), false);
   assert.ok(p.byId('output-volume').closest('.speaker.routing-channel'));
   assert.equal(p.byId('output-volume').closest('#settings'), null);
-  for (const id of ['microphone-capture_device', 'microphone-playback_device', 'speaker-capture_device', 'speaker-playback_device', 'audio-quality', 'audio-capture_queue_ms', 'audio-playback_queue_ms', 'audio-device_latency_ms']) assert.equal(p.byId(id).matches(':disabled'), true, id);
+  for (const id of ['microphone-playback_device', 'speaker-capture_device', 'audio-quality', 'audio-capture_queue_ms', 'audio-playback_queue_ms', 'audio-device_latency_ms']) assert.equal(p.byId(id).matches(':disabled'), true, id);
+  for (const id of ['microphone-capture_device', 'speaker-playback_device']) assert.equal(p.byId(id).matches(':disabled'), false, id);
   assert.equal(p.byId('output-volume').value, '50');
   const before = p.calls.length;
   p.byId('output-volume').value = '100';
@@ -2361,22 +2376,58 @@ test('unsupported virtual volume exposes the physical control and diagnostic lim
   assert.match(p.byId('output-volume-hint').textContent, /physical speaker/i);
 });
 
-test('an unsaved speaker selection immediately identifies the actual volume target', async t => {
-  const p = await page(t, { language: 'en', outputVolume: { device: 'physical-speaker', level: 0.5, muted: false, synchronized: true } });
-  const selector = p.byId('speaker-playback_device');
+test('physical routing changes during a session without saving and volume follows the new output', async t => {
+  const p = await page(t, {
+    language: 'en',
+    outputVolume: { device: 'physical-speaker', level: 0.5, muted: false, synchronized: true },
+    extraInputDevices: [
+      { id: 'other-microphone', name: 'Other microphone', direction: 'input', is_virtual: false },
+      { id: 'other-headphones', name: 'Other headphones', direction: 'output', is_virtual: false },
+    ],
+  });
+  p.byId('start').click();
+  await settle(() => !p.byId('stop').hidden && !p.byId('stop').disabled);
+  p.set('microphone-capture_device', 'other-microphone');
+  await settle(() => p.config().microphone.capture_device === 'other-microphone' && !p.byId('stop').disabled);
+  p.set('speaker-playback_device', 'other-headphones');
+  await settle(() => p.config().speaker.playback_device === 'other-headphones' && !p.byId('stop').disabled);
+  assert.equal(p.config().microphone.playback_device, 'babel_mic_bus');
+  assert.equal(p.config().speaker.capture_device, 'babel_speaker.monitor');
+  assert.equal(p.calls.filter(call => call.path === '/api/start').length, 1);
+  assert.equal(p.calls.some(call => call.path === '/api/stop' || call.path === '/api/config' && call.options.method === 'PUT'), false);
+  assert.deepEqual(p.calls.filter(call => call.path === '/api/physical-device').map(call => call.body), [
+    { direction: 'input', device: 'other-microphone' },
+    { direction: 'output', device: 'other-headphones' },
+  ]);
   assert.equal(p.byId('output-volume-device').hidden, true);
-  selector.add(new p.window.Option('Other headphones', 'other-headphones'));
-  selector.value = 'other-headphones';
-  selector.dispatchEvent(new p.window.Event('change', { bubbles: true }));
-  assert.equal(p.byId('output-volume-device').hidden, false);
-  assert.ok(p.byId('output-volume-device').textContent);
-  assert.notEqual(p.byId('output-volume-device').textContent, 'Other headphones');
   p.byId('output-mute').click();
   await settle(() => p.calls.some(call => call.path === '/api/output-volume'));
-  assert.equal(p.calls.find(call => call.path === '/api/output-volume').body.device, 'physical-speaker');
-  selector.value = 'physical-speaker';
-  selector.dispatchEvent(new p.window.Event('input', { bubbles: true }));
-  assert.equal(p.byId('output-volume-device').hidden, true);
+  assert.equal(p.calls.find(call => call.path === '/api/output-volume').body.device, 'other-headphones');
+});
+
+test('a rejected device change restores the confirmed output and preserves a settings draft', async t => {
+  let rejected = true;
+  const p = await page(t, {
+    language: 'en',
+    extraInputDevices: [{ id: 'other-headphones', name: 'Other headphones', direction: 'output', is_virtual: false }],
+    physicalDeviceRequest: () => rejected && new Response(JSON.stringify({ error: 'Output disconnected' }), {
+      status: 400, headers: { 'Content-Type': 'application/json' },
+    }),
+  });
+  p.set('speaker-target_language', 'de-DE');
+  p.set('speaker-playback_device', 'other-headphones');
+  await settle(() => !p.byId('error').hidden);
+  assert.equal(p.byId('error').textContent, 'Output disconnected');
+  assert.equal(p.byId('speaker-playback_device').value, 'physical-speaker');
+  assert.equal(p.byId('speaker-target_language').value, 'de-DE');
+  assert.equal(p.byId('save').disabled, false);
+  rejected = false;
+  p.set('speaker-playback_device', 'other-headphones');
+  await settle(() => p.config().speaker.playback_device === 'other-headphones' && !p.byId('save').disabled);
+  assert.notEqual(p.config().speaker.target_language, 'de-DE');
+  p.byId('save').click();
+  await settle(() => p.config().speaker.target_language === 'de-DE' && p.byId('save').disabled);
+  assert.equal(p.config().speaker.playback_device, 'other-headphones');
 });
 
 

@@ -135,6 +135,7 @@ fn router(state: DashboardState) -> Router {
         .route("/retention", get(retained_sessions))
         .route("/retention/recover", post(recover_retained_session))
         .route("/devices", get(devices))
+        .route("/physical-device", post(set_physical_device))
         .route("/output-volume", post(set_output_volume))
         .route("/start", post(start))
         .route("/stop", post(stop))
@@ -638,6 +639,37 @@ async fn status(State(state): State<DashboardState>) -> impl IntoResponse {
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
+struct PhysicalDeviceRequest {
+    direction: crate::audio::DeviceDirection,
+    device: String,
+}
+
+async fn set_physical_device(
+    State(state): State<DashboardState>,
+    headers: HeaderMap,
+    Json(request): Json<PhysicalDeviceRequest>,
+) -> Response {
+    let revision = match expected_revision(&headers) {
+        Ok(revision) => revision,
+        Err(message) => return api_error(StatusCode::BAD_REQUEST, message),
+    };
+    let _guard = state.mutations.lock().await;
+    match state
+        .controller
+        .select_physical_device_if_revision(request.direction, request.device, revision)
+        .await
+    {
+        Ok(revision) => (
+            [(header::ETAG, format!("\"{revision}\""))],
+            Json(json!({ "ok": true })),
+        )
+            .into_response(),
+        Err(error) => operation_result(Err(error)),
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct OutputVolumeRequest {
     device: String,
     level: f32,
@@ -1136,6 +1168,7 @@ mod tests {
             ("GET", "/api/status"),
             ("GET", "/api/devices"),
             ("POST", "/api/output-volume"),
+            ("POST", "/api/physical-device"),
             ("PUT", "/api/config"),
             ("POST", "/api/start"),
             ("POST", "/api/stop"),
@@ -1477,7 +1510,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn configuration_etags_protect_save_and_start_against_concurrent_tray_changes() {
+    async fn configuration_etags_protect_dashboard_changes_against_concurrent_tray_changes() {
         let directory = tempfile::tempdir().unwrap();
         let controller = Arc::new(
             Controller::new(AppConfig::default(), directory.path().join("config.toml")).unwrap(),
@@ -1552,6 +1585,11 @@ mod tests {
                 "POST",
                 "/api/start",
                 json!({"name":"Named session"}).to_string(),
+            ),
+            (
+                "POST",
+                "/api/physical-device",
+                json!({"direction":"input","device":"stale-device"}).to_string(),
             ),
         ] {
             let response = app
