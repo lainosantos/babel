@@ -1,10 +1,10 @@
 //! Per-user login startup. Never starts translation or stores authentication data.
 use anyhow::{Context, Result, ensure};
 use serde::Serialize;
-use std::{
-    io::ErrorKind,
-    path::{Path, PathBuf},
-};
+use std::path::{Path, PathBuf};
+
+#[cfg(any(target_os = "linux", target_os = "macos", test))]
+use std::io::ErrorKind;
 
 pub const OWNER: &str = "org.babel.audio.autostart.v1";
 #[cfg(any(target_os = "linux", target_os = "macos", test))]
@@ -14,11 +14,16 @@ const MAX_ENTRY_BYTES: u64 = 65_536;
 static MUTATION: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 #[cfg(target_os = "linux")]
 mod systemd;
+#[cfg(any(target_os = "windows", test))]
+mod windows;
+#[cfg(target_os = "windows")]
+use windows::{platform_set, platform_status};
 
 #[derive(Debug, Clone, Serialize)]
 pub struct AutostartStatus {
     pub enabled: bool,
     pub supported: bool,
+    pub migration_available: bool,
     pub description: String,
     pub method: &'static str,
     pub entry_path: Option<String>,
@@ -41,6 +46,7 @@ pub async fn set_enabled(enabled: bool, config_path: &Path) -> Result<AutostartS
         .context("Failed to configure login startup")?
 }
 
+#[derive(Clone)]
 struct LaunchSpec {
     executable: PathBuf,
     config: PathBuf,
@@ -289,6 +295,7 @@ fn file_status() -> Result<AutostartStatus> {
     Ok(AutostartStatus {
         enabled,
         supported: true,
+        migration_available: false,
         method: if cfg!(target_os = "linux") {
             "xdg"
         } else {
@@ -312,125 +319,6 @@ fn platform_set(enabled: bool, config: &Path) -> Result<AutostartStatus> {
         set_file(&path, Some(&content))?;
     } else {
         set_file(&path, None)?;
-    }
-    platform_status()
-}
-
-#[cfg(any(target_os = "windows", test))]
-fn windows_arg(value: &str) -> String {
-    let mut output = String::from("\"");
-    let mut slashes = 0;
-    for ch in value.chars() {
-        if ch == '\\' {
-            slashes += 1;
-            continue;
-        }
-        if ch == '"' {
-            output.extend(std::iter::repeat_n('\\', slashes * 2 + 1));
-        } else {
-            output.extend(std::iter::repeat_n('\\', slashes));
-        }
-        slashes = 0;
-        output.push(ch);
-    }
-    output.extend(std::iter::repeat_n('\\', slashes * 2));
-    output.push('"');
-    output
-}
-#[cfg(any(target_os = "windows", test))]
-fn windows_command(spec: &LaunchSpec) -> Result<String> {
-    ensure!(
-        spec.tray_launcher,
-        "Windows startup requires babel-tray.exe"
-    );
-    let mut args = spec.args()?;
-    args.extend([
-        "--working-dir".into(),
-        path_text(&spec.working_dir)?.into(),
-        "--autostart-owner".into(),
-        OWNER.into(),
-    ]);
-    let command = args
-        .iter()
-        .map(|arg| windows_arg(arg))
-        .collect::<Vec<_>>()
-        .join(" ");
-    ensure!(
-        command.encode_utf16().count() <= 260,
-        "The command exceeds the Windows Run limit of 260 characters; install Babel and its configuration at shorter paths"
-    );
-    Ok(command)
-}
-#[cfg(any(target_os = "windows", test))]
-fn owned_windows_command(command: &str) -> bool {
-    command.ends_with(&format!(
-        "{} {}",
-        windows_arg("--autostart-owner"),
-        windows_arg(OWNER)
-    )) && command.starts_with('"')
-        && command.contains("babel-tray.exe\" \"--config\"")
-}
-
-#[cfg(target_os = "windows")]
-const RUN_KEY: &str = r"Software\Microsoft\Windows\CurrentVersion\Run";
-#[cfg(target_os = "windows")]
-const RUN_VALUE: &str = "BabelAudio";
-#[cfg(target_os = "windows")]
-fn registry_entry() -> Result<Option<String>> {
-    let key = match winreg::HKCU.open_subkey(RUN_KEY) {
-        Ok(key) => key,
-        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(None),
-        Err(error) => return Err(error).context("Could not read Windows startup settings"),
-    };
-    match key.get_value::<String, _>(RUN_VALUE) {
-        Ok(command) => {
-            ensure!(
-                owned_windows_command(&command),
-                "The Windows BabelAudio entry does not belong to Babel; nothing was changed"
-            );
-            Ok(Some(command))
-        }
-        Err(error) if error.kind() == ErrorKind::NotFound => Ok(None),
-        Err(error) => Err(error).context("Could not read the Windows BabelAudio entry"),
-    }
-}
-#[cfg(target_os = "windows")]
-fn platform_status() -> Result<AutostartStatus> {
-    let enabled = registry_entry()?.is_some();
-    Ok(AutostartStatus {
-        enabled,
-        supported: true,
-        method: "registry_run",
-        entry_path: Some(format!("HKCU\\{RUN_KEY}\\{RUN_VALUE}")),
-        description: if enabled {
-            "The tray is registered for next login. Translation will remain stopped; Windows may block startup applications in Settings.".into()
-        } else {
-            "Login startup is disabled for this user.".into()
-        },
-    })
-}
-#[cfg(target_os = "windows")]
-fn platform_set(enabled: bool, config: &Path) -> Result<AutostartStatus> {
-    let existing = registry_entry()?;
-    let command = if enabled {
-        Some(windows_command(&LaunchSpec::current(config)?)?)
-    } else {
-        None
-    };
-    ensure!(
-        registry_entry()? == existing,
-        "The Windows entry changed during the operation; try again"
-    );
-    if let Some(command) = command {
-        let (key, _) = winreg::HKCU
-            .create_subkey(RUN_KEY)
-            .context("Could not open Windows startup settings for writing")?;
-        key.set_value(RUN_VALUE, &command)
-            .context("Could not save Windows startup settings")?;
-    } else if existing.is_some() {
-        let key = winreg::HKCU.open_subkey_with_flags(RUN_KEY, winreg::enums::KEY_SET_VALUE)?;
-        key.delete_value(RUN_VALUE)
-            .context("Could not remove the Windows startup entry")?;
     }
     platform_status()
 }
@@ -479,32 +367,6 @@ mod tests {
         assert!(entry.contains("<key>RunAtLoad</key><true/>"));
         assert!(entry.contains("<key>KeepAlive</key><false/>"));
         assert!(!entry.contains("<string>run</string>") && !entry.contains("EnvironmentVariables"));
-    }
-    #[test]
-    fn windows_arguments_escape_quotes_and_trailing_backslashes() {
-        assert_eq!(
-            windows_arg(r"C:\Program Files\Babel\"),
-            "\"C:\\Program Files\\Babel\\\\\""
-        );
-        assert_eq!(windows_arg("a\\\"b"), "\"a\\\\\\\"b\"");
-        let input = LaunchSpec {
-            executable: r"C:\Babel\babel-tray.exe".into(),
-            config: r"C:\Babel\a b.toml".into(),
-            working_dir: r"C:\Babel".into(),
-            tray_launcher: true,
-        };
-        let command = windows_command(&input).unwrap();
-        assert!(owned_windows_command(&command));
-        assert!(!owned_windows_command(&format!("{command} extra")));
-        assert!(!owned_windows_command(
-            &command.replace("babel-tray.exe", "other.exe")
-        ));
-        assert!(command.contains("\"--working-dir\" \"C:\\Babel\""));
-        assert!(command.contains("\"--port\" \"0\""));
-        assert!(!command.contains("\"serve\"") && !command.contains("\"run\""));
-        let mut too_long = input;
-        too_long.config = format!("C:\\{}\\config.toml", "x".repeat(261)).into();
-        assert!(windows_command(&too_long).is_err());
     }
     #[test]
     fn isolated_file_lifecycle_is_idempotent_and_refuses_foreign_entries() {

@@ -18,6 +18,7 @@ impl Fixture {
             package_uid: std::fs::metadata(&package).unwrap().uid(),
             allow_user_service: true,
             package,
+            local: root.join("home/Área de trabalho/systemd/user").join(UNIT),
             desktop: root.join("home/Área de trabalho/autostart/org.babel.audio.desktop"),
             dropin: root
                 .join("home/Área de trabalho/systemd/user/org.babel.audio.service.d/50-babel.conf"),
@@ -78,8 +79,14 @@ impl Manager for Fake<'_> {
                 let fragment = if self.foreign_fragment {
                     self.paths.desktop.as_path()
                 } else {
-                    self.paths.package.as_path()
+                    let Some(fragment) = self.paths.fragment()? else {
+                        return Ok("not-found\n".into());
+                    };
+                    fragment
                 };
+                if args.contains(&"--value") {
+                    return Ok("loaded\n".into());
+                }
                 let mut dropins = if self.paths.dropin.exists() {
                     format!("\"{}\"", self.paths.dropin.display())
                 } else {
@@ -107,7 +114,7 @@ impl Manager for Fake<'_> {
             "enable" => {
                 std::fs::create_dir_all(self.paths.wanted.parent().unwrap())?;
                 if !self.paths.wanted.exists() {
-                    symlink(&self.paths.package, &self.paths.wanted)?;
+                    symlink(self.paths.fragment()?.unwrap(), &self.paths.wanted)?;
                 }
                 if self.fail_enable {
                     self.fail_enable = false;
@@ -174,6 +181,48 @@ fn inactive_graphical_target_is_detected_and_existing_service_is_not_hidden() {
 }
 
 #[test]
+fn portable_tray_installs_a_user_unit_and_migrates_xdg_startup() {
+    let f = Fixture::new();
+    std::fs::remove_file(&f.paths.package).unwrap();
+    let mut spec = f.spec();
+    spec.executable = f._temp.path().join("Babel $HOME% portable/babel");
+    std::fs::create_dir_all(spec.executable.parent().unwrap()).unwrap();
+    std::fs::write(spec.executable.with_file_name("babel-tray"), "").unwrap();
+    set_file(&f.paths.desktop, Some(&desktop_entry(&spec).unwrap())).unwrap();
+    let mut manager = Fake::new(&f.paths);
+    let status = apply_service(&f.paths, &mut manager, true, Some(&spec))
+        .unwrap()
+        .unwrap();
+    assert!(status.enabled && status.method == "systemd_user");
+    assert_eq!(std::fs::read_link(&f.paths.wanted).unwrap(), f.paths.local);
+    assert!(!f.paths.desktop.exists());
+    let dropin = read_owned_file(&f.paths.dropin).unwrap().unwrap();
+    assert!(dropin.contains("ExecStart=:/usr/bin/env --"));
+    assert!(dropin.contains("Babel $HOME%% portable/babel-tray"));
+    let status = apply_service(&f.paths, &mut manager, false, None)
+        .unwrap()
+        .unwrap();
+    assert!(!status.enabled && !f.paths.wanted.exists());
+}
+
+#[test]
+fn portable_install_refuses_foreign_units_and_rolls_back_failed_enable() {
+    let f = Fixture::new();
+    std::fs::remove_file(&f.paths.package).unwrap();
+    let mut spec = f.spec();
+    spec.executable = f._temp.path().join("babel-tray");
+    std::fs::write(&spec.executable, "").unwrap();
+    let mut manager = Fake::new(&f.paths);
+    manager.foreign_fragment = true;
+    assert!(apply_service(&f.paths, &mut manager, true, Some(&spec)).is_err());
+    assert!(!f.paths.local.exists());
+    manager.foreign_fragment = false;
+    manager.fail_enable = true;
+    assert!(apply_service(&f.paths, &mut manager, true, Some(&spec)).is_err());
+    assert!(!f.paths.local.exists() && !f.paths.dropin.exists() && !f.paths.wanted.exists());
+}
+
+#[test]
 fn graphical_target_without_display_environment_uses_fallback() {
     let f = Fixture::new();
     let mut manager = Fake::new(&f.paths);
@@ -190,16 +239,18 @@ fn existing_xdg_registration_remains_visible_until_explicit_migration() {
     let desktop = AutostartStatus {
         enabled: true,
         supported: true,
+        migration_available: false,
         method: "xdg",
         entry_path: Some(f.paths.desktop.to_string_lossy().into()),
         description: "Existing registration".into(),
     };
-    let status = status_for(&f.paths, &mut manager, desktop.clone()).unwrap();
+    let status = status_for(&f.paths, &mut manager, desktop.clone(), false).unwrap();
     assert!(status.enabled);
     assert_eq!(status.method, "xdg");
+    assert!(status.migration_available);
     assert!(!f.paths.wanted.exists() && !f.paths.dropin.exists());
     manager.run(&["enable", UNIT]).unwrap();
-    let status = status_for(&f.paths, &mut manager, desktop).unwrap();
+    let status = status_for(&f.paths, &mut manager, desktop, false).unwrap();
     assert!(status.enabled);
     assert_eq!(status.method, "systemd_user");
 }
@@ -237,7 +288,7 @@ fn enable_migrates_only_owned_desktop_and_disable_never_stops_the_process() {
     assert!(!f.paths.desktop.exists());
     assert!(f.paths.wanted.exists());
     let content = read_owned_file(&f.paths.dropin).unwrap().unwrap();
-    assert_eq!(content, dropin(&spec).unwrap());
+    assert_eq!(content, dropin(&spec, false).unwrap());
     assert!(content.contains("ExecStart=\nExecStart=:/usr/bin/babel-launch"));
     assert!(content.contains("--port 0 --working-dir"));
     assert!(content.contains("$HOME%%20\\\\\\\"'`x`.toml"));

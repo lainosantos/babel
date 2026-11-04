@@ -435,7 +435,7 @@
   function platformOs() { return ['linux', 'macos', 'windows'].includes(state.platform?.os) ? state.platform.os : 'unknown'; }
   function managesVirtualDevices() { return platformOs() === 'linux' && state.platform?.manages_virtual_devices === true; }
   function supportsHostAutostart() {
-    const methods = { linux: 'xdg', macos: 'launch_agent', windows: 'registry_run' };
+    const methods = { linux: 'xdg', macos: 'launch_agent', windows: 'task_scheduler' };
     return Object.hasOwn(methods, platformOs()) && state.platform?.autostart_method === methods[platformOs()];
   }
   function platformText(id, key, values) {
@@ -737,7 +737,8 @@
     byId('refresh-devices').disabled = state.busy || !state.authenticated;
     const startupUnavailable = state.busy || !state.authenticated || !state.autostart?.supported || !supportsHostAutostart();
     byId('autostart-enabled').disabled = startupUnavailable;
-    byId('autostart-apply').disabled = startupUnavailable || byId('autostart-enabled').checked === state.autostart?.enabled;
+    const startupUnchanged = byId('autostart-enabled').checked === state.autostart?.enabled;
+    byId('autostart-apply').disabled = startupUnavailable || (startupUnchanged && !state.autostart?.migration_available);
     const transcriptionEnabled = byId('transcription-enabled').checked;
     for (const field of ['microphone', 'speaker', 'timestamps']) byId(`transcription-${field}`).disabled = !transcriptionEnabled || !sourceAvailable(field);
     for (const field of ['microphone', 'speaker']) byId(`recording-${field}`).disabled = !byId('recording-enabled').checked || !sourceAvailable(field);
@@ -1171,9 +1172,10 @@
     const status = state.autostart;
     if (!status) return;
     const parts = [!status.supported ? t('autostart.unsupported') : status.enabled ? t('ui.autostart_enabled_babel_opens_with_local_original_audio_routing_without_sta') : t('ui.autostart_disabled')];
-    const methods = { systemd_user: 'autostart.method_systemd_user', xdg: 'autostart.method_xdg', launch_agent: 'autostart.method_launch_agent', registry_run: 'autostart.method_registry_run' };
+    const methods = { systemd_user: 'autostart.method_systemd_user', xdg: 'autostart.method_xdg', launch_agent: 'autostart.method_launch_agent', task_scheduler: 'autostart.method_task_scheduler', registry_run: 'autostart.method_registry_run' };
     if (status.supported && Object.hasOwn(methods, status.method)) {
       parts.push(t(methods[status.method]));
+      if (status.method === 'xdg' && status.migration_available) parts.push(t('autostart.systemd_migration_available'));
       if (typeof status.entry_path === 'string' && status.entry_path) parts.push(t('autostart.entry_path', { path: status.entry_path }));
     }
     byId('autostart-status').textContent = parts.join(' ');

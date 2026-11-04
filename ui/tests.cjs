@@ -55,7 +55,7 @@ async function page(t, options = {}) {
     const base_path = hostPath.resolve(body.base_path);
     return { base_path, transcription_directory: hostPath.resolve(base_path, body.transcription_directory), recording_directory: hostPath.resolve(base_path, body.recording_directory) };
   };
-  const platform = { os: platformOs, name: ({ linux: 'Linux', macos: 'macOS', windows: 'Windows' })[platformOs] || 'Unknown', audio_backend: ({linux:'pulseaudio',macos:'coreaudio',windows:'wasapi'})[platformOs] || 'unsupported', manages_virtual_devices: platformOs === 'linux', autostart_method: ({linux:'xdg',macos:'launch_agent',windows:'registry_run'})[platformOs] || 'unsupported' };
+  const platform = { os: platformOs, name: ({ linux: 'Linux', macos: 'macOS', windows: 'Windows' })[platformOs] || 'Unknown', audio_backend: ({linux:'pulseaudio',macos:'coreaudio',windows:'wasapi'})[platformOs] || 'unsupported', manages_virtual_devices: platformOs === 'linux', autostart_method: ({linux:'xdg',macos:'launch_agent',windows:'task_scheduler'})[platformOs] || 'unsupported' };
   if (options.userAgent) Object.defineProperty(window.navigator, 'userAgent', { value: options.userAgent });
   const interfaceMetadata = () => ({ language: config.interface.language, resolved_language: config.interface.language === 'system' ? systemLocale.toLowerCase().startsWith('pt') ? 'pt' : 'en' : config.interface.language, system_locale: systemLocale, languages: [{ code: 'en', name: 'English' }, { code: 'pt', name: 'Português' }], config_revision: revision });
   let revision = 0;
@@ -78,8 +78,8 @@ async function page(t, options = {}) {
   let statusResponse = options.statusResponse;
   let sessionName = null;
   let sessionId = null;
-  let autostart = false;
-  const autostartMetadata = options.autostartMetadata || {};
+  let autostart = options.autostartEnabled ?? false;
+  let autostartMetadata = options.autostartMetadata || {};
   const credentials = new Set();
   const permanentCredentials = new Set();
   const metrics = { state: 'stopped', captured_frames: 0, dropped_frames: 0, underruns: 0, translated_samples: 0, reconnects: 0, input_level: 0, output_level: 0, last_input_transcript: null };
@@ -142,7 +142,13 @@ async function page(t, options = {}) {
       if (running && finalizeOnStop) finalizingSessions.push({ session_id: sessionId, session_name: sessionName, microphone: metrics, speaker: metrics, last_error: null });
       running = false;
     }
-    else if (parsed.pathname === '/api/autostart') { if (options.method === 'POST') autostart = body.enabled; value = { ...autostartMetadata, enabled: autostart, supported: true, description: autostart ? 'Início automático ativado; tradução parada.' : 'Início automático desativado.' }; }
+    else if (parsed.pathname === '/api/autostart') {
+      if (options.method === 'POST') {
+        autostart = body.enabled;
+        if (autostartMetadata.method === 'registry_run') autostartMetadata = { method: 'task_scheduler', entry_path: '\\BabelAudio-S-1-5-21-123' };
+      }
+      value = { ...autostartMetadata, enabled: autostart, supported: true, description: autostart ? 'Início automático ativado; tradução parada.' : 'Início automático desativado.' };
+    }
     else if (parsed.pathname === '/api/credentials' && options.method === 'GET') {
       const name = parsed.searchParams.get('api_key_env');
       const temporary = credentials.has(name), permanent = permanentCredentials.has(name);
@@ -608,6 +614,19 @@ test('systemd startup method and exact entry path localize without applying a pe
   assert.equal(p.byId('autostart-enabled').checked, true);
   assert.equal(p.calls.some(call => call.path === '/api/autostart' && call.options.method === 'POST'), false);
   assert.equal(p.calls.some(call => call.path === '/api/start'), false);
+});
+
+test('Windows offers explicit migration of an enabled legacy startup entry', async t => {
+  const p = await page(t, { platform: 'windows', autostartEnabled: true, autostartMetadata: { method: 'registry_run', migration_available: true } });
+  await settle(() => !p.byId('autostart-apply').disabled);
+  assert.equal(p.byId('autostart-enabled').checked, true);
+  assert.match(p.byId('autostart-status').textContent, /entrada antiga Run/);
+  const writes = () => p.calls.filter(call => call.path === '/api/autostart' && call.options.method === 'POST');
+  assert.equal(writes().length, 0);
+  p.byId('autostart-apply').click();
+  await settle(() => p.byId('autostart-status').textContent.includes('tarefa agendada do usuário'));
+  assert.deepEqual(writes().map(call => call.body), [{ enabled: true }]);
+  assert.equal(p.byId('autostart-apply').disabled, true);
 });
 
 test('external configuration revisions refresh clean settings once and protect unsaved edits', async t => {
@@ -1356,7 +1375,7 @@ test('Windows displays cable directions, microphone privacy and per-user startup
   assert.match(p.byId('platform-device-setup').textContent, /Virtual Cable 01.*Virtual Cable 02/);
   assert.match(p.byId('platform-device-details').textContent, /Virtual Cable 01.*Virtual Cable 02/);
   assert.match(p.byId('platform-device-permissions').textContent, /aplicativos desktop.*Windows/);
-  assert.match(p.byId('platform-autostart').textContent, /Run.*Registro/);
+  assert.match(p.byId('platform-autostart').textContent, /Agendador de Tarefas/);
   assert.equal(p.byId('install-devices').hidden, true); assert.equal(p.byId('uninstall-devices').disabled, true);
   assert.equal(p.byId('microphone-virtual-label').textContent, 'Babel Microphone Feed');
   assert.equal(p.byId('speaker-virtual-label').textContent, 'Babel Speaker Monitor');
@@ -1365,7 +1384,7 @@ test('Windows displays cable directions, microphone privacy and per-user startup
   await chooseInterface(p, 'en');
   assert.equal(p.byId('platform-summary'), null);
   assert.match(p.byId('platform-device-permissions').textContent, /desktop apps in Windows/);
-  assert.match(p.byId('platform-autostart').textContent, /Run registry/);
+  assert.match(p.byId('platform-autostart').textContent, /Task Scheduler/);
   assert.equal(p.byId('speaker-target_language').value, 'ja-JP');
   assert.equal(p.byId('autostart-enabled').checked, true);
   p.window.BabelI18n.apply();

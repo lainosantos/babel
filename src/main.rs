@@ -1,7 +1,7 @@
 #![forbid(unsafe_code)]
 
 use anyhow::{Context, Result, ensure};
-use babel_audio::{audio, config::AppConfig, dashboard, engine::Controller};
+use babel_audio::{audio, autostart, config::AppConfig, dashboard, engine::Controller};
 use clap::{Parser, Subcommand};
 use std::{path::PathBuf, sync::Arc, time::Duration};
 use tokio_util::sync::CancellationToken;
@@ -45,6 +45,21 @@ enum Command {
     Setup,
     /// Remove only virtual devices created by Babel.
     Uninstall,
+    /// Manage startup at login for the current user.
+    Autostart {
+        #[command(subcommand)]
+        action: AutostartAction,
+    },
+}
+
+#[derive(Subcommand)]
+enum AutostartAction {
+    /// Show the current login registration.
+    Status,
+    /// Register Babel for the next login.
+    Enable,
+    /// Remove Babel's login registration.
+    Disable,
 }
 
 fn main() -> Result<()> {
@@ -91,6 +106,14 @@ async fn run(config: PathBuf, command: Command) -> Result<()> {
         }
         Command::Uninstall => {
             println!("{}", audio::uninstall_virtual_devices().await?);
+        }
+        Command::Autostart { action } => {
+            let status = match action {
+                AutostartAction::Status => autostart::status().await?,
+                AutostartAction::Enable => autostart::set_enabled(true, &config).await?,
+                AutostartAction::Disable => autostart::set_enabled(false, &config).await?,
+            };
+            println!("{}", serde_json::to_string_pretty(&status)?);
         }
         Command::Doctor => {
             println!(

@@ -1,4 +1,4 @@
-//! Packaged Linux user service. The manager is injectable; tests never call it.
+//! Linux user service. The manager is injectable; tests never call it.
 use super::{
     AutostartStatus, LaunchSpec, MARKER, MAX_ENTRY_BYTES, desktop_entry, path_text,
     read_owned_file, set_file,
@@ -7,7 +7,7 @@ use anyhow::{Context, Result, ensure};
 use std::{
     collections::BTreeMap,
     io::{ErrorKind, Read},
-    os::unix::fs::MetadataExt,
+    os::unix::fs::{MetadataExt, OpenOptionsExt},
     path::{Path, PathBuf},
     process::{Child, Command, Stdio},
     time::{Duration, Instant},
@@ -24,6 +24,7 @@ const OFFLINE_ERROR: &str = "Babel already has a systemd entry, but the user man
 
 struct Paths {
     package: PathBuf,
+    local: PathBuf,
     desktop: PathBuf,
     dropin: PathBuf,
     wanted: PathBuf,
@@ -47,6 +48,7 @@ impl Paths {
         };
         Ok(Self {
             package,
+            local: user.join(UNIT),
             desktop,
             dropin: user.join(format!("{UNIT}.d/50-babel.conf")),
             wanted: user.join("graphical-session.target.wants").join(UNIT),
@@ -78,7 +80,14 @@ impl Paths {
         );
         Ok(true)
     }
-    fn wanted(&self) -> Result<bool> {
+    fn fragment(&self) -> Result<Option<&Path>> {
+        if let Some(content) = read_owned_file(&self.local)? {
+            ensure!(content == local_unit(), IDENTITY_ERROR);
+            return Ok(Some(&self.local));
+        }
+        Ok(self.package_present()?.then_some(&self.package))
+    }
+    fn wanted(&self, fragment: &Path) -> Result<bool> {
         let metadata = match std::fs::symlink_metadata(&self.wanted) {
             Ok(m) => m,
             Err(e) if e.kind() == ErrorKind::NotFound => return Ok(false),
@@ -87,11 +96,20 @@ impl Paths {
         ensure!(metadata.file_type().is_symlink(), OVERRIDE_ERROR);
         ensure!(
             self.wanted.canonicalize().context(OVERRIDE_ERROR)?
-                == self.package.canonicalize().context(IDENTITY_ERROR)?,
+                == fragment.canonicalize().context(IDENTITY_ERROR)?,
             OVERRIDE_ERROR
         );
         Ok(true)
     }
+}
+
+fn local_unit() -> String {
+    // The drop-in supplies the portable tray path. A base unit without the
+    // drop-in must never launch an unrelated system-wide executable.
+    PACKAGED.replace(
+        "ExecStart=/usr/bin/babel-launch",
+        "ExecStart=/usr/bin/false",
+    )
 }
 
 trait Manager {
@@ -203,15 +221,15 @@ fn property_words(value: &str) -> Result<Vec<String>> {
 
 fn snapshot(paths: &Paths, manager: &mut impl Manager) -> Result<Option<Snapshot>> {
     let prior = read_owned_file(&paths.dropin)?;
-    if !paths.package_present()? {
+    let Some(expected_fragment) = paths.fragment()? else {
         ensure!(
             std::fs::symlink_metadata(&paths.wanted)
                 .is_err_and(|e| e.kind() == ErrorKind::NotFound),
             OFFLINE_ERROR
         );
         return Ok(None);
-    }
-    let wanted = paths.wanted()?;
+    };
+    let wanted = paths.wanted(expected_fragment)?;
     let output = match manager.run(&[
         "show",
         UNIT,
@@ -232,7 +250,7 @@ fn snapshot(paths: &Paths, manager: &mut impl Manager) -> Result<Option<Snapshot
     );
     let fragment = properties.get("FragmentPath").context(IDENTITY_ERROR)?;
     ensure!(
-        Path::new(fragment).canonicalize().ok() == paths.package.canonicalize().ok(),
+        Path::new(fragment).canonicalize().ok() == expected_fragment.canonicalize().ok(),
         IDENTITY_ERROR
     );
     let dropins = property_words(properties.get("DropInPaths").context(OVERRIDE_ERROR)?)?;
@@ -259,7 +277,12 @@ fn snapshot(paths: &Paths, manager: &mut impl Manager) -> Result<Option<Snapshot
     let enabled = *state == "enabled";
     // Global/administrator activation is outside the scope of this checkbox.
     ensure!(enabled == wanted, OVERRIDE_ERROR);
-    let graphical = paths.allow_user_service
+    let graphical = graphical_session(paths, manager);
+    Ok(Some(Snapshot { enabled, graphical }))
+}
+
+fn graphical_session(paths: &Paths, manager: &mut impl Manager) -> bool {
+    paths.allow_user_service
         && manager
             .run(&[
                 "show",
@@ -277,14 +300,14 @@ fn snapshot(paths: &Paths, manager: &mut impl Manager) -> Result<Option<Snapshot
                         .is_some_and(|v| !["", "\"\"", "''"].contains(&v.trim()))
                 })
             })
-        });
-    Ok(Some(Snapshot { enabled, graphical }))
+        })
 }
 
 fn service_status(paths: &Paths, enabled: bool) -> Result<AutostartStatus> {
     Ok(AutostartStatus {
         enabled,
         supported: true,
+        migration_available: false,
         method: "systemd_user",
         entry_path: Some(path_text(&paths.dropin)?.to_owned()),
         description: if enabled {
@@ -314,18 +337,27 @@ fn unit_arg(value: &str) -> Result<String> {
     result.push('"');
     Ok(result)
 }
-fn dropin(spec: &LaunchSpec) -> Result<String> {
+fn dropin(spec: &LaunchSpec, local: bool) -> Result<String> {
     let config = path_text(&spec.config)?;
     let working = path_text(&spec.working_dir)?;
     ensure!(
         spec.config.is_absolute() && spec.working_dir.is_absolute(),
         "Invalid configuration path"
     );
-    // ':' disables systemd environment expansion; %% disables specifiers. The
-    // packaged launcher passes argv directly to babel-tray, which changes cwd.
+    let launcher = if local {
+        // Use a fixed executable word and pass the portable path as literal argv.
+        format!(
+            "/usr/bin/env -- {}",
+            unit_arg(path_text(&spec.executable)?)?
+        )
+    } else {
+        "/usr/bin/babel-launch".into()
+    };
+    // ':' disables systemd environment expansion; %% disables specifiers.
+    // babel-tray receives argv directly and changes cwd.
     // Avoid WorkingDirectory= because that setting has different quote rules.
     Ok(format!(
-        "# {MARKER}\n[Service]\nExecStart=\nExecStart=:/usr/bin/babel-launch --config {} --port 0 --working-dir {} --autostart-owner {}\n",
+        "# {MARKER}\n[Service]\nExecStart=\nExecStart=:{launcher} --config {} --port 0 --working-dir {} --autostart-owner {}\n",
         unit_arg(config)?,
         unit_arg(working)?,
         unit_arg(super::OWNER)?
@@ -350,7 +382,8 @@ fn change(
         "The login entry changed during the operation; try again"
     );
     if enabled {
-        let content = dropin(spec.context("Invalid configuration path")?)?;
+        let local = paths.fragment()? == Some(paths.local.as_path());
+        let content = dropin(spec.context("Invalid configuration path")?, local)?;
         ensure!(
             read_owned_file(&paths.dropin)? == previous,
             "The login entry changed during the operation; try again"
@@ -406,29 +439,135 @@ fn change(
 pub(super) fn status() -> Result<AutostartStatus> {
     let paths = Paths::current()?;
     let desktop = super::file_status()?;
-    status_for(&paths, &mut Systemctl, desktop)
+    let portable = std::env::current_exe().is_ok_and(|exe| tray_path(&exe).is_some());
+    status_for(&paths, &mut Systemctl, desktop, portable)
 }
 fn status_for(
     paths: &Paths,
     manager: &mut impl Manager,
-    desktop: AutostartStatus,
+    mut desktop: AutostartStatus,
+    portable: bool,
 ) -> Result<AutostartStatus> {
     match snapshot(paths, manager)? {
-        Some(s) if !s.enabled && desktop.enabled => Ok(desktop),
+        Some(s) if !s.enabled && desktop.enabled => {
+            desktop.migration_available = s.graphical && (!paths.local.exists() || portable);
+            Ok(desktop)
+        }
         Some(s) if s.enabled || s.graphical => service_status(paths, s.enabled),
+        None if desktop.enabled && portable && paths.fragment()?.is_none() => {
+            desktop.migration_available =
+                graphical_session(paths, manager) && unit_slot_free(manager).unwrap_or(false);
+            Ok(desktop)
+        }
         _ => Ok(desktop),
     }
 }
 pub(super) fn set_enabled(enabled: bool, config: &Path) -> Result<AutostartStatus> {
     let paths = Paths::current()?;
-    let mut manager = Systemctl;
+    let directory = paths
+        .local
+        .parent()
+        .context("User service directory unavailable")?;
+    // The CLI and dashboard can apply the same user-wide preference from
+    // separate processes. Keep rollback inside this registration lock.
+    std::fs::create_dir_all(directory)?;
+    let lock_path = directory.join(".babel-autostart.lock");
+    match std::fs::symlink_metadata(&lock_path) {
+        Ok(metadata) => ensure!(metadata.is_file(), "Invalid user service registration lock"),
+        Err(error) if error.kind() == ErrorKind::NotFound => {}
+        Err(error) => {
+            return Err(error).context("Could not inspect the user service registration lock");
+        }
+    }
+    let lock = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .mode(0o600)
+        .open(lock_path)
+        .context("Could not open the user service registration lock")?;
+    ensure!(
+        lock.metadata()?.is_file(),
+        "Invalid user service registration lock"
+    );
+    lock.try_lock()
+        .context("Could not lock user service registration; try again")?;
     let spec = enabled.then(|| LaunchSpec::current(config)).transpose()?;
-    if let Some(s) = snapshot(&paths, &mut manager)?.filter(|s| s.enabled || s.graphical) {
-        return change(&paths, &mut manager, enabled, spec.as_ref(), &s);
+    if let Some(status) = apply_service(&paths, &mut Systemctl, enabled, spec.as_ref())? {
+        return Ok(status);
     }
     let content = spec.as_ref().map(desktop_entry).transpose()?;
     set_file(&paths.desktop, content.as_deref())?;
     super::file_status()
+}
+
+fn apply_service(
+    paths: &Paths,
+    manager: &mut impl Manager,
+    enabled: bool,
+    spec: Option<&LaunchSpec>,
+) -> Result<Option<AutostartStatus>> {
+    let fragment = paths.fragment()?;
+    let before = snapshot(paths, manager)?;
+    if let Some(before) = before.filter(|s| s.enabled || s.graphical) {
+        if let Some(spec) = spec
+            && fragment == Some(paths.local.as_path())
+        {
+            let tray =
+                portable_tray(spec).context("Build or install babel-tray alongside Babel")?;
+            return change(paths, manager, enabled, Some(&tray), &before).map(Some);
+        }
+        return change(paths, manager, enabled, spec, &before).map(Some);
+    }
+
+    let Some(spec) = spec.filter(|_| fragment.is_none()) else {
+        return Ok(None);
+    };
+    let Some(tray) = portable_tray(spec).filter(|_| graphical_session(paths, manager)) else {
+        return Ok(None);
+    };
+    manager.run(&["daemon-reload"])?;
+    ensure!(unit_slot_free(manager)?, IDENTITY_ERROR);
+    let unit = local_unit();
+    set_file(&paths.local, Some(&unit))?;
+    let result = change(
+        paths,
+        manager,
+        true,
+        Some(&tray),
+        &Snapshot {
+            enabled: false,
+            graphical: true,
+        },
+    );
+    if result.is_err()
+        && !paths.wanted(&paths.local)?
+        && read_owned_file(&paths.local)?.as_deref() == Some(unit.as_str())
+    {
+        set_file(&paths.local, None)?;
+        let _ = manager.run(&["daemon-reload"]);
+    }
+    result.map(Some)
+}
+
+fn unit_slot_free(manager: &mut impl Manager) -> Result<bool> {
+    Ok(manager
+        .run(&["show", UNIT, "--property=LoadState", "--value"])?
+        .trim()
+        == "not-found")
+}
+
+fn tray_path(executable: &Path) -> Option<PathBuf> {
+    let tray = executable.with_file_name("babel-tray");
+    tray.is_file().then_some(tray)
+}
+
+fn portable_tray(spec: &LaunchSpec) -> Option<LaunchSpec> {
+    Some(LaunchSpec {
+        executable: tray_path(&spec.executable)?,
+        tray_launcher: true,
+        ..spec.clone()
+    })
 }
 
 #[cfg(test)]

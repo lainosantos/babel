@@ -37,7 +37,7 @@ impl PlatformInfo {
                 name: "Windows",
                 audio_backend: "wasapi",
                 manages_virtual_devices: false,
-                autostart_method: "registry_run",
+                autostart_method: "task_scheduler",
             },
             _ => Self {
                 os: "unknown",

@@ -268,8 +268,9 @@ Stopping a session does not remove virtual devices, so the calling app retains
 its selection. Linux modules must be recreated after the audio server restarts.
 Babel does not change the global default output.
 
-In the dashboard, **Startup → Start in the tray at login** registers only the
-tray and local service. It is off by default. On startup, Babel waits for the
+In the dashboard, **Startup → Start in the tray at login** registers the tray
+and local service for the current user. The same setting is available through
+`babel autostart`. It is off by default. On startup, Babel waits for the
 virtual devices' activation conditions and routes original audio to configured
 physical devices only while those conditions hold, without starting translation,
 transcription or recording. You can undo startup registration on the same page.

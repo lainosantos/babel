@@ -725,4 +725,4 @@ different local URL/token; open the dashboard through the tray's **Open settings
 Registration does not store API keys. Temporary keys entered during the previous
 run must be entered again unless you configured variables in the user's session
 environment. Read [startup by system](autostart.md) for the files used, path
-portability, and desktop requirements.
+portability, desktop requirements, and the `babel autostart` command.
