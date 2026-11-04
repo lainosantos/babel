@@ -2,19 +2,14 @@
 
 The translation process runs in Rust in user space. On Linux, Babel creates
 selectable devices through the existing audio server. On macOS and Windows,
-the backend uses CoreAudio/WASAPI through CPAL and connects to the two paths
-provided by the **native Babel driver**. Source and build scripts live in
-`native/macos` and `native/windows`; BlackHole and VB-CABLE are not dependencies
-of these drivers. **Signed distribution packages and driver validation on real
-macOS/Windows hardware are still pending.** See the
-[native driver guide](native-drivers.md) for building and explicit installation.
+Babel connects to separately installed virtual devices through CoreAudio and
+WASAPI. BlackHole on macOS and Virtual Cables on Windows x64 provide two paths
+at no cost and without an evaluation period. Babel's own drivers remain
+available for [native driver builds](native-drivers.md).
 
-Babel identifies the operating system running its process. The dashboard and
-tray use that host information regardless of the browser opening the dashboard.
-Detection does not rely on the user agent or language preference. The dashboard
-shows instructions, device names, and actions for that system: creating and
-removing devices on Linux, or installing the Babel package and selecting its
-devices on macOS and Windows. **Refresh devices** is available on all three.
+The dashboard and tray use the operating system running Babel, regardless of
+where the browser is open. Use **Refresh devices** after installing an external
+audio driver. Installers and device setup require separate user authorization.
 
 The device help opened at `/help/platforms` contains only instructions for the
 current system. The full version is available at `/help/platforms/all` and in
@@ -115,9 +110,38 @@ and [PipeWire remap source](https://docs.pipewire.org/page_pulse_module_remap_so
 Linking properties are described in the
 [official WirePlumber policy](https://pipewire.pages.freedesktop.org/wireplumber/policies/linking.html).
 
-## macOS: Babel driver with two duplex devices
+## macOS: BlackHole or Babel virtual devices
 
 <a id="macos"></a>
+
+### BlackHole setup
+
+1. Install both **BlackHole 2ch** and **BlackHole 16ch** from the
+   [BlackHole project](https://github.com/ExistentialAudio/BlackHole#installation-instructions).
+   Follow its restart instructions. Babel uses the devices exposed by CoreAudio.
+2. Open Babel, grant microphone access, and click **Refresh devices**.
+3. Set the virtual devices in Babel and in the calling app as follows.
+
+| Field/application | Device |
+|---|---|
+| Babel microphone capture | Your physical microphone |
+| Babel translated microphone playback | **BlackHole 2ch** output |
+| Call application microphone | **BlackHole 2ch** input |
+| Call application speaker | **BlackHole 16ch** output |
+| Babel output capture for translation | **BlackHole 16ch** input |
+| Babel translated output playback | Your physical headphones/speaker |
+
+Select the two devices directly. Babel uses channels 1/2. An app that cannot
+select BlackHole 16ch needs another independent compatible loopback for the
+speaker path. Test original audio in both directions before enabling translation.
+
+On macOS 14.2 and later, the app monitors the selected devices through CoreAudio.
+When opening a trusted Babel download without notarization, macOS may offer
+**Open Anyway** in **System Settings → Privacy & Security** after the first
+launch or installation attempt. Managed Macs may restrict the option.
+See [Apple's Gatekeeper instructions](https://support.apple.com/en-us/102445).
+
+### Optional Babel Audio driver on macOS
 
 **BabelAudio.pkg** installs Babel's AudioServerPlugIn with two separate paths:
 **Babel Microphone** and **Babel Speaker**. Each device has an input and an output
@@ -177,22 +201,57 @@ the required authorization. `babel setup` and `babel uninstall` identify the
 local package or helper when found; they neither execute those files nor claim
 to have installed or removed devices.
 
-**Optional alternative:** two independent BlackHole installations, such as 2ch
-and 16ch, remain compatible. Substitute BlackHole 2ch for Babel Microphone and
-BlackHole 16ch for Babel Speaker in the table. Channels 1/2 are used; applications
-that reject 16 channels need another compatible independent loopback. Obtain
-and install packages from the
-[BlackHole project](https://github.com/ExistentialAudio/BlackHole), respecting its
-[license and integration terms](https://github.com/ExistentialAudio/BlackHole#can-i-integrate-blackhole-into-my-app).
-Babel does not redistribute BlackHole, and its own driver does not require it.
-
 Official references: [devices used by a CoreAudio process](https://developer.apple.com/documentation/coreaudio/kaudioprocesspropertydevices)
 and [Apple's process API example for macOS 14.2+](https://developer.apple.com/documentation/coreaudio/capturing-system-audio-with-core-audio-taps).
 Babel queries processes/devices without creating taps to capture global audio.
 
-## Windows: Babel driver with two independent pairs
+## Windows: Virtual Cables or Babel virtual devices
 
 <a id="windows"></a>
+
+### Virtual Cables setup on Windows x64
+
+[Virtual Cables](https://github.com/tarekwasfy01/Virtual-Cables) is a free,
+open-source application that presents independent USB audio loopbacks. It uses
+the Windows USB audio class driver and the separately distributed USB/IP
+transport. The upstream project labels the application experimental and
+documents Windows 10/11 x64 support.
+
+1. Install the x64 transport from the
+   [official usbip-win2 releases](https://github.com/vadimgrn/usbip-win2/releases).
+   Use a release with Microsoft-signed drivers. Version
+   [0.9.7.5](https://github.com/vadimgrn/usbip-win2/releases/tag/v.0.9.7.5)
+   explicitly documents Windows hardware certification for x64.
+2. Install [Virtual Cables](https://github.com/tarekwasfy01/Virtual-Cables/releases).
+   Open it, create two cables and leave it running. Use its default local
+   USB/IP address. Refresh devices in Babel.
+3. Configure the two routes and test original audio before enabling translation.
+
+| Field/application | Device |
+|---|---|
+| Babel microphone capture | Your physical microphone |
+| Babel translated microphone playback | **Virtual Cable 01** playback |
+| Call application microphone | **Virtual Cable 01** recording |
+| Call application speaker | **Virtual Cable 02** playback |
+| Babel output capture for translation | **Virtual Cable 02** recording |
+| Babel translated output playback | Your physical headphones/speaker |
+
+Windows may prefix the cable names with the endpoint type. Each cable uses
+48 kHz stereo PCM16. Allow desktop microphone access and keep **Listen to
+this device** disabled on both cables. If Windows assigns new endpoint IDs
+after the cables are recreated, refresh and reselect them in Babel.
+
+Windows 11 on Arm can emulate x64 applications. The USB/IP kernel driver
+still requires the signed ARM64 build. The Virtual Cables setup on Arm and
+the behavior of its emulated application have yet to be validated.
+See [Microsoft's Windows on Arm guide](https://learn.microsoft.com/en-us/windows/arm/faq).
+
+Windows SmartScreen may warn about unsigned Babel downloads. Smart App Control
+and managed device policies can block execution.
+See [Microsoft's SmartScreen guidance](https://learn.microsoft.com/en-us/windows/apps/package-and-deploy/smartscreen-reputation)
+and [Smart App Control guidance](https://learn.microsoft.com/en-us/windows/apps/develop/smart-app-control/overview).
+
+### Optional Babel Audio driver on Windows
 
 The **BabelAudio** package supplies four WASAPI endpoints forming two independent
 cables. WaveRT driver source and build scripts are in
@@ -236,11 +295,11 @@ as default without playback is insufficient. Babel's own sessions are excluded.
 Each direction shows **Routing inactive** when its activity condition is unmet,
 even if the other direction or session is still active.
 
-Pairing checks each driver-supplied endpoint description and the **Babel Audio
-v1** interface identity. WASAPI IDs remain opaque identities; a renameable friendly
-name does not determine pairing. Missing or ambiguous endpoints and query failures
-keep the affected direction closed with a diagnostic. Selecting both sides of
-the same cable for both routes blocks both. There is no default-device fallback.
+Pairing checks the **Babel Audio v1** interface and its endpoint descriptions,
+or the numbered USB adapter identity for Virtual Cables. WASAPI endpoint IDs
+remain opaque. Missing or ambiguous endpoints and query failures keep the
+affected direction closed with a diagnostic. Selecting both sides of the same
+cable for both routes blocks both.
 
 The monitor combines periodic enumeration with events from known sessions.
 Microsoft notes that enumeration may omit newly created sessions; Babel can

@@ -33,7 +33,13 @@ pub(super) struct Pair {
     pub opposite: String,
 }
 
-fn family(endpoint: &Endpoint) -> Option<&'static str> {
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Cable {
+    Named(&'static str),
+    VirtualUsb(u8),
+}
+
+fn family(endpoint: &Endpoint) -> Option<Cable> {
     let direction = match endpoint.direction {
         Direction::Capture => DeviceDirection::Input,
         Direction::Render => DeviceDirection::Output,
@@ -41,7 +47,11 @@ fn family(endpoint: &Endpoint) -> Option<&'static str> {
     if let Some(cable) =
         native_ids::babel_windows_cable(&endpoint.description, &endpoint.adapter, direction)
     {
-        return Some(cable);
+        return Some(Cable::Named(cable));
+    }
+    if let Some(number) = native_ids::usb_virtual_cable_number(&endpoint.adapter) {
+        // The USB audio class driver supplies the product name for both sides.
+        return Some(Cable::VirtualUsb(number));
     }
     for (family, adapter) in [
         ("CABLE", "VB-Audio Virtual Cable"),
@@ -60,7 +70,7 @@ fn family(endpoint: &Endpoint) -> Option<&'static str> {
             .eq_ignore_ascii_case(&format!("{family} {role}"))
             && endpoint.adapter.trim().eq_ignore_ascii_case(adapter)
         {
-            return Some(family);
+            return Some(Cable::Named(family));
         }
     }
     None
@@ -76,7 +86,7 @@ pub(super) fn pair(endpoints: &[Endpoint], id: &str, direction: Direction) -> Re
         "the selected Windows virtual endpoint is missing or ambiguous; refresh and select it again"
     );
     let selected = selected[0];
-    let family = family(selected).context("automatic Windows activity detection requires an unambiguous Babel Audio v1 or supported VB-CABLE driver pair")?;
+    let family = family(selected).context("automatic Windows activity detection requires an unambiguous Virtual Cables, Babel Audio v1, or supported VB-CABLE pair")?;
     let related: Vec<_> = endpoints
         .iter()
         .filter(|endpoint| self::family(endpoint) == Some(family))
@@ -279,6 +289,69 @@ mod tests {
             adapter: native_ids::BABEL_WINDOWS_ADAPTER.into(),
         })
         .collect()
+    }
+
+    #[test]
+    fn numbered_usb_cables_require_distinct_unambiguous_pairs() {
+        let mut endpoints: Vec<_> = [
+            (
+                "mic-render",
+                Direction::Render,
+                "Speakers",
+                "Virtual Cable 01",
+            ),
+            (
+                "mic-capture",
+                Direction::Capture,
+                "Microphone",
+                "Virtual Cable 01",
+            ),
+            (
+                "speaker-render",
+                Direction::Render,
+                "Speakers",
+                "Virtual Cable 02",
+            ),
+            (
+                "speaker-capture",
+                Direction::Capture,
+                "Microphone",
+                "Virtual Cable 02",
+            ),
+        ]
+        .into_iter()
+        .map(|(id, direction, description, adapter)| Endpoint {
+            id: id.into(),
+            direction,
+            description: description.into(),
+            adapter: adapter.into(),
+        })
+        .collect();
+        let mic = pair(&endpoints, "mic-render", Direction::Render).unwrap();
+        let speaker = pair(&endpoints, "speaker-capture", Direction::Capture).unwrap();
+        assert_eq!(mic.opposite, "mic-capture");
+        assert_eq!(speaker.opposite, "speaker-render");
+        independent(&mic, &speaker).unwrap();
+        assert!(
+            independent(
+                &mic,
+                &pair(&endpoints, "mic-capture", Direction::Capture).unwrap()
+            )
+            .is_err()
+        );
+
+        endpoints.push(Endpoint {
+            id: "unrelated".into(),
+            adapter: "Virtual Cable 01 extra".into(),
+            ..endpoints[1].clone()
+        });
+        assert!(pair(&endpoints, "unrelated", Direction::Capture).is_err());
+        assert_eq!(
+            pair(&endpoints, "mic-render", Direction::Render).unwrap(),
+            mic
+        );
+        endpoints.last_mut().unwrap().adapter = "Virtual Cable 01".into();
+        assert!(pair(&endpoints, "mic-render", Direction::Render).is_err());
     }
 
     #[test]

@@ -37,6 +37,7 @@ fn virtual_name(name: &str) -> bool {
         "cable output",
         "cable-a",
         "cable-b",
+        "virtual cable ",
         "loopback",
     ]
     .iter()
@@ -187,7 +188,7 @@ pub async fn install_virtual_devices() -> Result<String> {
             );
         }
         bail!(
-            "The Babel Audio macOS installer is not bundled with this application. Obtain the signed BabelAudio.pkg or build it using native/macos/build.py, then place it in drivers/macos next to the Babel executable. See native/macos/README.md. No device was installed."
+            "Install BlackHole 2ch and 16ch separately, then select the devices in Babel. See the macOS routing guide in docs/platforms.md."
         );
     }
     #[cfg(target_os = "windows")]
@@ -205,7 +206,7 @@ pub async fn install_virtual_devices() -> Result<String> {
             );
         }
         bail!(
-            "The complete Babel Audio Windows driver package is not bundled with this application. Obtain the signed package for this architecture and place its BabelAudio.inf, BabelAudio.sys, BabelAudio.cat and installation helpers in drivers/windows next to the Babel executable. See native/windows/README.md. No device was installed."
+            "On Windows x64, install Virtual Cables and its signed USB/IP transport separately, then select two cables in Babel. See the Windows routing guide in docs/platforms.md."
         );
     }
 }

@@ -8,6 +8,18 @@ pub(super) const BABEL_MICROPHONE_UID: &str = "org.babel.audio.microphone.v1";
 pub(super) const BABEL_SPEAKER_UID: &str = "org.babel.audio.speaker.v1";
 pub(super) const BABEL_WINDOWS_ADAPTER: &str = "Babel Audio v1";
 
+/// USB product names published by the Virtual Cables loopback utility.
+pub(super) fn usb_virtual_cable_number(product: &str) -> Option<u8> {
+    let number = product.trim().strip_prefix("Virtual Cable ")?;
+    if number.len() != 2 || !number.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    number
+        .parse()
+        .ok()
+        .filter(|number| (1..=32).contains(number))
+}
+
 pub(super) fn babel_coreaudio_device(native_id: &str) -> bool {
     matches!(
         native_id.strip_prefix("coreaudio:"),
@@ -40,7 +52,10 @@ pub(super) fn babel_virtual_device(native_id: &str, adapter: Option<&str>) -> bo
     // This flag only classifies the list; the Windows activity monitor also
     // requires the exact endpoint role and a unique opposite-side endpoint.
     babel_coreaudio_device(native_id)
-        || (native_id.starts_with("wasapi:") && adapter == Some(BABEL_WINDOWS_ADAPTER))
+        || (native_id.starts_with("wasapi:")
+            && adapter.is_some_and(|adapter| {
+                adapter == BABEL_WINDOWS_ADAPTER || usb_virtual_cable_number(adapter).is_some()
+            }))
 }
 
 pub(super) enum Selection<'a> {

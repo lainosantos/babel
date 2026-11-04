@@ -452,7 +452,7 @@
       const fallback = route === 'microphone' ? 'platform.virtual_microphone' : 'platform.virtual_output';
       const node = byId(`${route}-virtual-label`); delete node.dataset.i18n;
       if (os === 'linux') node.textContent = route === 'microphone' ? 'Babel_Microphone' : 'Babel_Speaker';
-      else if (os === 'macos' && device) node.textContent = device.name;
+      else if (device && (os === 'macos' || os === 'windows')) node.textContent = device.name;
       else node.textContent = t(fallback);
     }
   }
@@ -477,7 +477,9 @@
       for (const key of ['platform.mapping_where', 'platform.mapping_device']) { const cell = text('th', key); cell.scope = 'col'; heading.append(cell); }
       header.append(heading); table.append(header);
       const body = document.createElement('tbody');
-      const endpoints = os === 'macos' ? ['Babel Microphone', 'Babel Microphone', 'Babel Speaker', 'Babel Speaker'] : ['Babel Microphone Feed', 'Babel Microphone', 'Babel Speaker', 'Babel Speaker Monitor'];
+      const endpoints = os === 'macos'
+        ? ['BlackHole 2ch', 'BlackHole 2ch', 'BlackHole 16ch', 'BlackHole 16ch']
+        : ['Virtual Cable 01', 'Virtual Cable 01', 'Virtual Cable 02', 'Virtual Cable 02'];
       for (const [index, key] of ['mic_capture', 'mic_playback', 'app_microphone', 'app_speaker', 'speaker_capture', 'speaker_playback'].entries()) {
         const row = document.createElement('tr'); const label = text('th', `platform.mapping_${key}`); label.scope = 'row';
         const value = index === 0 ? text('td', 'platform.mapping_physical_microphone') : index === 5 ? text('td', 'platform.mapping_physical_output') : document.createElement('td');
@@ -510,7 +512,7 @@
     byId('device-external-guide').hidden = !['macos', 'windows'].includes(os);
     if (os === 'macos' || os === 'windows') {
       platformText('device-external-guide', `platform.${os}_install`);
-      byId('device-external-guide').href = '/help/native-drivers';
+      byId('device-external-guide').href = '/help/platforms';
     }
     validateLocalDirectory();
     renderNativeDeviceGuide(os);

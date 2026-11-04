@@ -1333,19 +1333,19 @@ test('Linux device management follows the host API even when the browser identif
   assert.equal(p.byId('refresh-devices').disabled, false);
 });
 
-test('macOS shows Babel driver setup, permissions and LaunchAgent instead of Linux device actions', async t => {
+test('macOS shows BlackHole setup, permissions and LaunchAgent instead of Linux device actions', async t => {
   const p = await page(t, { platform: 'macos', userAgent: 'Mozilla/5.0 (X11; Linux x86_64)' });
   assert.equal(p.byId('platform-summary'), null);
   assert.equal(p.byId('install-devices').hidden, true); assert.equal(p.byId('install-devices').disabled, true);
   assert.equal(p.byId('uninstall-devices').hidden, true); assert.equal(p.byId('uninstall-devices').disabled, true);
   assert.equal(p.byId('device-external-guide').hidden, false);
-  assert.match(p.byId('platform-device-setup').textContent, /Babel Microphone.*Babel Speaker/);
+  assert.match(p.byId('platform-device-setup').textContent, /BlackHole 2ch.*BlackHole 16ch/);
   assert.match(p.byId('platform-device-permissions').textContent, /Privacidade e Segurança.*Microfone/);
   assert.match(p.byId('platform-autostart').textContent, /LaunchAgent/);
   assert.equal(p.byId('microphone-virtual-label').textContent, 'Babel Microphone');
   assert.equal(p.byId('speaker-virtual-label').textContent, 'Babel Speaker');
   assert.equal(p.byId('platform-guide').getAttribute('href'), '/help/platforms');
-  assert.equal(p.byId('device-external-guide').getAttribute('href'), '/help/native-drivers');
+  assert.equal(p.byId('device-external-guide').getAttribute('href'), '/help/platforms');
   assert.equal(p.byId('refresh-devices').disabled, false);
   assert.equal(p.calls.some(call => call.path.startsWith('/api/virtual/')), false);
 });
@@ -1353,13 +1353,13 @@ test('macOS shows Babel driver setup, permissions and LaunchAgent instead of Lin
 test('Windows displays cable directions, microphone privacy and per-user startup without changing drafts', async t => {
   const p = await page(t, { platform: 'windows', userAgent: 'Mozilla/5.0 (Macintosh; Intel Mac OS X)' });
   assert.equal(p.byId('platform-summary'), null);
-  assert.match(p.byId('platform-device-setup').textContent, /Babel Microphone.*Babel Speaker/);
-  assert.match(p.byId('platform-device-details').textContent, /Babel Microphone Feed.*Babel Speaker Monitor/);
+  assert.match(p.byId('platform-device-setup').textContent, /Virtual Cable 01.*Virtual Cable 02/);
+  assert.match(p.byId('platform-device-details').textContent, /Virtual Cable 01.*Virtual Cable 02/);
   assert.match(p.byId('platform-device-permissions').textContent, /aplicativos desktop.*Windows/);
   assert.match(p.byId('platform-autostart').textContent, /Run.*Registro/);
   assert.equal(p.byId('install-devices').hidden, true); assert.equal(p.byId('uninstall-devices').disabled, true);
-  assert.equal(p.byId('microphone-virtual-label').textContent, 'Microfone virtual');
-  assert.equal(p.byId('speaker-virtual-label').textContent, 'Saída virtual');
+  assert.equal(p.byId('microphone-virtual-label').textContent, 'Babel Microphone Feed');
+  assert.equal(p.byId('speaker-virtual-label').textContent, 'Babel Speaker Monitor');
   p.set('speaker-target_language', 'ja-JP');
   p.byId('autostart-enabled').click();
   await chooseInterface(p, 'en');
@@ -1370,7 +1370,7 @@ test('Windows displays cable directions, microphone privacy and per-user startup
   assert.equal(p.byId('autostart-enabled').checked, true);
   p.window.BabelI18n.apply();
   assert.equal(p.byId('platform-summary'), null);
-  assert.match(p.byId('platform-device-setup').textContent, /Babel Microphone/);
+  assert.match(p.byId('platform-device-setup').textContent, /Virtual Cable 01/);
   p.byId('refresh-devices').click();
   await settle(() => p.byId('notice').textContent === 'Device list refreshed.');
   assert.equal(p.byId('speaker-target_language').value, 'ja-JP');
@@ -1405,7 +1405,7 @@ test('unknown or unavailable host metadata never assumes Linux and refresh recov
   assert.equal(p.calls.some(call => call.path.startsWith('/api/virtual/')), false);
 });
 
-test('native Babel guide maps both independent paths, links local build guidance and survives locale changes', async t => {
+test('virtual audio guide maps both independent paths, links local build guidance and survives locale changes', async t => {
   for (const os of ['macos', 'windows']) {
     const p = await page(t, { platform: os });
     const guide = p.byId('platform-native-guide');
@@ -1416,11 +1416,11 @@ test('native Babel guide maps both independent paths, links local build guidance
     const cells = [...guide.querySelectorAll('tbody td')].map(cell => cell.textContent);
     assert.equal(cells.length, 6);
     assert.deepEqual(cells.slice(1, 5), os === 'macos'
-      ? ['Babel Microphone', 'Babel Microphone', 'Babel Speaker', 'Babel Speaker']
-      : ['Babel Microphone Feed', 'Babel Microphone', 'Babel Speaker', 'Babel Speaker Monitor']);
+      ? ['BlackHole 2ch', 'BlackHole 2ch', 'BlackHole 16ch', 'BlackHole 16ch']
+      : ['Virtual Cable 01', 'Virtual Cable 01', 'Virtual Cable 02', 'Virtual Cable 02']);
     assert.equal(guide.querySelectorAll('tbody th[scope="row"]').length, 6);
     assert.match(guide.textContent, /pacote de distribuição assinado.*validação em hardware.*pendentes/);
-    assert.match(guide.textContent, os === 'macos' ? /macOS 14\.2.*BlackHole.*opcionais/ : /Babel Audio v1.*WASAPI.*VB-CABLE.*opcionais/);
+    assert.match(guide.textContent, os === 'macos' ? /macOS 14\.2.*BlackHole.*gratuitos/ : /Virtual Cables.*WASAPI.*gratuito.*Windows x64/);
     const links = [...guide.querySelectorAll('a')];
     assert.deepEqual(links.map(link => new URL(link.href).pathname), ['/help/native-drivers', '/help/platforms']);
     for (const link of links) {
@@ -1434,7 +1434,7 @@ test('native Babel guide maps both independent paths, links local build guidance
     await chooseInterface(p, 'en');
     assert.equal(p.byId('platform-native-guide'), guide);
     assert.equal(guide.open, true);
-    assert.match(guide.querySelector('summary').textContent, /Babel driver installation/);
+    assert.match(guide.querySelector('summary').textContent, /Virtual audio setup/);
     assert.match(guide.textContent, /does not execute or elevate/);
     assert.match(guide.textContent, os === 'macos' ? /macOS 14\.2.*diagnostic/ : /ASIO.*have not been validated/);
     assert.equal(p.byId('speaker-target_language').value, 'ja-JP');
