@@ -160,7 +160,7 @@ async function page(t, options = {}) {
   return { window, doc, byId, calls, set, volume: value => { outputVolume = value; }, statusResponse: handler => { statusResponse = handler; }, history: status => { audioHistory = status; }, historySession: status => { historySession = status; }, finalizing: sessions => { finalizingSessions = sessions; }, retention: sessions => { retainedSessions = sessions; }, retentionRequest: handler => { retentionRequest = handler; }, recoveryRequest: handler => { recoveryRequest = handler; }, runtime: status => { localRuntime = status; }, config: () => config, poll: () => interval(), externalChange: callback => { callback(config); revision++; }, filePaths: handler => { filePathsHandler = handler; }, platformFailure: failure => { platformFailure = failure; }, routing: (active, error = null) => { routingActive = active; routingError = error; }, routeStatus: (route, status) => { routeStatuses[route] = status; } };
 }
 
-test('stopped captures finalize in the background while a new session starts independently', async t => {
+test('session files finalize in the background while a new session starts independently', async t => {
   const p = await page(t, { language: 'en', finalizeOnStop: true });
   p.set('session-name', 'First session');
   p.byId('start').click();
@@ -173,7 +173,7 @@ test('stopped captures finalize in the background while a new session starts ind
   assert.equal(p.byId('session-state').textContent, 'Finalizing session');
   assert.equal(p.byId('finalizing-sessions').children.length, 1);
   assert.match(p.byId('finalizing-sessions').textContent, /First session/);
-  assert.equal(p.byId('notice').textContent, 'Session capture stopped. Any pending work continues in the background.');
+  assert.equal(p.byId('notice').textContent, 'Session ended. Translation and transcription have stopped.');
 
   p.set('session-name', 'Second session');
   p.byId('start').click();

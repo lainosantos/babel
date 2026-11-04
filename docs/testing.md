@@ -63,7 +63,7 @@ filters; rate conversion keeps channels separate, rejects aliasing and preserves
 continuity across blocks. This verifies the Babel operations exercised by the
 test, not bit transparency of the target operating system's mixer or driver.
 
-Two supervisor tests exercise independent synthetic routes while a writer fails
+Supervisor tests exercise independent synthetic routes while a writer fails
 or remains pending. Both routes must keep transporting frames,
 `Controller::status()` must report active routing with a visible processing
 error, and closing routes must allow original routing to resume before waiting
@@ -114,7 +114,9 @@ Transcript delivery also waits for a writer blocked for 45 simulated seconds.
 Provider fixtures distinguish input EOF from final model acknowledgement and
 require the last output before success. Playback fixtures retain ownership until
 the device drain completes and report interrupted delivery as incomplete.
-Controller tests keep older finalizers alive while another session is stopped.
+Controller tests verify that Stop drops stalled model workers while keeping
+older file finalizers alive. A loopback provider test holds a history request
+open and verifies that Stop still saves text already received.
 
 These are deterministic local/loopback tests, not live-cloud latency measurements
 or proof against OS, device, disk or process failure. A crashed process loses its

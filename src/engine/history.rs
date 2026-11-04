@@ -72,6 +72,7 @@ impl Drop for PendingGuard {
 
 /// Preserve the historical prefix while live STT runs independently. The text
 /// backlog is bounded by both records and bytes; no audio callback waits on it.
+/// Returns whether history inference completed, after syncing all received text.
 pub(super) async fn write_transcript(
     writer: TranscriptWriter,
     mut live: mpsc::Receiver<TranscriptRecord>,
@@ -79,7 +80,8 @@ pub(super) async fn write_transcript(
     snapshot: HistorySnapshot,
     pending: Arc<AtomicBool>,
     cache: Option<Arc<transcription_cache::Cache>>,
-) -> Result<()> {
+    stop: CancellationToken,
+) -> Result<bool> {
     let guard = PendingGuard(pending);
     if !snapshot.frames.iter().any(|frame| match frame.lane {
         RecordingLane::Microphone => config.transcription.microphone,
@@ -88,22 +90,21 @@ pub(super) async fn write_transcript(
         drop(guard);
         drop(snapshot);
         drop(config);
-        return writer.run(live).await;
+        writer.run(live).await?;
+        return Ok(true);
     }
     let (output, output_rx) = mpsc::channel(128);
     // Keep ownership of the file task if this worker fails or is dropped.
     let mut writer_task =
         tokio_util::task::AbortOnDropHandle::new(tokio::spawn(writer.run(output_rx)));
     let (history_tx, mut history_rx) = mpsc::channel(32);
-    // Stop closes capture, but accepted history belongs to the file worker.
-    // Cancel replay only when this worker ends, never with the device token.
-    let replay_cancel = CancellationToken::new();
+    // Each history model also sees Stop while this worker is blocked on disk.
+    let replay_cancel = stop.child_token();
     let replay_guard = replay_cancel.clone().drop_guard();
     let seconds = snapshot.included_secs;
     let captured_at = chrono::Utc::now()
         - chrono::Duration::from_std(snapshot.origin.elapsed()).unwrap_or_default();
-    let replay = replay(config, snapshot, history_tx, replay_cancel, cache);
-    tokio::pin!(replay);
+    let mut replay = Box::pin(replay(config, snapshot, history_tx, replay_cancel, cache));
     let mut backlog = VecDeque::new();
     let mut backlog_bytes = 0;
     let mut live_open = true;
@@ -114,7 +115,9 @@ pub(super) async fn write_transcript(
         ))).await.context("Transcript file closed")?;
         let replay_result = loop {
             tokio::select! {
-                result = &mut replay => break result,
+                biased;
+                _ = stop.cancelled() => break None,
+                result = &mut replay => break (!stop.is_cancelled()).then_some(result),
                 record = history_rx.recv(), if history_open => match record {
                     Some(record) => output.send(record).await.context("Transcript file closed")?,
                     None => history_open = false,
@@ -128,30 +131,36 @@ pub(super) async fn write_transcript(
                 },
             }
         };
+        drop(replay);
+        drop(replay_guard);
+        history_rx.close();
         while let Ok(record) = history_rx.try_recv() {
             output.send(record).await.context("Transcript file closed")?;
         }
         drop(guard);
-        if let Err(error) = &replay_result {
-            output.send(TranscriptRecord::Section(format!("Incomplete history: {error:#}")))
+        let incomplete = match &replay_result {
+            None => Some("History transcription stopped with the session".into()),
+            Some(Err(error)) => Some(format!("Incomplete history: {error:#}")),
+            Some(Ok(())) => None,
+        };
+        if let Some(message) = incomplete {
+            output.send(TranscriptRecord::Section(message))
                 .await.context("Transcript file closed")?;
         }
         output.send(TranscriptRecord::Section("From the session start".into()))
             .await.context("Transcript file closed")?;
         for record in backlog { output.send(record).await.context("Transcript file closed")?; }
-        // A failed history prefix must not discard live finals still arriving
-        // after the capture routes have stopped.
+        // Finish writing the live text already delivered to the file worker.
         while let Some(record) = live.recv().await {
             output.send(record).await.context("Transcript file closed")?;
         }
-        replay_result
+        replay_result.transpose().map(|result| result.is_some())
     }.await;
-    drop(replay_guard);
     drop(output);
     let finalized = (&mut writer_task)
         .await
         .context("Transcript file interrupted")?;
-    result.and(finalized)
+    result.and_then(|complete| finalized.map(|()| complete))
 }
 
 fn record_size(record: &TranscriptRecord) -> Result<usize> {
@@ -217,25 +226,26 @@ async fn replay(
         let clock = snapshot.origin;
         let cache = cache.clone();
         routes.spawn(async move {
-            let provider = provider::stt::create(&recognition, &profiles)?;
-            let session = provider::stt::session_config(&recognition, &profiles)?;
-            let (audio_tx, audio_rx) = mpsc::channel(8);
-            let input = feed_frames(frames, clock, audio_tx, route_cancel.clone());
-            let model = recovery::transcribe(
-                provider,
-                session,
-                audio_rx,
-                output,
-                origin,
-                route_cancel.clone(),
-                cache,
-            );
-            tokio::try_join!(input, model)?;
-            ensure!(
-                !route_cancel.is_cancelled(),
-                "History transcription stopped before completion"
-            );
-            Ok::<_, anyhow::Error>(())
+            route_cancel
+                .run_until_cancelled(async {
+                    let provider = provider::stt::create(&recognition, &profiles)?;
+                    let session = provider::stt::session_config(&recognition, &profiles)?;
+                    let (audio_tx, audio_rx) = mpsc::channel(8);
+                    let input = feed_frames(frames, clock, audio_tx, route_cancel.clone());
+                    let model = recovery::transcribe(
+                        provider,
+                        session,
+                        audio_rx,
+                        output,
+                        origin,
+                        route_cancel.clone(),
+                        cache,
+                    );
+                    tokio::try_join!(input, model)?;
+                    Ok::<_, anyhow::Error>(())
+                })
+                .await
+                .unwrap_or(Ok(()))
         });
     }
     while let Some(result) = routes.join_next().await {
@@ -495,6 +505,7 @@ mod tests {
             snapshot,
             Arc::new(AtomicBool::new(true)),
             None,
+            CancellationToken::new(),
         ));
         let mut reader = crate::history::HistoryReader::default();
         let mut records = Vec::new();
@@ -650,6 +661,7 @@ mod tests {
             snapshot,
             pending.clone(),
             None,
+            CancellationToken::new(),
         ));
         tokio::time::timeout(Duration::from_secs(2), async {
             while pending.load(Ordering::Acquire) {
@@ -723,7 +735,15 @@ mod tests {
         });
         let result = tokio::time::timeout(
             Duration::from_secs(2),
-            write_transcript(writer, rx, config, snapshot, pending.clone(), None),
+            write_transcript(
+                writer,
+                rx,
+                config,
+                snapshot,
+                pending.clone(),
+                None,
+                CancellationToken::new(),
+            ),
         )
         .await
         .unwrap();
@@ -739,6 +759,15 @@ mod tests {
 
     #[tokio::test]
     async fn closing_live_capture_keeps_history_pending_until_its_result_precedes_live_text() {
+        finish_history_with_inflight_inference(false).await;
+    }
+
+    #[tokio::test]
+    async fn stopping_the_session_cancels_history_inference_and_saves_received_text() {
+        finish_history_with_inflight_inference(true).await;
+    }
+
+    async fn finish_history_with_inflight_inference(cancel_history: bool) {
         let entered = Arc::new(tokio::sync::Notify::new());
         let release = Arc::new(tokio::sync::Notify::new());
         let arrived = entered.clone();
@@ -786,6 +815,7 @@ mod tests {
                 .unwrap();
         let (live, rx) = mpsc::channel(4);
         let pending = Arc::new(AtomicBool::new(true));
+        let stop = CancellationToken::new();
         let mut task = tokio::spawn(write_transcript(
             writer,
             rx,
@@ -793,6 +823,7 @@ mod tests {
             snapshot,
             pending.clone(),
             None,
+            stop.clone(),
         ));
         tokio::time::timeout(Duration::from_secs(3), entered.notified())
             .await
@@ -812,8 +843,6 @@ mod tests {
         })
         .await
         .unwrap();
-        // Closing accepted live input is the file worker's Stop boundary.
-        // It cannot cancel the separately owned, in-flight history request.
         drop(live);
         assert!(
             tokio::time::timeout(Duration::from_millis(50), &mut task)
@@ -826,16 +855,27 @@ mod tests {
                 .unwrap()
                 .contains("fala ao vivo")
         );
-        release.notify_one();
-        tokio::time::timeout(Duration::from_secs(3), task)
+        if cancel_history {
+            stop.cancel();
+        } else {
+            release.notify_one();
+        }
+        let complete = tokio::time::timeout(Duration::from_secs(3), task)
             .await
             .unwrap()
             .unwrap()
             .unwrap();
+        assert_eq!(complete, !cancel_history);
         assert!(!pending.load(Ordering::Acquire));
         let text = std::fs::read_to_string(directory.path().join("history.txt")).unwrap();
-        assert!(text.find("fala recuperada").unwrap() < text.find("fala ao vivo").unwrap());
-        assert!(text.contains("[audio +0.000–0.500s]"));
+        if cancel_history {
+            assert!(text.contains("History transcription stopped with the session"));
+            assert!(!text.contains("fala recuperada"));
+        } else {
+            assert!(text.find("fala recuperada").unwrap() < text.find("fala ao vivo").unwrap());
+            assert!(text.contains("[audio +0.000–0.500s]"));
+        }
+        assert!(text.contains("fala ao vivo"));
         assert!(text.contains("[audio +1.500–1.800s]"));
         assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 1);
         server.abort();

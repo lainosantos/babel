@@ -302,6 +302,7 @@ struct Running {
     _local_runtime: Option<crate::local_runtime::RuntimeLease>,
     session: crate::session::SessionIdentity,
     cancel: CancellationToken,
+    stop_models: CancellationToken,
     task: JoinHandle<Result<()>>,
     microphone: Arc<RouteMetrics>,
     speaker: Arc<RouteMetrics>,
@@ -533,11 +534,13 @@ impl Controller {
         }
         self.monitor_cancel.cancel();
         let session = self.stop().await;
-        // Normal Quit, like Stop, never aborts accepted work. Keep the ephemeral
-        // keys and local model leases alive while finalizers still need them.
+        // Give file writers time to finish saving accepted audio and text.
         loop {
             let pending = {
                 let mut state = self.state.lock().await;
+                for session in &state.finalizing {
+                    session.stop_models.cancel();
+                }
                 reap(&mut state).await;
                 !state.finalizing.is_empty()
             };
@@ -962,6 +965,7 @@ impl Controller {
         let (physical_input, input_changes) = watch::channel(cfg.microphone.capture_device.clone());
         let (physical_output, output_changes) = watch::channel(cfg.speaker.playback_device.clone());
         let cancel = CancellationToken::new();
+        let stop_models = CancellationToken::new();
         let routes_closed = Arc::new(RoutesClosed::default());
         let (microphone, speaker) = RouteMetrics::for_configuration(&cfg, &self.commands);
         let usage = endpoint_usage(&mut state);
@@ -985,6 +989,7 @@ impl Controller {
                 routes_closed: routes_closed.clone(),
                 retained,
                 progress: archive.as_ref().map(|archive| archive.progress.clone()),
+                stop_models: stop_models.clone(),
             },
         ));
         state.running = Some(Running {
@@ -993,6 +998,7 @@ impl Controller {
             _cancel_on_drop: cancel.clone().drop_guard(),
             session,
             cancel,
+            stop_models,
             task,
             microphone,
             speaker,
@@ -1011,8 +1017,9 @@ impl Controller {
         let mut state = self.state.lock().await;
         cancel_pending_start(&mut state);
         if let Some(running) = state.running.take() {
-            // Stop defines the capture boundary. Inference, files and translated
-            // playback keep their session ownership until acknowledged completion.
+            // End inference and translated playback immediately. File writers
+            // still own the accepted audio and text.
+            running.stop_models.cancel();
             running.cancel.cancel();
             state.finalizing.push(running);
             state.last = stopped_status();
@@ -1088,7 +1095,13 @@ async fn reap(state: &mut State) {
         }
         status.running = false;
         status.routing_active = false;
-        recovery::finish_archive(state, session.retained.take(), &mut status).await;
+        recovery::finish_archive(
+            state,
+            session.retained.take(),
+            &mut status,
+            session.stop_models.is_cancelled(),
+        )
+        .await;
         if state.running.is_none() {
             state.last = status;
         }
@@ -1166,6 +1179,7 @@ struct SessionIo {
     routes_closed: Arc<RoutesClosed>,
     retained: Option<Arc<retained::RetainedSession>>,
     progress: Option<Arc<recovery::SessionProgress>>,
+    stop_models: CancellationToken,
 }
 
 #[derive(Clone)]
@@ -1205,6 +1219,15 @@ async fn run_session(
         let recent = io.recent.clone();
         let config = cfg.clone();
         let pending = io.history_transcription_pending.clone();
+        let stop_models = io.stop_models.clone();
+        let cache = io
+            .retained
+            .as_ref()
+            .map(|originals| originals.transcripts.clone());
+        let committed = io
+            .progress
+            .as_ref()
+            .map(|progress| progress.transcript.clone());
         let affected = [
             cfg.transcription.microphone.then(|| mic.clone()),
             cfg.transcription.speaker.then(|| speaker.clone()),
@@ -1216,24 +1239,25 @@ async fn run_session(
             }
         }));
         writers.spawn_on(
-            commit_writer(
-                observe_session_writer(
-                    history::write_transcript(
+            observe_session_writer(
+                async move {
+                    let complete = history::write_transcript(
                         writer,
                         rx,
                         config,
                         recent,
                         pending,
-                        io.retained
-                            .as_ref()
-                            .map(|originals| originals.transcripts.clone()),
-                    ),
-                    "Consolidated transcription",
-                    affected,
-                ),
-                io.progress
-                    .as_ref()
-                    .map(|progress| progress.transcript.clone()),
+                        cache,
+                        stop_models,
+                    )
+                    .await?;
+                    if complete && let Some(committed) = committed {
+                        committed.store(true, Ordering::Release);
+                    }
+                    Ok(())
+                },
+                "Consolidated transcription",
+                affected,
             ),
             &processing_handle,
         );
@@ -1356,8 +1380,7 @@ async fn run_session(
             if cfg.audio.microphone_source == crate::config::MicrophoneSource::SpeakerOutput
                 && cfg.speaker.enabled
             {
-                // Translated speaker output owns its microphone destination
-                // through EOF, independently of this capture scope.
+                // The translation worker owns its mirrored microphone output.
                 continue;
             }
             routes.spawn_on(
@@ -1396,7 +1419,8 @@ async fn run_session(
                     originals,
                 );
                 writers.spawn_on(
-                    commit_writer(
+                    run_session_model(
+                        io.stop_models.clone(),
                         observe_session_writer(
                             worker,
                             "Original speech transcription",
@@ -1438,7 +1462,8 @@ async fn run_session(
                     usage.clone(),
                 );
                 writers.spawn_on(
-                    commit_writer(
+                    run_session_model(
+                        io.stop_models.clone(),
                         observe_session_writer(
                             translation,
                             "Speech translation",
@@ -1476,8 +1501,7 @@ async fn run_session(
             );
         }
     }
-    // Workers finish only after every route has released its sender. This lets
-    // disk writers drain and finalize their files after audio/network shutdown.
+    // File writers drain accepted audio and text after capture and inference stop.
     drop(transcript_tx);
     supervise_session(
         routes,
@@ -1488,6 +1512,16 @@ async fn run_session(
         io.retained.clone(),
     )
     .await
+}
+
+async fn run_session_model(
+    stop: CancellationToken,
+    model: impl Future<Output = Result<()>>,
+    committed: Option<Arc<AtomicBool>>,
+) -> Result<()> {
+    stop.run_until_cancelled(commit_writer(model, committed))
+        .await
+        .unwrap_or(Ok(()))
 }
 
 async fn commit_writer(
@@ -1606,8 +1640,7 @@ async fn supervise_session(
     if let Some(retained) = retained {
         retained.close_capture();
     }
-    // Accepted work is session-owned. A slow model or disk never turns elapsed
-    // time into permission to discard it; explicit failures retain the archive.
+    // Explicit Stop cancels model workers. Allow file writes and sync to finish.
     while let Some(completed) = writers.join_next().await {
         retain_session_failure(&mut failure, completed, &metrics);
     }
@@ -2091,6 +2124,7 @@ mod tests {
             _local_runtime: None,
             session: crate::session::SessionIdentity::new(Some("Writer error")).unwrap(),
             cancel,
+            stop_models: CancellationToken::new(),
             task: supervisor,
             microphone: metrics[0].clone(),
             speaker: metrics[1].clone(),
@@ -2162,7 +2196,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn stopping_a_new_session_does_not_cancel_an_older_finalizer() {
+    async fn stop_cancels_inference_and_keeps_older_file_finalizers() {
         let directory = tempfile::tempdir().unwrap();
         let controller =
             Controller::new(AppConfig::default(), directory.path().join("config.toml")).unwrap();
@@ -2187,14 +2221,36 @@ mod tests {
         let mut releases = Vec::new();
         for name in ["First", "Second"] {
             let cancel = CancellationToken::new();
+            let stop_models = CancellationToken::new();
             let stopped = cancel.clone();
             let closed = Arc::new(RoutesClosed::default());
             let captured = closed.clone();
             let (release, wait) = tokio::sync::oneshot::channel();
             releases.push(release);
+            let committed = Arc::new(AtomicBool::new(false));
+            let mut models = JoinSet::new();
+            let mut dropped_models = Vec::new();
+            for _ in ["translation", "transcription"] {
+                let (drop_with_model, dropped) = tokio::sync::oneshot::channel::<()>();
+                let (entered, running) = tokio::sync::oneshot::channel();
+                models.spawn(run_session_model(
+                    stop_models.clone(),
+                    async move {
+                        let _drop_with_model = drop_with_model;
+                        entered.send(()).unwrap();
+                        std::future::pending().await
+                    },
+                    Some(committed.clone()),
+                ));
+                running.await.unwrap();
+                dropped_models.push(dropped);
+            }
             let task = tokio::spawn(async move {
                 stopped.cancelled().await;
                 captured.close();
+                while let Some(result) = models.join_next().await {
+                    result??;
+                }
                 wait.await.context("Pending work was discarded")
             });
             let (physical_input, _) = watch::channel(String::new());
@@ -2205,6 +2261,7 @@ mod tests {
                 _local_runtime: None,
                 session: crate::session::SessionIdentity::new(Some(name)).unwrap(),
                 cancel,
+                stop_models,
                 task,
                 microphone: Arc::default(),
                 speaker: Arc::default(),
@@ -2216,6 +2273,15 @@ mod tests {
                 retained: None,
             });
             controller.stop().await.unwrap();
+            for dropped in dropped_models {
+                assert!(
+                    tokio::time::timeout(Duration::from_secs(2), dropped)
+                        .await
+                        .expect("Stop must cancel in-flight inference")
+                        .is_err()
+                );
+            }
+            assert!(!committed.load(Ordering::Acquire));
             let mut state = controller.state.lock().await;
             assert!(endpoint_usage(&mut state).same_channel(&shared_usage));
             assert!(!observer_cancel.is_cancelled());
@@ -2622,6 +2688,7 @@ mod tests {
             _cancel_on_drop: cancel.clone().drop_guard(),
             session,
             cancel: cancel.clone(),
+            stop_models: CancellationToken::new(),
             task,
             microphone: metrics.clone(),
             speaker: Arc::new(RouteMetrics::default()),

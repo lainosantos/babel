@@ -157,8 +157,9 @@ one-second tail instead of narrating the full backlog.
 
 Sessions using recording, transcription or translation retain accepted original
 sources independently of processing queues. If a session-file writer, recognizer
-or file finalization fails, the **Session files need recovery** card offers **Recover session**, which
-reprocesses the retained originals. Keep Babel open until recovery completes.
+or file finalization fails, the **Session recovery** card offers **Recover session**.
+The same action can resume work canceled by **Stop session**. Keep Babel open
+until recovery completes.
 The optional pre-session prefix is retained too. Both sources keep their own
 timestamps and enter recognition separately; mixing happens only in the WAV.
 
@@ -293,13 +294,12 @@ are visible without canceling original routing.
 
 ## Finalization and privacy
 
-Stop closes capture for that session. Babel then consumes every accepted original,
-writes the recording tail and updates the WAV header before closing. Included
-history and original transcription continue independently of capture. Files stay
-in finalization until completion or an explicit provider/storage failure; no
-session-wide timer discards the pending backlog. Original routing continues, and
-a new session can start while earlier files finish. A failed finalization reports
-the error and retains originals for recovery while Babel remains open.
+**Stop session** closes capture and cancels translation, translated playback
+and transcription, including transcription of the pre-session history. Babel
+finishes writing the accepted original audio to the WAV and saves text already
+received. Original routing resumes after the capture handoff, and a new session
+can start while earlier files finish. Originals for unfinished processing remain
+available for manual recovery while Babel stays open.
 
 Intermediate WAV headers are periodically updated for committed data. Power loss,
 forced termination, hardware failure or disk failure can leave files incomplete;

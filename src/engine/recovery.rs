@@ -125,6 +125,7 @@ pub(super) async fn finish_archive(
     state: &mut State,
     archive: Option<Archive>,
     status: &mut EngineStatus,
+    models_stopped: bool,
 ) {
     let Some(archive) = archive else {
         return;
@@ -133,22 +134,35 @@ pub(super) async fn finish_archive(
     let retained = archive.originals.status();
     // Retention is released only after every selected consumer has committed,
     // including translated playback, not merely after the files close.
-    let error = retained.error.or_else(|| {
-        (!archive.progress.complete(&archive.config)).then(|| {
-            status
-                .last_error
-                .clone()
-                .unwrap_or_else(|| "Session processing did not finish".into())
-        })
-    });
-    if (error.is_none() || retained.frames == 0 && archive.history.frames.is_empty())
+    let complete = archive.progress.complete(&archive.config);
+    if (complete && retained.error.is_none()
+        || retained.frames == 0 && archive.history.frames.is_empty())
         && !retained.missing_audio
     {
         release_completed(archive);
         return;
-    } else {
-        archive.fail(error.unwrap_or_else(|| "Original capture was incomplete".into()));
     }
+    if models_stopped
+        && !retained.missing_audio
+        && retained.error.is_none()
+        && status.last_error.is_none()
+    {
+        // A user-requested stop can leave pending inference without a failure.
+        state.retained.push(archive);
+        return;
+    }
+    archive.fail(
+        retained
+            .error
+            .or_else(|| status.last_error.clone())
+            .unwrap_or_else(|| {
+                if retained.missing_audio {
+                    "Original capture was incomplete".into()
+                } else {
+                    "Session processing did not finish".into()
+                }
+            }),
+    );
     let message =
         "Original audio is retained for recovery. Keep Babel open until recovery finishes.";
     status.last_error = Some(match status.last_error.take() {
@@ -317,15 +331,24 @@ async fn replay(
     }
     let transcript = if let Some(writer) = files.transcript {
         let (sender, received) = mpsc::channel(128);
+        let config = config.clone();
+        let history = archive.history.clone();
+        let cache = archive.originals.transcripts.clone();
+        let stop = cancellation.child_token();
         workers.spawn(commit_writer(
-            history::write_transcript(
-                writer,
-                received,
-                config.clone(),
-                archive.history.clone(),
-                Arc::new(AtomicBool::new(true)),
-                Some(archive.originals.transcripts.clone()),
-            ),
+            async move {
+                history::write_transcript(
+                    writer,
+                    received,
+                    config,
+                    history,
+                    Arc::new(AtomicBool::new(true)),
+                    Some(cache),
+                    stop,
+                )
+                .await?;
+                Ok(())
+            },
             Some(archive.progress.transcript.clone()),
         ));
         sender.send(TranscriptRecord::Section(format!(

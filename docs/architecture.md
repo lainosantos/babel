@@ -227,14 +227,12 @@ selected by other apps.
 Folders and files are prepared before stopping original routing. After closing
 the previous streams, the controller fixes the history boundary and adjusts the
 WAV time origin, avoiding artificial silence caused by file-opening time. On
-stop, closing capture releases original-routing restart while processing continues
-in a background finalizer. Device shutdown remains bounded and an unverified
-capture tail is an explicit incomplete-session failure. Accepted processing has
-no blanket finalization deadline. Providers, translated playback and writers
-keep their ownership until completion or an explicit failure retains the source
-for recovery. A new session can start meanwhile; ending it does not cancel older
-finalizers. Reopening devices can still produce a brief gap; an OS or driver
-failure cannot be repaired by a processing queue.
+stop, Babel cancels session-owned inference and translated playback while
+closing capture. Original routing resumes when capture releases the devices.
+Device shutdown remains bounded and an unverified capture tail is an explicit
+incomplete-session failure. File writers finish saving accepted audio and text
+in the background. A new session can start while older files finish.
+Reopening devices can still produce a brief gap.
 
 Across all three backends, the microphone activates when the Babel virtual
 endpoint is the system's default input or an external app explicitly uses it.
@@ -263,7 +261,7 @@ configured virtual endpoints revokes the old observer and creates a replacement.
 
 When a route's activity condition disappears, its supervisor cancels capture,
 original playback and voice-command activation. Translated playback has a separate
-selection fence that remains alive through session finalization. Losing the relevant
+selection fence that remains active while translation owns the output. Losing the relevant
 OS output selection, an inspection failure, or a changed selection epoch interrupts
 translation and fences queued playback; originals remain available for automatic
 recovery once that direction is selected again. Speaker capture activity and accepted playback authorization are distinct:
@@ -461,11 +459,11 @@ Only encrypted records leave staging RAM, and only acknowledged session completi
 releases the journal and RAM-only key. Optional pre-session history uses its own
 rotating encrypted journals with keys kept only in memory.
 
-Provider input EOF requests completion, rather than cancellation. Local segment
-queues, translated playback and file writers drain their accepted input. There is
-no blanket 15/30-second deadline for finalization. Per-request provider failures
-never acknowledge completion. Transcription buffers results until whole-window
-success, retries the same original PCM on failure, then advances its capture clock.
+Provider input EOF requests completion for a submitted window or a manual
+recovery. **Stop session** cancels pending provider requests and translated
+playback. File writers drain accepted audio and text. Transcription buffers
+results until the whole window succeeds. On failure it retries the same original
+PCM before advancing its capture clock.
 Gemini normal windows, history, and recovery all use the configured Live
 Transcribe model. Each finite window has one explicit activity boundary at EOF,
 including its overflow capture chunk and quiet tail, with 100 ms PCM messages
@@ -479,12 +477,10 @@ extend the same unconfirmed prefix with later originals, up to 30 seconds plus
 one capture chunk. Size and retry limits defer the unresolved interval, preserving
 an incomplete-session diagnostic and its encrypted originals while later windows
 continue through recognition. Active capture keeps retrying transient transport
-failures with a longer cooldown after the initial budget. Stop wakes that cooldown and bounds failed attempts
-for finalization. Missing finals after Stop allow one context retry only when
-following retained audio is available; permanent Gemini failures pause immediately. Processing status
-retains the sanitized failure per feature.
-Once automatic attempts are exhausted, originals remain available for explicit
-recovery, allowing the finalizer to finish without an endless paid request loop.
+failures with a longer cooldown after the initial budget. **Stop session** cancels
+pending retries. Permanent Gemini failures pause immediately. Processing status
+retains the sanitized failure per feature. Originals for unfinished windows
+remain available for explicit recovery.
 Gemini transcription sends every nonzero window to its configured recognizer;
 only exact digital silence can skip a request. Its completion comes from model
 responses, without a local speech-classification heuristic. A bundled Earshot

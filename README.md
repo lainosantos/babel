@@ -61,8 +61,10 @@ cargo run --release -- serve
 The OS chooses an available dashboard port on each run. The terminal prints the
 actual address with a session token; open that complete link or **Settings**
 from the tray, which tracks the current address. The tray offers **Settings**,
-**Start session**, **Stop session** and **Quit**. Stopping a session finalizes
-its files and returns to original audio; quitting Babel also stops local routing.
+**Start session**, **Stop session** and **Quit**. Stopping a session cancels
+translation and transcription and returns to original audio. The recording and
+text already received finish saving in the background. Quitting Babel also
+stops local routing.
 You can select the **physical microphone** and **physical output**, whether
 translation is stopped or running, and refresh the device list. Switching keeps
 the AI session and files open; a brief audio gap is possible. The dashboard also

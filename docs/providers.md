@@ -159,10 +159,9 @@ classifier acknowledges or discards a transcription window. WAV and encrypted
 retention preserve every original sample. Continuous translation uses its own
 pending-work detector and forwards unchanged PCM. See
 [transcription tail handling](transcription.md#gemini-live-transcribe).
-Translation checks output selection before retry inference. During capture it
-waits locally for reselection; after Stop it pauses unselected work for explicit
-recovery. Neither case makes paid requests while unselected. Catch-up only
-advances its cursor.
+Translation checks output selection before retrying inference and waits
+locally for reselection before making paid requests. **Stop session** cancels
+pending translation. Catch-up only advances its cursor.
 
 ## Participants, timestamps and voice identity
 

@@ -1150,7 +1150,7 @@
   byId('stop').addEventListener('click', () => action(async () => {
     await api('/stop', { method: 'POST' });
     renderStatus(await api('/status'));
-    announce(t('session.capture_stopped'));
+    announce(t('session.stopped'));
     void refreshRetention();
   }));
   byId('reload-config').addEventListener('click', () => action(async () => { await reloadConfig(); announce(t("ui.saved_settings_reloaded_review_devices_before_starting")); }));

@@ -128,9 +128,8 @@ EOF. It never divides the engine's five-second window again: its overflow captur
 chunk and quiet tail stay with the preceding speech rather than becoming a tiny
 second turn. PCM messages contain at most 100 ms of audio. Final acknowledgement
 has a 30-second deadline after the complete window is submitted; a delayed result
-within that limit can finish without reconnecting. This is a per-window failure
-bound, not a time limit on successful session finalization. Absence of a final
-result is never treated as proof of silence or successful recognition.
+within that limit can finish without reconnecting. This limit applies to each submitted window. Provider acknowledgement is required
+to confirm silence or successful recognition.
 For wordless input, the server can omit an empty transcript and send only
 `voiceActivity: ACTIVITY_END`, with the submitted audio's exact ending offset.
 The adapter accepts this explicit boundary when no interim words remain pending.
@@ -177,8 +176,8 @@ text or acknowledges missing originals.
 
 Original routing and capture do not wait for recognition. Network failures or
 invalid results report their cause without stopping original routing or recording.
-If retries cannot complete a window after Stop, pending work is paused for
-explicit recovery. A hardware capture gap or exhausted original retention space
+**Stop session** cancels pending recognition and saves the text already
+received. Unfinished windows remain available for explicit recovery. A hardware capture gap or exhausted original retention space
 is reported as incomplete capture; later recognition cannot
 reconstruct audio that was never captured. The journal uses a RAM-only key, so
 keep Babel open until pending work finishes. See

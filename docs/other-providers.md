@@ -114,13 +114,12 @@ accelerated backlog replay preserves every pending window. See the
 [recovery policy](recording.md#recover-an-incomplete-session). Reconnecting an empty
 stream cannot claim earlier speech was processed.
 
-Stop ends capture and closes the provider's input after queued audio drains.
-For continuous translation, Babel flushes the resampler tail, sends
-`session.close`, and receives remaining audio and text through `session.closed`.
-For conversational translation, it commits the final partial utterance and waits
-for its matching completed response and any requested input transcript. Playback
-and processing can continue after capture stops. A missing final acknowledgement
-or failed request reports an incomplete session and preserves retained originals.
+When a provider input reaches EOF during normal processing, continuous translation
+flushes the resampler tail, sends `session.close`, and receives remaining audio
+and text through `session.closed`. Conversational translation commits the final
+partial utterance and waits for the matching response and any requested input
+transcript. **Stop session** cancels active processing and playback.
+Unfinished work remains available for manual recovery.
 Messages and active queues are bounded; output delivery waits for playback or
 text-storage capacity without a consumer-delivery deadline. Network, request
 and final-acknowledgement deadlines still apply. Older source audio remains

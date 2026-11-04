@@ -71,6 +71,30 @@ async fn original_samples(archive: &Archive) -> Vec<(RecordingLane, Vec<i16>)> {
 }
 
 #[tokio::test]
+async fn stopping_inference_keeps_manual_recovery_available_without_a_failure() {
+    let (_directory, controller, mut archive) = fixture().await;
+    archive.config.transcription.enabled = true;
+    archive.config.transcription.microphone = true;
+    archive.config.speaker.enabled = true;
+    archive.progress.recording.store(true, Ordering::Release);
+    archive.progress.transcript.store(true, Ordering::Release);
+    let mut status = stopped_status();
+    finish_archive(
+        &mut *controller.state.lock().await,
+        Some(archive.clone()),
+        &mut status,
+        true,
+    )
+    .await;
+    let retained = controller.retained_sessions().await;
+    assert_eq!(retained.len(), 1);
+    assert_eq!(retained[0].id, archive.session.id);
+    assert_eq!(retained[0].frames, 2);
+    assert!(!retained[0].recovering);
+    assert!(retained[0].error.is_none() && status.last_error.is_none());
+}
+
+#[tokio::test]
 async fn failed_recording_worker_keeps_both_originals_in_controller_ownership() {
     let (_directory, controller, archive) = fixture().await;
     let files = create_session_files(&archive.config, &archive.session, archive.origin)
@@ -93,6 +117,7 @@ async fn failed_recording_worker_keeps_both_originals_in_controller_ownership() 
         &mut *controller.state.lock().await,
         Some(archive.clone()),
         &mut status,
+        false,
     )
     .await;
     assert_eq!(controller.retained_sessions().await.len(), 1);
@@ -127,6 +152,7 @@ async fn a_successful_session_acknowledges_originals_after_final_output_sync() {
         &mut *controller.state.lock().await,
         Some(archive.clone()),
         &mut status,
+        false,
     )
     .await;
     assert!(controller.retained_sessions().await.is_empty());
@@ -287,6 +313,7 @@ async fn failed_history_only_session_preserves_shared_originals_and_recovers_bot
         &mut *controller.state.lock().await,
         Some(archive.clone()),
         &mut status,
+        false,
     )
     .await;
     let pending = controller.retained_sessions().await;
@@ -538,6 +565,7 @@ async fn translation_failure_does_not_retain_already_committed_original_outputs(
         &mut *controller.state.lock().await,
         Some(archive.clone()),
         &mut status,
+        false,
     )
     .await;
     assert!(

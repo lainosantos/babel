@@ -230,6 +230,11 @@ start with one direction, a smaller model and a thread count that leaves CPU
 capacity for audio. The dashboard retains preparation errors, and queue limits
 prevent unbounded lag.
 
+**Stop session** cancels the session’s local translation and recognition,
+including translated playback. Babel saves the recording and text already
+received. Original audio for unfinished processing remains available for
+explicit recovery while Babel stays open.
+
 Live inference overload keeps the session active: old pending speech is skipped
 with a visible processing warning so recent speech can continue. This can leave
 gaps in translation or live transcription on slower hardware; transcription
