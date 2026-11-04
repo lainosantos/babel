@@ -285,6 +285,7 @@
     config.audio.microphone_source ??= 'physical_microphone';
     microphoneDraft.source = config.audio.microphone_source;
     microphoneDraft.device = config.microphone.capture_device || '';
+    config.recording.layout ??= 'separate_channels';
     config.recording.mix = { microphone_gain_db: 0, speaker_gain_db: 0, microphone_priority: true, ducking_db: 3, microphone_threshold_db: -50, ...config.recording.mix };
     state.config = config;
     writeValue(byId('files-base_path'), config.files?.base_path ?? '');
@@ -743,8 +744,11 @@
     for (const field of ['microphone', 'speaker', 'timestamps']) byId(`transcription-${field}`).disabled = !transcriptionEnabled || !sourceAvailable(field);
     for (const field of ['microphone', 'speaker']) byId(`recording-${field}`).disabled = !byId('recording-enabled').checked || !sourceAvailable(field);
     const recordingEnabled = byId('recording-enabled').checked;
-    for (const route of routeNames) byId(`recording-${route}-gain`).disabled = !featureRoute('recording', route);
-    const mixedRecording = recordingEnabled && routeNames.every(route => featureRoute('recording', route));
+    byId('recording-layout').disabled = !recordingEnabled;
+    const separateChannels = byId('recording-layout').value === 'separate_channels';
+    byId('recording-mix').hidden = separateChannels;
+    for (const route of routeNames) byId(`recording-${route}-gain`).disabled = separateChannels || !featureRoute('recording', route);
+    const mixedRecording = !separateChannels && recordingEnabled && routeNames.every(route => featureRoute('recording', route));
     byId('recording-microphone-priority').disabled = !mixedRecording;
     for (const field of ['ducking', 'microphone-threshold']) byId(`recording-${field}`).disabled = !mixedRecording || !byId('recording-microphone-priority').checked;
     byId('save-state').textContent = state.configConflict ? t("ui.reload_settings") : state.dirty ? t("ui.unsaved_settings") : t("ui.settings_saved");

@@ -475,6 +475,7 @@ mod tests {
                 .send(AudioRecord {
                     lane,
                     samples: vec![value; 8000],
+                    channels: 1,
                     captured_at: snapshot.origin + Duration::from_millis(1500),
                 })
                 .await
@@ -513,6 +514,7 @@ mod tests {
             records.push(AudioRecord {
                 lane: frame.lane,
                 samples: frame.read_samples(&mut reader).await.unwrap().to_vec(),
+                channels: 1,
                 captured_at: frame.captured_at,
             });
         }

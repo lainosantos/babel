@@ -303,8 +303,8 @@ Among other behaviors, it verifies:
   active features independent of optional preparation, and snapshots that do
   not persist temporary ports.
 - Original transcript persistence, legitimate metadata and file permissions.
-- A single WAV with simultaneous mixing, headroom, gaps, a monotonic clock,
-  headers/checkpoints, draining and refusal to overwrite files.
+- A single WAV with two isolated stereo pairs or a mono mix, with tests for
+  gaps, checkpoints, finalization and recovery from the encrypted journal.
 - Device switching with stable channels, cancellation and error recovery.
 - Original forwarding with preserved PCM, bounded queues, stale-audio disposal
   and cancellation even when output is saturated.

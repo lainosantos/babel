@@ -1152,7 +1152,7 @@ async fn create_session_files(
     };
     let audio = if let Some(directory) = recording_directory {
         Some(
-            SessionAudioRecorder::create_with_mix(
+            SessionAudioRecorder::create_with_layout(
                 &directory,
                 &stem,
                 origin,
@@ -1161,6 +1161,7 @@ async fn create_session_files(
                     && crate::config::route_configured(&config.microphone),
                 config.recording.speaker && crate::config::route_configured(&config.speaker),
                 &config.recording.mix,
+                config.recording.layout,
             )
             .await?,
         )
@@ -1298,16 +1299,9 @@ async fn run_session(
                         let feed = async {
                             let mut history_reader = crate::history::HistoryReader::default();
                             for frame in frames {
-                                tx.send(AudioRecord {
-                                    lane: frame.lane,
-                                    samples: frame
-                                        .read_samples(&mut history_reader)
-                                        .await?
-                                        .to_vec(),
-                                    captured_at: frame.captured_at,
-                                })
-                                .await
-                                .context("Recording writer closed before history completion")?;
+                                tx.send(frame.recording(&mut history_reader).await?)
+                                    .await
+                                    .context("Recording writer closed before history completion")?;
                             }
                             let mut reader = retained::RecordingReader::new(
                                 originals,
@@ -1326,7 +1320,7 @@ async fn run_session(
                         tokio::try_join!(feed, write)?;
                         Ok(())
                     },
-                    "Mixed original audio recording",
+                    "Original audio recording",
                     affected,
                 ),
                 io.progress
@@ -2001,6 +1995,7 @@ mod tests {
                 send.send(AudioRecord {
                     lane,
                     samples: vec![sample; 320],
+                    channels: 1,
                     captured_at: origin + Duration::from_millis(20),
                 })
                 .await
@@ -2015,7 +2010,7 @@ mod tests {
                 .unwrap();
             assert_eq!(
                 samples,
-                vec![1000; 320],
+                [0, 0, 1000, 1000].repeat(320),
                 "mirror output is not an additional original lane"
             );
         }
@@ -2384,6 +2379,7 @@ mod tests {
                     "text/original".into()
                 };
                 cfg.recording.enabled = record;
+                cfg.recording.layout = crate::config::RecordingLayout::Mixed;
                 cfg.recording.directory = if absolute_override {
                     audio_directory.to_str().unwrap().into()
                 } else {
@@ -2431,6 +2427,7 @@ mod tests {
                         .send(AudioRecord {
                             lane: RecordingLane::Microphone,
                             samples: vec![1000; 320],
+                            channels: 1,
                             captured_at: origin + Duration::from_millis(20),
                         })
                         .await
@@ -2458,6 +2455,7 @@ mod tests {
         let mut cfg = AppConfig::default();
         cfg.files.base_path = directory.path().to_str().unwrap().into();
         cfg.recording.enabled = true;
+        cfg.recording.layout = crate::config::RecordingLayout::Mixed;
         cfg.recording.mix.microphone_gain_db = 12.0;
         cfg.recording.mix.speaker_gain_db = -6.0;
         cfg.recording.mix.microphone_priority = false;
@@ -2482,6 +2480,7 @@ mod tests {
                 .send(AudioRecord {
                     lane,
                     samples: vec![value; 16000],
+                    channels: 1,
                     captured_at: origin + Duration::from_secs(1),
                 })
                 .await

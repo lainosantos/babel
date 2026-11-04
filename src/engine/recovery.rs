@@ -139,7 +139,7 @@ impl Archive {
                     .frames
                     .iter()
                     .filter(|frame| frame.memory_bytes() == 0)
-                    .map(|frame| (frame.sample_count() * 2) as u64)
+                    .map(|frame| frame.pcm_bytes() as u64)
                     .sum::<u64>(),
             error: self
                 .error
@@ -438,12 +438,8 @@ async fn replay(
         let mut history_reader = crate::history::HistoryReader::default();
         while let Some(originals) = &mut originals {
             let frame = match history.next() {
-                Some(frame) => AudioRecord {
-                    lane: frame.lane,
-                    samples: frame.read_samples(&mut history_reader).await?.to_vec(),
-                    captured_at: frame.captured_at,
-                },
-                None => match originals.next().await? {
+                Some(frame) => frame.recording(&mut history_reader).await?,
+                None => match originals.next_recording().await? {
                     Some(frame) => frame,
                     None => break,
                 },

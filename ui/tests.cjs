@@ -23,7 +23,7 @@ function defaults() {
         whisper: { endpoint: 'auto', model: 'base', api_key_env: '', segment_ms: 2000, silence_ms: 300, vad_threshold: 0.01, request_timeout_secs: 30 },
       } },
     files: { base_path: '/home/test/Babel', name_pattern: '{date}-{time}-{session}-{id}' },
-    recording: { enabled: false, microphone: true, speaker: true, directory: 'recordings', mix: { microphone_gain_db: 0, speaker_gain_db: 0, microphone_priority: true, ducking_db: 3, microphone_threshold_db: -50 } },
+    recording: { enabled: false, microphone: true, speaker: true, directory: 'recordings', layout: 'mixed', mix: { microphone_gain_db: 0, speaker_gain_db: 0, microphone_priority: true, ducking_db: 3, microphone_threshold_db: -50 } },
     history: { enabled: true, duration_secs: 600 },
   };
 }
@@ -250,7 +250,7 @@ test('the real dashboard separates routing, translation, transcription and recor
     routing: ['microphone-capture_device', 'microphone-playback_device', 'speaker-capture_device', 'speaker-playback_device', 'microphone-input', 'speaker-output', 'microphone-state', 'speaker-state', 'microphone-signal', 'speaker-signal', 'audio-quality'],
     translation: ['microphone-enabled', 'speaker-enabled', 'microphone-source_language', 'speaker-target_language', 'microphone-provider', 'speaker-provider', 'microphone-prompt', 'speaker-prompt', 'microphone-gain', 'speaker-gain', 'profile-selector', 'credential-gemini'],
     transcription: ['transcription-enabled', 'transcription-microphone', 'transcription-speaker', 'transcription-timestamps', 'transcription-directory', 'microphone-transcripts', 'speaker-transcripts', 'stt-microphone-provider', 'stt-speaker-language', 'stt-profile-selector', 'stt-profile-deepgram-model', 'stt-profile-whisper-endpoint', 'stt-credential-gemini'],
-    recording: ['recording-enabled', 'recording-microphone', 'recording-speaker', 'recording-directory', 'recording-microphone-gain', 'recording-speaker-gain', 'recording-microphone-priority', 'recording-ducking', 'recording-microphone-threshold'],
+    recording: ['recording-enabled', 'recording-microphone', 'recording-speaker', 'recording-directory', 'recording-layout', 'recording-microphone-gain', 'recording-speaker-gain', 'recording-microphone-priority', 'recording-ducking', 'recording-microphone-threshold'],
     settings: ['files-base_path', 'files-name_pattern', 'files-path-preview'],
   };
   for (const [view, ids] of Object.entries(groups)) {
@@ -710,6 +710,26 @@ test('recording and original transcription save independently with one shared fi
   assert.equal(p.config().recording.speaker, false);
   assert.equal(p.doc.querySelector('.transcription-settings').textContent.includes('um único .txt'), true);
   assert.equal(p.doc.querySelector('.recording-settings').textContent.includes('único WAV'), true);
+});
+
+test('separate WAV channels save their layout and keep the mixed recording settings', async t => {
+  const p = await page(t, { language: 'en', initialChange: config => { delete config.recording.layout; } });
+  const layout = p.byId('recording-layout');
+  assert.equal(layout.value, 'separate_channels');
+  p.set('recording-enabled', true);
+  p.set('recording-layout', 'mixed');
+  p.set('recording-microphone-gain', 6);
+  p.set('recording-layout', 'separate_channels');
+  assert.equal(p.byId('recording-mix').hidden, true);
+  assert.equal(p.byId('recording-microphone-gain').disabled, true);
+  p.byId('save').click();
+  await settle(() => p.config().recording.layout === 'separate_channels' && !p.byId('settings').disabled);
+  assert.equal(layout.value, 'separate_channels');
+  assert.equal(p.config().recording.mix.microphone_gain_db, 6);
+  p.set('recording-layout', 'mixed');
+  assert.equal(p.byId('recording-mix').hidden, false);
+  assert.equal(p.byId('recording-microphone-gain').disabled, false);
+  assert.equal(p.byId('recording-microphone-gain').value, '6');
 });
 
 test('recording balance round-trips independently of translation, recognition, history and routing on every host', async t => {

@@ -314,13 +314,18 @@ async fn bridge_with_history(
                     generation = current;
                 }
                 if history.accepts(frame.captured_at) {
-                    let speech = tap
-                        .get_or_insert_with(super::speech::SpeechTap::new)
-                        .convert(&frame);
-                    history.push(lane, &speech.samples, speech.captured_at);
+                    let speech = tap.get_or_insert_with(super::speech::SpeechTap::stereo);
+                    if let Some(tail) = speech.finish_before(&frame) {
+                        history.push_stereo(lane, &tail.samples, tail.captured_at);
+                    }
+                    let pcm = speech.convert(&frame);
+                    history.push_stereo(lane, &pcm.samples, pcm.captured_at);
                 } else {
                     tap = None;
                 }
+            }
+            if let Some(tail) = tap.and_then(|mut tap| tap.finish()) {
+                history.push_stereo(lane, &tail.samples, tail.captured_at);
             }
         });
         (Some(tx), Some(worker))

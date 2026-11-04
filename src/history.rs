@@ -1,5 +1,5 @@
 //! Rolling originals with bounded memory staging and encrypted disk storage.
-//! Capture workers supply mono PCM16 at 16 kHz; only retention workers perform
+//! Capture workers supply PCM16 at 16 kHz; only retention workers perform
 //! disk I/O. Snapshots pin encrypted references and decrypt incrementally.
 mod storage;
 use crate::{config::HistoryConfig, recording::RecordingLane};
@@ -28,6 +28,7 @@ pub struct HistoryFrame {
     /// Shared storage; use read_samples() because the retained interval may be clipped.
     pub samples: Arc<storage::Audio>,
     pub captured_at: Instant,
+    channels: u16,
     range: Range<usize>,
 }
 impl HistoryFrame {
@@ -43,7 +44,41 @@ impl HistoryFrame {
         &self,
         reader: &mut HistoryReader,
     ) -> anyhow::Result<zeroize::Zeroizing<Vec<i16>>> {
-        reader.samples(&self.samples, self.range.clone()).await
+        let samples = self.read_interleaved(reader).await?;
+        Ok(if self.channels == 2 {
+            zeroize::Zeroizing::new(crate::audio::speech::stereo_to_mono(&samples))
+        } else {
+            samples
+        })
+    }
+
+    async fn read_interleaved(
+        &self,
+        reader: &mut HistoryReader,
+    ) -> anyhow::Result<zeroize::Zeroizing<Vec<i16>>> {
+        let channels = usize::from(self.channels);
+        reader
+            .samples(
+                &self.samples,
+                self.range.start * channels..self.range.end * channels,
+            )
+            .await
+    }
+
+    pub(crate) async fn recording(
+        &self,
+        reader: &mut HistoryReader,
+    ) -> anyhow::Result<crate::recording::AudioRecord> {
+        Ok(crate::recording::AudioRecord {
+            lane: self.lane,
+            samples: self.read_interleaved(reader).await?.to_vec(),
+            channels: self.channels,
+            captured_at: self.captured_at,
+        })
+    }
+
+    pub(crate) fn pcm_bytes(&self) -> usize {
+        self.sample_count() * usize::from(self.channels) * 2
     }
 
     pub fn started_at(&self) -> Instant {
@@ -77,7 +112,7 @@ pub struct HistoryStatus {
     pub capacity_secs: u32,
     /// Wall-clock coverage up to now, including gaps after/between captures.
     pub available_secs: f64,
-    /// Union of the sample timelines reconstructed for mixed recording: real
+    /// Union of the sample timelines reconstructed for recording: real
     /// gaps are excluded, callback jitter is absorbed, and simultaneous lanes
     /// count once. Original PCM chunks within a lane remain consecutive.
     pub combined_audio_secs: f64,
@@ -312,7 +347,20 @@ impl HistoryBuffer {
     /// Called on a worker, never an audio callback. Invalid/oversized frames and
     /// per-lane timestamps moving backwards are dropped before allocating PCM.
     pub fn push(&self, lane: RecordingLane, samples: &[i16], captured_at: Instant) {
-        if !self.enabled() || samples.is_empty() || samples.len() > MAX_FRAME_SAMPLES {
+        self.push_pcm(lane, samples, captured_at, 1);
+    }
+
+    pub(crate) fn push_stereo(&self, lane: RecordingLane, samples: &[i16], captured_at: Instant) {
+        self.push_pcm(lane, samples, captured_at, 2);
+    }
+
+    fn push_pcm(&self, lane: RecordingLane, samples: &[i16], captured_at: Instant, channels: u16) {
+        let frames = samples.len() / usize::from(channels);
+        if !self.enabled()
+            || frames == 0
+            || frames > MAX_FRAME_SAMPLES
+            || !samples.len().is_multiple_of(usize::from(channels))
+        {
             return;
         }
         let mut contents = self.contents.lock().unwrap_or_else(|e| e.into_inner());
@@ -339,12 +387,13 @@ impl HistoryBuffer {
         else {
             return;
         };
-        lane_buffer.allocated_samples += samples.len();
+        lane_buffer.allocated_samples += frames;
         lane_buffer.frames.push_back(HistoryFrame {
             lane,
             samples: audio,
             captured_at,
-            range: 0..samples.len(),
+            channels,
+            range: 0..frames,
         });
         contents.prune(captured_at);
     }
@@ -377,7 +426,7 @@ impl HistoryBuffer {
             })
             .collect::<Vec<_>>();
         drop(contents);
-        // Globally chronological completion keeps a mixed recording's holdback
+        // Globally chronological completion keeps the recorder's holdback
         // bounded while preserving order within both independent capture lanes.
         frames.sort_by_key(|frame| frame.captured_at);
         let origin = frames
@@ -421,18 +470,17 @@ impl HistoryBuffer {
             .storage
             .as_ref()
             .map_or((0, self.storage_error.clone(), 0), storage::Storage::status);
-        let retained_bytes = contents
-            .lanes
-            .iter()
-            .map(|lane| lane.allocated_samples * 2)
-            .sum();
-        let encrypted_bytes = contents
+        let (retained_bytes, encrypted_bytes) = contents
             .lanes
             .iter()
             .flat_map(|lane| &lane.frames)
-            .filter(|frame| frame.memory_bytes() == 0)
-            .map(|frame| frame.sample_count() * 2)
-            .sum();
+            .fold((0, 0), |(retained, encrypted), frame| {
+                let bytes = frame.pcm_bytes();
+                (
+                    retained + bytes,
+                    encrypted + if frame.memory_bytes() == 0 { bytes } else { 0 },
+                )
+            });
         HistoryStatus {
             enabled: contents.config.enabled,
             capacity_secs: contents.config.duration_secs,
@@ -702,6 +750,7 @@ mod tests {
             records.push(AudioRecord {
                 lane: frame.lane,
                 samples: frame.read_samples(&mut reader).await.unwrap().to_vec(),
+                channels: 1,
                 captured_at: frame.captured_at,
             });
         }
@@ -762,6 +811,27 @@ mod tests {
         assert_eq!(
             history.status(now).retained_bytes,
             SAMPLE_RATE * size_of::<i16>()
+        );
+    }
+
+    #[tokio::test]
+    async fn encrypted_stereo_history_clips_in_frames_and_preserves_the_channel_pair() {
+        let history = buffer(10);
+        let now = Instant::now();
+        let mut stereo = [100, -100].repeat(8000);
+        stereo.extend([1000, -600].repeat(8000));
+        history.push_stereo(Speaker, &stereo, now - Duration::from_millis(500));
+        history.flush().await;
+        let snapshot = history.snapshot(1, now);
+        let frame = &snapshot.frames[0];
+        assert_eq!(frame.sample_count(), 8000);
+        let mut reader = HistoryReader::default();
+        let record = frame.recording(&mut reader).await.unwrap();
+        assert_eq!(record.channels, 2);
+        assert_eq!(record.samples, [1000, -600].repeat(8000));
+        assert_eq!(
+            &*frame.read_samples(&mut reader).await.unwrap(),
+            &[200; 8000]
         );
     }
 

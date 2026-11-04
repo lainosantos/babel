@@ -1,14 +1,25 @@
 # Original session recording
 
-Audio recording is optional and off by default. When enabled, it produces
-**one WAV file per session**, mixing the selected original sources:
+Audio recording is optional and off by default. Each session produces one
+WAV with the selected originals on a shared timeline.
 
-- **Microphone:** speech captured before translation.
-- **Incoming audio:** audio captured from the virtual output before translation.
+- **Separate stereo pairs (4 channels)** is the default. Channels 1–2 carry
+  the microphone's left and right signals. Channels 3–4 carry the left and
+  right signals of incoming audio. Each source keeps its captured level.
+  Mono sources fill both channels of their pair with the same signal.
+  A disabled or absent source leaves its pair silent.
+- **Mixed (mono)** combines microphone and incoming audio in one channel.
 
-Both inputs share the same timeline. Simultaneous voices overlap in the file;
-intervals without audio remain silent. Sources are not concatenated one after
-another, and the file does not contain the translator's synthesized voice.
+Choose the layout in **Recording → WAV layout** before starting the session.
+In an editor that supports multichannel WAV, group channels 1–2 and 3–4 into
+two stereo tracks. To export each pair as a stereo WAV, use the following
+commands. The `pan` filter uses zero-based channel indices.
+[FFmpeg channel remapping](https://ffmpeg.org/ffmpeg-filters.html#pan)
+
+```sh
+ffmpeg -i session.wav -af "pan=stereo|c0=c0|c1=c1" -c:a pcm_s16le microphone.wav
+ffmpeg -i session.wav -af "pan=stereo|c0=c2|c1=c3" -c:a pcm_s16le incoming.wav
+```
 
 ## Configuration
 
@@ -18,6 +29,7 @@ enabled = false
 microphone = true
 speaker = true
 directory = "recordings"
+layout = "separate_channels" # Use "mixed" for mono
 
 [recording.mix]
 microphone_gain_db = 0.0
@@ -76,7 +88,7 @@ Pattern tokens:
 | `{session}` | Session name converted to an identifier of up to 64 bytes. |
 | `{id}` | Unique session identifier. |
 
-The same stem is used for the **single mixed WAV** and **single TXT containing
+The same stem is used for the **single WAV** and **single TXT containing
 both sources' original transcripts**, when both are enabled. The app adds
 extensions in each type's configured directory. `{id}` is required to reduce
 session collisions. Existing files are never overwritten: a collision is an
@@ -120,8 +132,8 @@ enabled = true
 duration_secs = 600
 ```
 
-Ten minutes of both sources use about 38.4 MB of encrypted PCM on disk
-(mono PCM16 at 16 kHz), plus metadata and encryption framing. Plaintext staging
+Ten minutes of both sources use about 76.8 MB of encrypted PCM on disk
+(stereo PCM16 at 16 kHz), plus metadata and encryption framing. Plaintext staging
 is capped at 8 MiB independently of the selected duration; replay decrypts at
 most two 256 KiB batches per consumer. Encryption and file I/O run on the
 retention executor, independent of original routing. Failed writes retry the
@@ -161,10 +173,10 @@ or file finalization fails, the **Session recovery** card offers **Recover sessi
 The same action can resume work canceled by **Stop session**. Keep Babel open
 until recovery completes.
 The optional pre-session prefix is retained too. Both sources keep their own
-timestamps and enter recognition separately; mixing happens only in the WAV.
+timestamps and enter recognition separately. The WAV uses the selected layout.
 
-Recovery uses the session's original source selections, folders, mixing settings
-and STT profiles. It creates new uniquely named files with a shared stem, leaving
+Recovery uses the session's original sources, folders, WAV layout, balance
+settings and STT profiles. It creates new uniquely named files with a shared stem, leaving
 the previous partial files untouched. Cloud recognition can incur additional
 charges. Unconfirmed recognition windows retry automatically; terminal setup failures keep originals available for another attempt;
 closing the dashboard does not cancel recovery. Original live routing continues.
@@ -216,15 +228,15 @@ These storage and recovery paths are shared Rust code on Linux, macOS and Window
 
 ## Format and volume
 
-The WAV uses **PCM16 mono at 16 kHz**, uncompressed. It contains original audio
-from Babel's capture, converted in the separate speech-processing copy; it is
-not a multichannel 48 kHz hardware archive. Original live routing retains its
-negotiated float format independently. Recording precedes translation,
-synthesis and output gain.
+The WAV uses uncompressed **PCM16 at 16 kHz**. Stereo capture is resampled
+with independent filters for left and right. For sources with more than two
+channels, Babel averages the channels into a dual-mono pair. Recognizers and
+translators receive a mono copy. Original live routing retains its negotiated
+format independently. Recording precedes translation, synthesis and output gain.
 
 The two sources can have very different levels: a quiet microphone can become
 inaudible under louder music even though both original signals are present.
-**Recording → Recording balance** controls this balance only in the saved WAV:
+**Recording → Recording balance** adjusts the saved WAV in mixed mode:
 
 - **Microphone level** and **Incoming audio level** independently adjust the original
   sources from −24 to +24 dB; both default to 0 dB. Increase the microphone gain
@@ -245,10 +257,10 @@ inaudible under louder music even though both original signals are present.
   activity; a less negative value rejects more background noise. This is level
   detection, not speech recognition: loud noise at the microphone can activate it.
 
-These settings apply to the next session. They never change the physical device
-volume, original live routing, translated voice gain, STT input, or recent audio
-history. History included at session start uses the same recording mix exactly
-once, followed by live originals without resetting the mix state. Speaker-only
+The layout and balance apply to the next session. They never change the physical
+device volume, live routing, translated voice gain, STT input, or recent audio
+history. History included at session start uses the same layout and timeline as
+the live originals. Speaker-only
 recording never ducks itself, and microphone-only recording cannot attenuate an
 unselected incoming source. No model, service or network request is involved.
 
@@ -261,15 +273,11 @@ levels without integer clipping. This introduces no latency into live routing.
 There is no automatic normalization of quiet microphone noise toward a target
 level. Turn priority off when you want fixed original-source levels.
 
-The mixed file cannot perfectly separate the two voices afterward. Changing
-these controls does not repair a previously saved mix or recover a microphone
-that was not captured; separate-source recovery would require a different
-recording format with independent channels.
-
-Disk use is approximately **115 MB per hour**. RIFF WAV's container limit is
-about 37 hours in this format. Reaching it reports a recording error instead
-of silently truncating audio or opening another file. Original routing remains
-independent of that recording failure.
+The four-channel layout applies to new recordings. Disk use is approximately
+**461 MB per hour** in this layout and **115 MB per hour** for a mono mix.
+The RIFF size limit is reached after about 9.3 hours with four channels or
+37 hours in mono. Reaching it reports a recording error. Original routing
+continues independently.
 
 ## Timing, device switching and continuity
 
@@ -283,11 +291,10 @@ appear as silence when input resumes. Synchronization is estimated from pipeline
 timestamps, not shared hardware clocks: device-specific latency can offset the
 two sources.
 
-The mixer keeps a bounded two-second window for both inputs before committing
-their sum. It reserves at most three seconds of separate source samples (about
-384 KiB), including room for one incoming frame, plus a small fixed lookahead
-queue. Gains and priority are applied after timestamp alignment, independent of
-frame size or source arrival order. Long gaps are written in bounded blocks. Its input queue
+The recorder keeps a bounded two-second window to align both inputs before
+writing them. It reserves at most three seconds of separate source samples
+(about 384 KiB), including room for one incoming frame. The mixer adds a small
+fixed lookahead queue and applies gain and priority after timestamp alignment. Long gaps are written in bounded blocks. Its input queue
 is also bounded. Excessively delayed input or write failure is reported to the
 session supervisor rather than silently losing recording data. Such failures
 are visible without canceling original routing.

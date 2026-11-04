@@ -1,5 +1,5 @@
 //! Speech-only conversion. Never run this DSP on the original audio executor.
-use super::{OriginalFrame, PcmFrame, resample::Resampler};
+use super::{OriginalFrame, PcmFrame, resample::ChannelResampler};
 use std::time::{Duration, Instant};
 
 /// Conservative PCM16 background floor, checked in 20 ms blocks so a short
@@ -63,12 +63,13 @@ impl VoiceActivity {
 }
 
 pub struct SpeechTap {
-    resampler: Option<Resampler>,
+    resampler: Option<ChannelResampler>,
+    channels: u16,
     format: Option<(u32, u16)>,
     previous: Option<Instant>,
     input_samples: u64,
     output_samples: u64,
-    mono: Vec<f32>,
+    input: Vec<f32>,
     converted: Vec<f32>,
 }
 
@@ -80,13 +81,26 @@ impl Default for SpeechTap {
 
 impl SpeechTap {
     pub fn new() -> Self {
+        Self::with_channels(1)
+    }
+
+    pub(crate) fn stereo() -> Self {
+        Self::with_channels(2)
+    }
+
+    pub(crate) fn channels(&self) -> u16 {
+        self.channels
+    }
+
+    fn with_channels(channels: u16) -> Self {
         Self {
             resampler: None,
+            channels,
             format: None,
             previous: None,
             input_samples: 0,
             output_samples: 0,
-            mono: Vec::new(),
+            input: Vec::new(),
             converted: Vec::new(),
         }
     }
@@ -130,27 +144,40 @@ impl SpeechTap {
     pub fn convert(&mut self, original: &OriginalFrame) -> PcmFrame {
         let channels = usize::from(original.channels.max(1));
         if self.needs_reset(original) {
-            self.resampler = Some(Resampler::new(original.sample_rate, 16_000));
+            self.resampler = Some(ChannelResampler::new(
+                original.sample_rate,
+                16_000,
+                self.channels,
+            ));
             self.format = Some((original.sample_rate, original.channels));
             self.input_samples = 0;
             self.output_samples = 0;
         }
         self.previous = Some(original.captured_at);
-        self.mono.clear();
-        self.mono.extend(
-            original
-                .samples
-                .chunks_exact(channels)
-                .map(|frame| frame.iter().copied().sum::<f32>() / channels as f32),
-        );
+        self.input.clear();
+        for frame in original.samples.chunks_exact(channels) {
+            if self.channels == 1 {
+                self.input
+                    .push(frame.iter().copied().sum::<f32>() / channels as f32);
+            } else {
+                let stereo = match frame {
+                    [left, right] => [*left, *right],
+                    _ => [frame.iter().copied().sum::<f32>() / channels as f32; 2],
+                };
+                self.input.extend(stereo);
+            }
+        }
         self.converted.clear();
         if let Some(resampler) = self.resampler.as_mut() {
-            resampler.process(&self.mono, &mut self.converted);
+            resampler.process(&self.input, &mut self.converted);
         }
-        self.input_samples = self.input_samples.saturating_add(self.mono.len() as u64);
+        let channels = usize::from(self.channels);
+        self.input_samples = self
+            .input_samples
+            .saturating_add((self.input.len() / channels) as u64);
         self.output_samples = self
             .output_samples
-            .saturating_add(self.converted.len() as u64);
+            .saturating_add((self.converted.len() / channels) as u64);
         let expected =
             (u128::from(self.input_samples) * 16_000).div_ceil(u128::from(original.sample_rate));
         let delayed = expected.saturating_sub(u128::from(self.output_samples));
@@ -174,6 +201,15 @@ impl SpeechTap {
             captured_at,
         }
     }
+}
+
+pub(crate) fn stereo_to_mono(samples: &[i16]) -> Vec<i16> {
+    samples
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .map(|&[left, right]| ((i32::from(left) + i32::from(right)) / 2) as i16)
+        .collect()
 }
 
 #[cfg(test)]
@@ -213,6 +249,24 @@ mod tests {
         let mut samples = vec![0; 16000 * 10];
         samples[320..640].copy_from_slice(&[8; 320]);
         assert!(!below_background_floor(&samples));
+    }
+
+    #[test]
+    fn stereo_tap_keeps_left_and_right_through_resampling() {
+        let original = OriginalFrame {
+            samples: [0.75, -0.25].repeat(480).into(),
+            channels: 2,
+            sample_rate: 48_000,
+            captured_at: Instant::now(),
+        };
+        let mut tap = SpeechTap::stereo();
+        let mut pcm = tap.convert(&original).samples;
+        pcm.extend(tap.finish().unwrap().samples);
+        assert_eq!(pcm.len(), 320);
+        for pair in pcm.as_chunks::<2>().0.iter().skip(20).take(120) {
+            assert!((i32::from(pair[0]) - 24_576).abs() <= 1);
+            assert!((i32::from(pair[1]) + 8192).abs() <= 1);
+        }
     }
 
     #[test]

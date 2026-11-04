@@ -23,8 +23,8 @@ use zeroize::Zeroizing;
 const SAMPLE_RATE: u32 = 16_000;
 const FRAME_OVERHEAD: usize = 128;
 const INDEX_OVERHEAD: usize = 96;
-const FRAME_HEADER: usize = 28;
-const METADATA: &[u8] = b"BABEL-ORIGINAL-PCM16-V1";
+const FRAME_HEADER: usize = 30;
+const METADATA: &[u8] = b"BABEL-ORIGINAL-PCM16-V2";
 const JOURNAL_INTERVAL: Duration = Duration::from_millis(250);
 
 #[derive(Clone, Copy)]
@@ -46,11 +46,30 @@ impl Default for Limits {
 struct Original {
     sequence: u64,
     captured_at: Instant,
+    channels: u16,
     samples: Zeroizing<Vec<i16>>,
 }
 impl Original {
     fn memory_bytes(&self) -> usize {
         FRAME_OVERHEAD + self.samples.len() * 2
+    }
+
+    fn audio(&self, lane: usize, preserve_channels: bool) -> AudioRecord {
+        let downmix = !preserve_channels && self.channels == 2;
+        AudioRecord {
+            lane: if lane == 0 {
+                RecordingLane::Microphone
+            } else {
+                RecordingLane::Speaker
+            },
+            channels: if downmix { 1 } else { self.channels },
+            samples: if downmix {
+                crate::audio::speech::stereo_to_mono(&self.samples)
+            } else {
+                self.samples.to_vec()
+            },
+            captured_at: self.captured_at,
+        }
     }
 }
 #[derive(Clone)]
@@ -64,7 +83,7 @@ struct Lane {
     pending: VecDeque<Arc<Original>>,
     stored: Vec<Batch>,
     recent: VecDeque<Arc<Original>>,
-    recent_samples: usize,
+    recent_frames: usize,
     evicted_through: Option<u64>,
     last_capture: Option<Instant>,
 }
@@ -165,10 +184,24 @@ impl RetainedSession {
     /// An error means this new frame was NOT accepted: the caller must stop or
     /// visibly fail capture instead of reporting a complete session.
     pub(super) fn capture(&self, frame: &PcmFrame, origin: TranscriptOrigin) -> Result<u64> {
+        self.capture_pcm(frame, origin, 1)
+    }
+
+    pub(super) fn capture_stereo(&self, frame: &PcmFrame, origin: TranscriptOrigin) -> Result<u64> {
+        self.capture_pcm(frame, origin, 2)
+    }
+
+    fn capture_pcm(
+        &self,
+        frame: &PcmFrame,
+        origin: TranscriptOrigin,
+        channels: u16,
+    ) -> Result<u64> {
         ensure!(
             frame.sample_rate == SAMPLE_RATE
                 && !frame.samples.is_empty()
-                && frame.samples.len() <= SAMPLE_RATE as usize,
+                && frame.samples.len().is_multiple_of(usize::from(channels))
+                && frame.samples.len() <= SAMPLE_RATE as usize * usize::from(channels),
             "Original retention requires at most one second of 16 kHz PCM"
         );
         let lane = lane_index(origin);
@@ -202,6 +235,7 @@ impl RetainedSession {
         let original = Arc::new(Original {
             sequence,
             captured_at: frame.captured_at,
+            channels,
             samples: Zeroizing::new(frame.samples.clone()),
         });
         state.lanes[lane].last_capture = Some(frame.captured_at);
@@ -531,17 +565,19 @@ async fn spill(inner: Arc<Inner>) {
                     let retained = state.lanes[lane].pending.pop_front().unwrap();
                     debug_assert_eq!(retained.sequence, frame.sequence);
                     state.staging_bytes -= retained.memory_bytes();
-                    state.lanes[lane].recent_samples += retained.samples.len();
+                    state.lanes[lane].recent_frames +=
+                        retained.samples.len() / usize::from(retained.channels);
                     state.lanes[lane].recent.push_back(retained);
                 }
                 // A one-second hot cache prevents consumers close to real time
                 // from racing every journal commit into a decrypt/read cycle.
                 // Only already encrypted frames may leave this cache.
-                while state.lanes[lane].recent_samples
-                    > (SAMPLE_RATE as usize).min(inner.limits.soft / 4)
+                while state.lanes[lane].recent_frames
+                    > (SAMPLE_RATE as usize).min(inner.limits.soft / 8)
                 {
                     let evicted = state.lanes[lane].recent.pop_front().unwrap();
-                    state.lanes[lane].recent_samples -= evicted.samples.len();
+                    state.lanes[lane].recent_frames -=
+                        evicted.samples.len() / usize::from(evicted.channels);
                     state.lanes[lane].evicted_through = Some(evicted.sequence);
                     state.memory_bytes -= evicted.memory_bytes();
                 }
@@ -596,6 +632,7 @@ fn encode(frames: &[Arc<Original>], origin: Instant) -> Result<Zeroizing<Vec<u8>
         bytes.extend_from_slice(&frame.sequence.to_le_bytes());
         bytes.extend_from_slice(&offset.to_le_bytes());
         bytes.extend_from_slice(&(frame.samples.len() as u32).to_le_bytes());
+        bytes.extend_from_slice(&frame.channels.to_le_bytes());
         for sample in frame.samples.iter() {
             bytes.extend_from_slice(&sample.to_le_bytes());
         }
@@ -620,9 +657,13 @@ fn decode(bytes: &[u8], origin: Instant, expected: u64) -> Result<VecDeque<Arc<O
         let sequence = u64::from_le_bytes(remaining[..8].try_into().unwrap());
         let offset = i128::from_le_bytes(remaining[8..24].try_into().unwrap());
         let samples = u32::from_le_bytes(remaining[24..28].try_into().unwrap()) as usize;
+        let channels = u16::from_le_bytes(remaining[28..30].try_into().unwrap());
         remaining = &remaining[FRAME_HEADER..];
         ensure!(
-            (1..=SAMPLE_RATE as usize).contains(&samples) && remaining.len() >= samples * 2,
+            matches!(channels, 1 | 2)
+                && (1..=SAMPLE_RATE as usize * usize::from(channels)).contains(&samples)
+                && samples.is_multiple_of(usize::from(channels))
+                && remaining.len() >= samples * 2,
             "Retained original sample count is invalid"
         );
         let duration = Duration::from_nanos(
@@ -650,6 +691,7 @@ fn decode(bytes: &[u8], origin: Instant, expected: u64) -> Result<VecDeque<Arc<O
         frames.push_back(Arc::new(Original {
             sequence,
             captured_at,
+            channels,
             samples: Zeroizing::new(pcm),
         }));
     }
@@ -714,7 +756,7 @@ impl Reader {
         loop {
             self.changes.borrow_and_update();
             let closed = self.retained.status().capture_closed;
-            if let Some(frame) = self.available().await? {
+            if let Some(frame) = self.available(false).await? {
                 return Ok(Some(frame));
             }
             if closed {
@@ -729,22 +771,14 @@ impl Reader {
 
     /// Read already captured work without waiting for this source to become
     /// active. Recording merges available clocks across both sources.
-    async fn available(&mut self) -> Result<Option<AudioRecord>> {
+    async fn available(&mut self, preserve_channels: bool) -> Result<Option<AudioRecord>> {
         loop {
             if let Some(frame) = self.decoded.pop_front() {
                 if frame.sequence < self.next_sequence {
                     continue;
                 }
                 self.next_sequence = frame.sequence + 1;
-                return Ok(Some(AudioRecord {
-                    lane: if self.lane == 0 {
-                        RecordingLane::Microphone
-                    } else {
-                        RecordingLane::Speaker
-                    },
-                    samples: frame.samples.to_vec(),
-                    captured_at: frame.captured_at,
-                }));
+                return Ok(Some(frame.audio(self.lane, preserve_channels)));
             }
             self.changes.borrow_and_update();
             let (batch, memory) = {
@@ -859,7 +893,7 @@ impl RecordingReader {
                 if self.heads[index].is_none()
                     && let Some(source) = &mut self.sources[index]
                 {
-                    self.heads[index] = source.available().await?;
+                    self.heads[index] = source.available(true).await?;
                 }
             }
             if let Some(index) = self
@@ -890,7 +924,16 @@ pub(super) struct Replay {
     replays: Arc<AtomicUsize>,
 }
 impl Replay {
+    #[cfg(test)]
     pub(super) async fn next(&mut self) -> Result<Option<AudioRecord>> {
+        self.next_frame(false).await
+    }
+
+    pub(super) async fn next_recording(&mut self) -> Result<Option<AudioRecord>> {
+        self.next_frame(true).await
+    }
+
+    async fn next_frame(&mut self, preserve_channels: bool) -> Result<Option<AudioRecord>> {
         for index in 0..2 {
             let lane = &mut self.lanes[index];
             if lane.decoded.is_empty()
@@ -926,15 +969,7 @@ impl Replay {
             .pop_front()
             .or_else(|| lane.memory.pop_front())
             .unwrap();
-        Ok(Some(AudioRecord {
-            lane: if index == 0 {
-                RecordingLane::Microphone
-            } else {
-                RecordingLane::Speaker
-            },
-            captured_at: frame.captured_at,
-            samples: frame.samples.to_vec(),
-        }))
+        Ok(Some(frame.audio(index, preserve_channels)))
     }
 }
 impl Drop for Replay {

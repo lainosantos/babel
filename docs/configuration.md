@@ -475,6 +475,7 @@ enabled = false
 microphone = true
 speaker = true
 directory = "recordings"
+layout = "separate_channels" # Or "mixed" for mono
 
 [recording.mix]
 microphone_gain_db = 0.0 # -24..24 dB, saved WAV only
@@ -484,7 +485,7 @@ ducking_db = 3.0 # 0..30 dB reduction
 microphone_threshold_db = -50.0 # -60..-20 dBFS, before microphone gain
 ```
 
-Recording mix controls use the original sources, including any selected history.
+Recording mix controls apply to the mixed layout, including any selected history.
 They never modify live routing, translated playback, STT input, or retained history.
 Disabling microphone priority with both gains at zero preserves the fixed original
 mix. See [recording levels and activity detection](recording.md#format-and-volume)
@@ -664,11 +665,12 @@ On **Recording**, enable the feature and choose sources and the audio folder.
 The **Base folder and filenames** shortcut opens settings shared with transcription
 under **Settings → Session files**.
 
-`recording.enabled` enables **a single little-endian PCM16 WAV, mono at 16 kHz**.
-It receives original physical microphone capture and original virtual output
-capture according to the `microphone` and `speaker` selections. Sources are mixed
-into one track. Capture occurs before translation and translated audio gain:
-AI voices and changes to that gain do not enter the recording.
+`recording.enabled` saves **one PCM16 WAV at 16 kHz** from the original
+sources selected in `microphone` and `speaker`. The default
+`layout = "separate_channels"` places microphone left/right in channels 1–2 and
+incoming audio left/right in channels 3–4. Choose `layout = "mixed"` for a mono
+mix. This setting also appears under **Recording → WAV layout**. Capture
+occurs before translation and translated audio gain.
 
 You can record without transcribing, transcribe without recording, or enable both.
 Neither option depends on `microphone.enabled` or `speaker.enabled`: those fields

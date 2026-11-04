@@ -21,7 +21,6 @@ pub(crate) struct Resampler {
 
 /// Independent channel filters retain stereo separation during unavoidable
 /// hardware-rate conversion. Equal-rate transport does not filter samples.
-#[cfg(any(target_os = "macos", target_os = "windows", test))]
 pub(crate) struct ChannelResampler {
     channels: usize,
     filters: Vec<Resampler>,
@@ -29,7 +28,6 @@ pub(crate) struct ChannelResampler {
     outputs: Vec<Vec<f32>>,
     passthrough: bool,
 }
-#[cfg(any(target_os = "macos", target_os = "windows", test))]
 impl ChannelResampler {
     pub(crate) fn new(input_rate: u32, output_rate: u32, channels: u16) -> Self {
         let channels = usize::from(channels);
@@ -76,6 +74,7 @@ impl ChannelResampler {
             }
         }
     }
+    #[cfg(any(target_os = "macos", target_os = "windows", test))]
     pub(crate) fn reset(&mut self) {
         for filter in &mut self.filters {
             filter.reset();

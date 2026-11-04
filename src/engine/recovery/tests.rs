@@ -5,6 +5,7 @@ async fn fixture() -> (tempfile::TempDir, Controller, Archive) {
     let mut config = AppConfig::default();
     config.files.base_path = directory.path().to_str().unwrap().into();
     config.recording.enabled = true;
+    config.recording.layout = crate::config::RecordingLayout::Mixed;
     config.recording.mix = crate::config::RecordingMixConfig::transparent();
     config.transcription.enabled = false;
     config.microphone.enabled = false;
@@ -106,6 +107,7 @@ async fn failed_recording_worker_keeps_both_originals_in_controller_ownership() 
         .send(AudioRecord {
             lane: RecordingLane::Microphone,
             samples: vec![],
+            channels: 1,
             captured_at: archive.origin,
         })
         .await
@@ -165,7 +167,42 @@ async fn a_successful_session_acknowledges_originals_after_final_output_sync() {
 
 #[tokio::test]
 async fn recording_recovery_merges_original_lanes_and_preserves_the_earlier_partial_file() {
-    let (directory, controller, archive) = fixture().await;
+    verify_recording_recovery(crate::config::RecordingLayout::Mixed, &[2000]).await;
+}
+
+#[tokio::test]
+async fn recording_recovery_keeps_original_lanes_in_separate_channels() {
+    verify_recording_recovery(
+        crate::config::RecordingLayout::SeparateChannels,
+        &[1000, 1000, 3000, 3000],
+    )
+    .await;
+}
+
+async fn verify_recording_recovery(layout: crate::config::RecordingLayout, frame: &[i16]) {
+    let (directory, controller, mut archive) = fixture().await;
+    archive.config.recording.layout = layout;
+    let mut expected = frame.repeat(320);
+    if layout == crate::config::RecordingLayout::SeparateChannels {
+        for (source, pair) in [
+            (TranscriptOrigin::Microphone, [1111, -1111]),
+            (TranscriptOrigin::Speaker, [3333, -3333]),
+        ] {
+            archive
+                .originals
+                .capture_stereo(
+                    &audio::PcmFrame {
+                        samples: pair.repeat(320),
+                        sample_rate: INPUT_RATE,
+                        captured_at: archive.origin + Duration::from_millis(40),
+                    },
+                    source,
+                )
+                .unwrap();
+        }
+        expected.extend([1111, -1111, 3333, -3333].repeat(320));
+    }
+
     let original_stem = archive
         .session
         .file_stem(&archive.config.files.name_pattern)
@@ -195,12 +232,12 @@ async fn recording_recovery_merges_original_lanes_and_preserves_the_earlier_part
     assert_eq!(recovered.len(), 1);
     let mut wave = hound::WavReader::open(&recovered[0]).unwrap();
     assert_eq!(wave.spec().sample_rate, 16_000);
-    assert_eq!(wave.spec().channels, 1);
+    assert_eq!(usize::from(wave.spec().channels), frame.len());
     assert_eq!(
         wave.samples::<i16>()
             .collect::<std::result::Result<Vec<_>, _>>()
             .unwrap(),
-        vec![2000; 320]
+        expected
     );
     wait_for_cleanup(&archive).await;
     assert!(archive.originals.status().completed);

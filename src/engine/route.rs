@@ -25,14 +25,27 @@ pub(super) async fn run_route(
         return Ok(());
     }
     let translating = route.enabled;
+    let preserve_stereo = history.enabled()
+        || cfg.recording.enabled
+            && cfg.recording.layout == crate::config::RecordingLayout::SeparateChannels;
     metrics.original_mode.store(!translating, Ordering::Relaxed);
     let handle = crate::execution::audio_handle()?;
     let capture_device = capture_changes.borrow().clone();
     let playback_device = playback_changes.borrow().clone();
     let (rate, channels) = if translating {
-        audio::original_format(&capture_device, &playback_device)
+        let (rate, channels) = audio::original_format(&capture_device, &playback_device)
             .await
-            .unwrap_or((INPUT_RATE, 1))
+            .unwrap_or((INPUT_RATE, 1));
+        // The capture worker keeps its requested format across device changes.
+        // A mono starting device must not narrow a later stereo device.
+        (
+            rate,
+            if preserve_stereo {
+                channels.max(2)
+            } else {
+                channels
+            },
+        )
     } else {
         (48_000, 2)
     };
@@ -106,7 +119,11 @@ pub(super) async fn run_route(
         "passthrough"
     });
     let mut originals = OriginalSidecar {
-        speech: audio::speech::SpeechTap::new(),
+        speech: if preserve_stereo {
+            audio::speech::SpeechTap::stereo()
+        } else {
+            audio::speech::SpeechTap::new()
+        },
         history: &history,
         recording: &mut audio_tx,
         #[cfg(test)]
@@ -287,22 +304,34 @@ impl OriginalSidecar<'_> {
         // Preserve originals before either writer or recognizer can reject a
         // frame. The store only copies into bounded RAM on this executor;
         // encrypted spill runs independently of the original audio transport.
-        if let Some(retained) = self.retained
-            && let Err(error) = retained.capture(frame, self.origin)
-        {
-            self.report_missing_originals(&format!(
-                "Original audio retention failed; this frame cannot be guaranteed for recovery: {error}"
-            ));
+        let channels = self.speech.channels();
+        if let Some(retained) = self.retained {
+            let result = if channels == 2 {
+                retained.capture_stereo(frame, self.origin)
+            } else {
+                retained.capture(frame, self.origin)
+            };
+            if let Err(error) = result {
+                self.report_missing_originals(&format!(
+                    "Original audio retention failed; this frame cannot be guaranteed for recovery: {error}"
+                ));
+            }
         }
         let lane = match self.origin {
             TranscriptOrigin::Microphone => RecordingLane::Microphone,
             TranscriptOrigin::Speaker => RecordingLane::Speaker,
         };
-        self.history.push(lane, &frame.samples, frame.captured_at);
+        if channels == 2 {
+            self.history
+                .push_stereo(lane, &frame.samples, frame.captured_at);
+        } else {
+            self.history.push(lane, &frame.samples, frame.captured_at);
+        }
         if let Some(sender) = self.recording.as_ref() {
             let result = sender.try_send(AudioRecord {
                 lane,
                 samples: frame.samples.clone(),
+                channels,
                 captured_at: frame.captured_at,
             });
             if result.is_err() {
@@ -321,7 +350,11 @@ impl OriginalSidecar<'_> {
             if recognizer.available() {
                 let accepted = recognizer.submit(
                     audio::PcmFrame {
-                        samples: frame.samples.clone(),
+                        samples: if channels == 2 {
+                            audio::speech::stereo_to_mono(&frame.samples)
+                        } else {
+                            frame.samples.clone()
+                        },
                         sample_rate: frame.sample_rate,
                         captured_at: frame.captured_at,
                     },

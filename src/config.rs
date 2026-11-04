@@ -202,6 +202,7 @@ pub struct RecordingConfig {
     pub microphone: bool,
     pub speaker: bool,
     pub directory: String,
+    pub layout: RecordingLayout,
     pub mix: RecordingMixConfig,
 }
 impl Default for RecordingConfig {
@@ -211,9 +212,18 @@ impl Default for RecordingConfig {
             microphone: true,
             speaker: true,
             directory: "recordings".into(),
+            layout: RecordingLayout::default(),
             mix: RecordingMixConfig::default(),
         }
     }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RecordingLayout {
+    Mixed,
+    #[default]
+    SeparateChannels,
 }
 
 /// Recording-only levels. Original routing, STT and retained history stay raw.
@@ -2076,6 +2086,7 @@ mod tests {
     #[test]
     fn recording_mix_defaults_and_roundtrip_are_independent_of_translation() {
         let legacy: RecordingConfig = toml::from_str("enabled = true\n").unwrap();
+        assert_eq!(legacy.layout, RecordingLayout::SeparateChannels);
         assert!(legacy.mix.microphone_priority);
         assert_eq!(legacy.mix.microphone_gain_db, 0.0);
         assert_eq!(legacy.mix.speaker_gain_db, 0.0);
@@ -2083,6 +2094,7 @@ mod tests {
         let previous: RecordingConfig = toml::from_str("[mix]\nducking_db = 12.0\n").unwrap();
         assert_eq!(previous.mix.ducking_db, 12.0);
         let mut cfg = AppConfig::default();
+        cfg.recording.layout = RecordingLayout::SeparateChannels;
         cfg.recording.mix.microphone_gain_db = 12.0;
         cfg.recording.mix.speaker_gain_db = -6.0;
         cfg.recording.mix.ducking_db = 18.0;
@@ -2090,6 +2102,7 @@ mod tests {
         cfg.validate().unwrap();
         let saved = toml::to_string(&cfg).unwrap();
         let restored: AppConfig = toml::from_str(&saved).unwrap();
+        assert_eq!(restored.recording.layout, RecordingLayout::SeparateChannels);
         assert_eq!(restored.recording.mix.microphone_gain_db, 12.0);
         assert_eq!(restored.recording.mix.speaker_gain_db, -6.0);
         assert_eq!(restored.recording.mix.ducking_db, 18.0);

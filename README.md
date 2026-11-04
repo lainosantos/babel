@@ -207,11 +207,10 @@ by arrival, which may differ from the exact order of speech across independent
 connections. Timestamps are optional; text distinguishes audio offsets,
 approximate alignment and local receipt time.
 
-Audio recording is a separate option, off by default. It mixes selected originals
-into **one PCM16 mono WAV at 16 kHz**, before translation and output gain.
-Recording-only source gains and optional microphone priority keep quiet speech
-audible over incoming music without changing live routing, transcription or
-retained history. See [recording balance](docs/recording.md#format-and-volume).
+Audio recording is a separate option, off by default. It saves originals in
+**one PCM16 WAV at 16 kHz**, with a stereo channel pair for each source.
+The optional mono mix offers recording-only gain and microphone priority.
+See [recording formats and balance](docs/recording.md#format-and-volume).
 Transcription and recording have independent source/folder selections. In
 **Settings → Session files**, `files.base_path` defines a shared base folder
 that is **always absolute**; the dashboard shows complete TXT/WAV destinations.

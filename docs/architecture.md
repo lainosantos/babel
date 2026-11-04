@@ -6,12 +6,12 @@
 For each direction, while Babel is selected/in use:
   capture → interleaved float32, source rate/channels → bounded queues
      ├─ translation off → audio executor → original playback
-     └─ bounded copy → retention executor → PCM16 mono 16 kHz
+     └─ bounded copy → retention executor → PCM16 16 kHz
         ├─ encrypted rolling history
         └─ session originals → recent RAM + encrypted temporary journal
-           ├─ recording cursor → mix original sources → one .wav file
-           ├─ transcription cursors → STT → one .txt file with source labels
-           └─ translation cursors → SpeechProvider → PCM16 mono 24 kHz → playback
+           ├─ recording cursor → stereo source pairs or mono mix → one .wav file
+           ├─ transcription cursors → mono → STT → one .txt file with source labels
+           └─ translation cursors → mono → SpeechProvider → PCM16 mono 24 kHz → playback
 
 Local translator:
   Whisper → Qwen → Piper (target-language default) → playback PCM
@@ -179,8 +179,8 @@ or `[received output]` source label. File order is segment arrival order; indepe
 connections can have different delays and timestamp bases. Merging does not
 provide perfect speech ordering or diarization.
 
-The optional recorder receives PCM16 mono at 16 kHz before translation and
-playback gain, mixes selected sources and maintains one WAV. Transcription and
+The optional recorder receives PCM16 at 16 kHz before translation and playback
+gain. It saves one WAV with two stereo source pairs or a mono mix. Transcription and
 recording have independent source/folder selections; both are off by default.
 Enabling a feature with no selected source is a configuration error. The source
 must be selected and configured, but its translation may be off. Writers work
@@ -218,7 +218,9 @@ stereo to mono nor quantizes samples to PCM16. Rate/channel conversion required
 by the destination belongs to the backend; virtual drivers and the OS mixer
 may still impose their own formats. End-to-end bit-perfect audio is not
 guaranteed. Only copies for history, commands, ASR and WAV are converted to
-PCM16 mono at 16 kHz with anti-alias filtering. The mixed WAV therefore remains
+PCM16 at 16 kHz with anti-alias filtering. Recording and history preserve
+separate left and right channels for stereo input. Speech workers downmix
+their own input. The saved WAV remains
 a 16 kHz speech recording, not a high-resolution multichannel archive.
 Translated audio retains its mono 24 kHz format. Starting/stopping a session
 can reopen streams and produce a brief gap without changing virtual devices
