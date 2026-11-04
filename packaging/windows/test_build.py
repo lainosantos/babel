@@ -34,6 +34,17 @@ class PackageTests(unittest.TestCase):
         (driver / 'BabelAudio.inf').write_text(f'ROOT\\BabelAudio\nBabelAudio.sys\nBabelAudio.cat\nBabel.NT{suffix}\n')
         return binary, driver
 
+    def test_app_only_payload_requires_no_driver_package(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            binary, _ = self.fixture(root, 'x64')
+            payload = root / 'payload'
+            manifest = build.stage(binary, None, payload, 'x64', '0.1.0')
+            self.assertIsNone(manifest['driver_signature'])
+            self.assertFalse((payload / 'drivers').exists())
+            self.assertIn('babel-tray.exe', manifest['files'])
+            self.assertIn('Virtual Cables', (payload / 'INSTALLATION.txt').read_text())
+
     def test_complete_allowlisted_payload_and_rejection_of_wrong_native_driver(self):
         for arch in build.MACHINES:
             with self.subTest(arch=arch), tempfile.TemporaryDirectory() as temp:

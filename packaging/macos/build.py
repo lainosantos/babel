@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Package prebuilt Babel executables and BabelAudio into a macOS installer.
+"""Package prebuilt Babel executables and an optional HAL driver for macOS.
 
 Never builds application code, installs software, starts audio or downloads models.
 Requires macOS packaging tools; portable validation tests run on other hosts.
@@ -133,14 +133,15 @@ def stage_bundle(destination, binaries, driver_directory, version, runtime_dir=N
     for language in app_info(version)["CFBundleLocalizations"]:
         relative = Path(language + ".lproj") / "InfoPlist.strings"
         copy_file(HERE / "locales" / relative, resources / relative)
-    drivers = resources / "drivers" / "macos"
-    copy_file(driver_directory / "BabelAudio.pkg", drivers / "BabelAudio.pkg")
-    copy_file(driver_directory / "uninstall.sh", drivers / "uninstall.sh", executable=True)
-    for name in ["README.md", "LICENSE-Apple-example.txt", "LICENSE-MIT.txt"]:
-        copy_file(ROOT / "native" / "macos" / name, drivers / name)
+    if driver_directory is not None:
+        drivers = resources / "drivers" / "macos"
+        copy_file(driver_directory / "BabelAudio.pkg", drivers / "BabelAudio.pkg")
+        copy_file(driver_directory / "uninstall.sh", drivers / "uninstall.sh", executable=True)
+        for name in ["README.md", "LICENSE-Apple-example.txt", "LICENSE-MIT.txt"]:
+            copy_file(ROOT / "native" / "macos" / name, drivers / name)
     for source in sorted((ROOT / "docs").glob("*.md")):
         copy_file(source, resources / "Documentation" / source.name)
-    copy_file(HERE / "INSTALLATION.txt", resources / "INSTALLATION.txt")
+    copy_file(HERE / instructions_name(driver_directory), resources / "INSTALLATION.txt")
     copy_file(ROOT / "ui/fonts/OFL.txt", resources / "Licenses/Manrope-OFL.txt")
     # These are inert source/support files. Users copy them to a writable service
     # directory before explicitly installing helpers; the signed bundle is immutable.
@@ -151,7 +152,11 @@ def stage_bundle(destination, binaries, driver_directory, version, runtime_dir=N
     return destination
 
 
-def distribution(arches):
+def instructions_name(driver_directory):
+    return "INSTALLATION-driver.txt" if driver_directory is not None else "INSTALLATION.txt"
+
+
+def distribution(arches, include_driver=True):
     tree = ET.Element("installer-gui-script", minSpecVersion="2")
     ET.SubElement(tree, "title").text = "Babel"
     ET.SubElement(tree, "options", customize="never", **{
@@ -161,10 +166,10 @@ def distribution(arches):
     ET.SubElement(versions, "os-version", min=MINIMUM_MACOS)
     ET.SubElement(tree, "readme", file="INSTALLATION.txt", **{"mime-type": "text/plain"})
     outline = ET.SubElement(tree, "choices-outline")
-    for choice, title, package, filename in [
-        ("app", "Babel application", APP_PACKAGE_ID, "BabelApp.pkg"),
-        ("driver", "Babel virtual audio driver", DRIVER_PACKAGE_ID, "BabelAudio.pkg"),
-    ]:
+    components = [("app", "Babel application", APP_PACKAGE_ID, "BabelApp.pkg")]
+    if include_driver:
+        components.append(("driver", "Babel virtual audio driver", DRIVER_PACKAGE_ID, "BabelAudio.pkg"))
+    for choice, title, package, filename in components:
         ET.SubElement(outline, "line", choice=choice)
         element = ET.SubElement(tree, "choice", id=choice, title=title, description=title,
                                 visible="false", selected="true", enabled="false")
@@ -205,16 +210,16 @@ def validate_payload(component, expected_path, expected_id):
     return bundle
 
 
-def expanded_components(directory):
+def expanded_components(directory, include_driver=True):
     components = {}
     for path in directory.rglob("PackageInfo"):
-        # A product contains two component archives. Nested installer resources
-        # remain flat .pkg files, not expanded components.
+        # Nested installer resources remain flat .pkg files.
         identifier = ET.parse(path).getroot().get("identifier")
         if identifier in components:
             raise RuntimeError(f"Duplicate component package: {identifier}")
         components[identifier] = path.parent
-    if set(components) != {APP_PACKAGE_ID, DRIVER_PACKAGE_ID}:
+    expected = {APP_PACKAGE_ID, DRIVER_PACKAGE_ID} if include_driver else {APP_PACKAGE_ID}
+    if set(components) != expected:
         raise RuntimeError(f"Unexpected product components: {sorted(str(key) for key in components)}")
     return components
 
@@ -245,7 +250,7 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--runtime-dir", type=Path, required=True)
     parser.add_argument("--bin-dir", type=Path, required=True, help="prebuilt executable babel, babel-tray and babel-feedback")
-    parser.add_argument("--driver-dir", type=Path, default=ROOT / "native/macos/dist")
+    parser.add_argument("--driver-dir", type=Path, help="include an optional Babel HAL driver package")
     parser.add_argument("--output", type=Path, default=HERE / "dist")
     parser.add_argument("--version", type=validate_version, default=root_version())
     parser.add_argument("--arch", choices=ARCHES, default="universal")
@@ -264,23 +269,25 @@ def main(argv=None):
     for command in ["lipo", "otool", "codesign", "pkgbuild", "productbuild", "pkgutil", "xcrun"]:
         if shutil.which(command) is None:
             parser.error(f"Missing macOS packaging tool: {command}")
-    binaries, driver_directory = args.bin_dir.resolve(), args.driver_dir.resolve()
+    binaries = args.bin_dir.resolve()
+    driver_directory = args.driver_dir.resolve() if args.driver_dir else None
     arches = ARCHES[args.arch]
     for name in ["babel", "babel-tray", "babel-feedback"]:
         validate_macho(binaries / name, arches, "EXECUTE")
-    regular_file(driver_directory / "BabelAudio.pkg")
-    regular_file(driver_directory / "uninstall.sh", executable=True)
-    driver = driver_directory / "BabelAudio.driver"
-    validate_macho(driver / "Contents/MacOS/BabelAudio", arches, "DYLIB")
-    run(["codesign", "--verify", "--strict", driver])
-    if not args.unsigned:
-        package_signature = output(["pkgutil", "--check-signature", driver_directory / "BabelAudio.pkg"])
-        if "Developer ID Installer:" not in package_signature:
-            raise RuntimeError("Signed distribution requires a Developer ID Installer signed driver package")
-        identity = subprocess.run(["codesign", "-dv", "--verbose=4", str(driver)],
-                                  check=True, capture_output=True, text=True).stderr
-        if "Authority=Developer ID Application:" not in identity or "Signature=adhoc" in identity:
-            raise RuntimeError("Signed distribution requires a Developer ID signed driver bundle")
+    if driver_directory is not None:
+        regular_file(driver_directory / "BabelAudio.pkg")
+        regular_file(driver_directory / "uninstall.sh", executable=True)
+        driver = driver_directory / "BabelAudio.driver"
+        validate_macho(driver / "Contents/MacOS/BabelAudio", arches, "DYLIB")
+        run(["codesign", "--verify", "--strict", driver])
+        if not args.unsigned:
+            package_signature = output(["pkgutil", "--check-signature", driver_directory / "BabelAudio.pkg"])
+            if "Developer ID Installer:" not in package_signature:
+                raise RuntimeError("Signed distribution requires a Developer ID Installer signed driver package")
+            identity = subprocess.run(["codesign", "-dv", "--verbose=4", str(driver)],
+                                      check=True, capture_output=True, text=True).stderr
+            if "Authority=Developer ID Application:" not in identity or "Signature=adhoc" in identity:
+                raise RuntimeError("Signed distribution requires a Developer ID signed driver bundle")
     output_directory = args.output.resolve()
     output_directory.mkdir(parents=True, exist_ok=True)
     package_name = f"Babel-{args.version}-macos-{args.arch}.pkg"
@@ -293,10 +300,11 @@ def main(argv=None):
     check_output_destination(final_app, bundle=True)
     with tempfile.TemporaryDirectory(prefix=".babel-package-", dir=output_directory) as temporary:
         stage = Path(temporary)
-        expanded_driver = stage / "driver-expanded"
-        run(["pkgutil", "--expand-full", driver_directory / "BabelAudio.pkg", expanded_driver])
-        packaged_driver = validate_payload(expanded_driver, DRIVER_PATH, DRIVER_PACKAGE_ID)
-        verify_matching_files(driver, packaged_driver, ["Contents/Info.plist", "Contents/MacOS/BabelAudio"])
+        if driver_directory is not None:
+            expanded_driver = stage / "driver-expanded"
+            run(["pkgutil", "--expand-full", driver_directory / "BabelAudio.pkg", expanded_driver])
+            packaged_driver = validate_payload(expanded_driver, DRIVER_PATH, DRIVER_PACKAGE_ID)
+            verify_matching_files(driver, packaged_driver, ["Contents/Info.plist", "Contents/MacOS/BabelAudio"])
         payload = stage / "payload"
         app = stage_bundle(payload / APP_PATH, binaries, driver_directory, args.version, args.runtime_dir, arches)
         entitlements = stage / "entitlements.plist"
@@ -334,11 +342,12 @@ def main(argv=None):
              "--identifier", APP_PACKAGE_ID, "--version", args.version,
              "--install-location", "/", "--ownership", "recommended",
              "--scripts", HERE / "installer", components / "BabelApp.pkg"])
-        shutil.copy2(driver_directory / "BabelAudio.pkg", components / "BabelAudio.pkg")
+        if driver_directory is not None:
+            shutil.copy2(driver_directory / "BabelAudio.pkg", components / "BabelAudio.pkg")
         definition = stage / "Distribution.xml"
-        distribution(arches).write(definition, encoding="utf-8", xml_declaration=True)
+        distribution(arches, driver_directory is not None).write(definition, encoding="utf-8", xml_declaration=True)
         installer_resources = stage / "installer-resources"
-        copy_file(HERE / "INSTALLATION.txt", installer_resources / "INSTALLATION.txt")
+        copy_file(HERE / instructions_name(driver_directory), installer_resources / "INSTALLATION.txt")
         staged_package = stage / package_name
         command = ["productbuild", "--distribution", definition, "--package-path", components,
                    "--resources", installer_resources]
@@ -347,17 +356,21 @@ def main(argv=None):
         run([*command, staged_package])
         expanded = stage / "product-expanded"
         run(["pkgutil", "--expand-full", staged_package, expanded])
-        packages = expanded_components(expanded)
+        packages = expanded_components(expanded, driver_directory is not None)
         installed_app = validate_payload(packages[APP_PACKAGE_ID], APP_PATH, APP_PACKAGE_ID)
-        installed_driver = validate_payload(packages[DRIVER_PACKAGE_ID], DRIVER_PATH, DRIVER_PACKAGE_ID)
         verify_matching_files(app, installed_app, ["Contents/Info.plist", "Contents/MacOS/babel",
-            "Contents/MacOS/babel-tray", "Contents/MacOS/babel-feedback", "Contents/Resources/drivers/macos/BabelAudio.pkg",
-            "Contents/Resources/drivers/macos/uninstall.sh"])
+            "Contents/MacOS/babel-tray", "Contents/MacOS/babel-feedback"])
         for runtime in (installed_app / "Contents/Resources/local-runtime").iterdir():
             arch = runtime.name.removeprefix("macos-")
             runtime_package.validate(runtime, "macos", arch)
-        verify_matching_files(driver, installed_driver, ["Contents/Info.plist", "Contents/MacOS/BabelAudio"])
-        verify_matching_files(expanded_driver, packages[DRIVER_PACKAGE_ID], ["Scripts/preinstall", "Scripts/postinstall"])
+        if driver_directory is not None:
+            installed_driver = validate_payload(packages[DRIVER_PACKAGE_ID], DRIVER_PATH, DRIVER_PACKAGE_ID)
+            verify_matching_files(app, installed_app, ["Contents/Resources/drivers/macos/BabelAudio.pkg",
+                "Contents/Resources/drivers/macos/uninstall.sh"])
+            verify_matching_files(driver, installed_driver, ["Contents/Info.plist", "Contents/MacOS/BabelAudio"])
+            verify_matching_files(expanded_driver, packages[DRIVER_PACKAGE_ID], ["Scripts/preinstall", "Scripts/postinstall"])
+        elif (installed_app / "Contents/Resources/drivers").exists():
+            raise RuntimeError("App-only installer contains a driver")
         if args.installer_identity:
             run(["pkgutil", "--check-signature", staged_package])
         if args.notary_profile:
@@ -373,7 +386,7 @@ def main(argv=None):
             "version": args.version, "architectures": sorted(arches),
             "minimum_macos": MINIMUM_MACOS, "bundle_identifier": BUNDLE_ID,
             "package": package_name, "sha256": digest(final_package),
-            "driver_package_sha256": digest(driver_directory / "BabelAudio.pkg"),
+            "driver_package_sha256": digest(driver_directory / "BabelAudio.pkg") if driver_directory is not None else None,
             "development_unsigned": args.unsigned, "notarized": bool(args.notary_profile),
             "payload_verified": True, "installed_on_build_host": False,
         }, indent=2) + "\n", encoding="utf-8")

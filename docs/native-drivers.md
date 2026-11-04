@@ -57,10 +57,9 @@ devices remain installed, but no AI/routing service runs behind them.
 
 ## Build, package and installation
 
-[GitHub CI](ci-installers.md) compiles the drivers on hosted runners and
-produces complete application installers for each operating system, including
-the corresponding driver files and content verification. macOS/Windows CI
-packages are labeled as development builds without distribution signing.
+[GitHub CI](ci-installers.md) builds application packages for macOS and Windows.
+To include the Babel development drivers, run a manual build with
+`include-native-driver` enabled. Distribution signing is a separate step.
 
 See the complete commands and artifacts in:
 
@@ -135,8 +134,8 @@ still require the scenarios in `docs/testing.md`.
 Original Babel code and its Rust cores use MIT. The Windows adaptation uses
 the official SimpleAudioSample under **MS-PL**; its license and each file's
 revision/hash are included in `native/windows`. It does not incorporate
-VB-CABLE or BlackHole. Those drivers can still be installed separately as
-alternatives under their own licenses. Linux continues to use
+Virtual Cables, VB-CABLE, or BlackHole. See [platform setup](platforms.md)
+for separately installed audio devices. Linux continues to use
 PulseAudio/PipeWire-pulse.
 
 - [Apple: creating an AudioServerPlugIn](https://developer.apple.com/documentation/coreaudio/creating-an-audio-server-driver-plug-in).

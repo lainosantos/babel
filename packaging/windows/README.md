@@ -8,31 +8,28 @@ WDK setup is documented in [native/windows](../../native/windows/README.md).
 python packaging/windows/build.py --architecture x64 `
   --runtime-dir artifacts/local-runtime `
   --bin-dir target/x86_64-pc-windows-msvc/release `
-  --driver-dir native/windows/dist/x64 --output artifacts/installers
+  --output artifacts/installers
 ```
 
-For ARM64, use `--architecture ARM64`, target `aarch64-pc-windows-msvc`, and
-`dist/ARM64` for the driver. `--iscc` selects the Inno Setup compiler path.
+For ARM64, use `--architecture ARM64` and Rust target `aarch64-pc-windows-msvc`.
+`--iscc` selects the Inno Setup compiler path.
 `--version` accepts three numeric components and defaults to `Cargo.toml`.
 
 Outputs are `Babel-<version>-windows-<architecture>-development.exe`, `.zip`,
 `-manifest.json`, and `-SHA256SUMS.txt`. The output directory must not already
-contain packages with the same names. The ZIP preserves the application's
-expected layout, including `drivers/windows/{BabelAudio.inf,BabelAudio.sys,BabelAudio.cat,...}`.
-Do not mix components from different builds. PE checks verify the architecture
-of both application executables, the helper, and the driver before packaging.
+contain packages with the same names. The default packages include the app and
+local inference engines. They use separately installed audio devices. See
+[Windows routing](../../docs/platforms.md#windows). The packages are unsigned,
+so SmartScreen can warn and execution policy can block them.
 
-These are development artifacts without distribution signing. A CAT file's
-presence does not mean it is signed. The installer makes the driver available
-for an explicit administrative step; it does not try to load an unsigned kernel
-driver. See the text displayed by the installer in
-[INSTALLATION.txt](INSTALLATION.txt).
+Pass `--driver-dir native/windows/dist/x64` (or `dist/ARM64` for ARM64) to
+include the optional Babel driver development payload. PE checks then also
+verify the driver and helper architecture. A CAT file by itself does not
+prove that the driver is signed. To remove an installed Babel driver, use
+its explicit removal helper before uninstalling the application.
 
-The application uses `%APPDATA%\Babel\babel.toml`, does not write to Program Files,
-and does not start during setup. Autostart is disabled by default. Before
-uninstalling, the uninstaller calls the helper's read-only `check-absent`: if
-the driver is installed, remove it with `uninstall.ps1` first. This avoids
-removing a driver before uninstaller confirmation or deleting its required helper.
+The application uses `%APPDATA%\Babel\babel.toml`. Autostart is disabled
+by default. The installer starts no app or driver and preserves user files.
 
 Local engines ship in `local-runtime/windows-x86_64` or
 `local-runtime/windows-aarch64`: Whisper, llama.cpp, Piper, ONNX Runtime, eSpeak

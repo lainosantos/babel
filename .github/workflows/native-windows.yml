@@ -18,6 +18,10 @@ on:
         description: Rust target for the application and installer
         required: true
         type: string
+      include-native-driver:
+        description: Include Babel's development driver in the Windows package
+        default: false
+        type: boolean
 permissions:
   contents: read
 jobs:
@@ -43,10 +47,13 @@ jobs:
         with:
           python-version: '3.12'
       - uses: microsoft/setup-msbuild@v2
+        if: inputs.include-native-driver
       - name: Restore pinned official WDK and SDK for the hosted runner
+        if: inputs.include-native-driver
         shell: pwsh
         run: ./.github/scripts/setup-wdk.ps1 -Architecture '${{ inputs.architecture }}'
       - name: Build and verify complete WaveRT driver package
+        if: inputs.include-native-driver
         shell: pwsh
         run: ./native/windows/build.ps1 -Architecture '${{ inputs.architecture }}'
       - name: Build application with static VC runtime
@@ -64,15 +71,34 @@ jobs:
       - name: Extract and verify bundled inference runtimes
         run: python scripts/build_local_runtime.py --extract-artifacts artifacts/runtime-archives --output artifacts/local-runtime
       - name: Build EXE installer and verify complete portable ZIP
-        run: python packaging/windows/build.py --runtime-dir artifacts/local-runtime --architecture ${{ inputs.architecture }} --bin-dir target/${{ inputs.target }}/release --driver-dir native/windows/dist/${{ inputs.architecture }} --output artifacts/installers
-      - name: Check app and helper runtime dependencies
         shell: pwsh
-        run: ./.github/scripts/check-windows-runtime.ps1 -BinaryDirectory target/${{ inputs.target }}/release -DriverDirectory native/windows/dist/${{ inputs.architecture }}
+        env:
+          INCLUDE_DRIVER: ${{ inputs.include-native-driver }}
+          PACKAGE_ARCHITECTURE: ${{ inputs.architecture }}
+          APP_TARGET: ${{ inputs.target }}
+        run: |
+          $driverArgs = @()
+          if ($env:INCLUDE_DRIVER -eq 'true') {
+            $driverArgs = @('--driver-dir', "native/windows/dist/$env:PACKAGE_ARCHITECTURE")
+          }
+          python packaging/windows/build.py --runtime-dir artifacts/local-runtime --architecture $env:PACKAGE_ARCHITECTURE --bin-dir "target/$env:APP_TARGET/release" --output artifacts/installers @driverArgs
+      - name: Check application runtime dependencies
+        shell: pwsh
+        env:
+          INCLUDE_DRIVER: ${{ inputs.include-native-driver }}
+          PACKAGE_ARCHITECTURE: ${{ inputs.architecture }}
+          APP_TARGET: ${{ inputs.target }}
+        run: |
+          $options = @{ BinaryDirectory = "target/$env:APP_TARGET/release" }
+          if ($env:INCLUDE_DRIVER -eq 'true') {
+            $options.DriverDirectory = "native/windows/dist/$env:PACKAGE_ARCHITECTURE"
+          }
+          ./.github/scripts/check-windows-runtime.ps1 @options
       - name: Verify x64 installer payload and uninstall on the disposable runner
         if: inputs.architecture == 'x64'
         shell: pwsh
         run: ./.github/scripts/test-windows-package.ps1
-      - name: Publish development installer (unsigned kernel driver)
+      - name: Publish Windows application packages
         uses: actions/upload-artifact@v4
         with:
           name: babel-installers-windows-${{ inputs.architecture }}-development

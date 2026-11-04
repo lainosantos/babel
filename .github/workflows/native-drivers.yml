@@ -13,6 +13,11 @@ on:
           - linux
           - macos
           - windows
+      include-native-driver:
+        description: Include Babel's development driver in the macOS and Windows packages
+        required: false
+        default: false
+        type: boolean
       windows-architecture:
         description: Windows architecture to build for manual validation
         required: false
@@ -115,6 +120,7 @@ jobs:
           done
           python3 scripts/test_cli_smoke.py --babel artifacts/universal/babel --output-dir artifacts/cli-smoke
       - name: Build and test universal HAL driver with Apple SDK
+        if: inputs.include-native-driver
         run: python3 native/macos/build.py --unsigned --arch universal --test --pkg
       - uses: actions/download-artifact@v4
         with:
@@ -123,8 +129,16 @@ jobs:
           path: artifacts/runtime-archives
       - name: Extract and verify bundled inference runtimes
         run: python scripts/build_local_runtime.py --extract-artifacts artifacts/runtime-archives --output artifacts/local-runtime
-      - name: Build and expand complete application and driver PKG
-        run: python3 packaging/macos/build.py --unsigned --arch universal --runtime-dir artifacts/local-runtime --bin-dir artifacts/universal --driver-dir native/macos/dist --output artifacts/installers
+      - name: Build and expand the macOS application PKG
+        env:
+          INCLUDE_DRIVER: ${{ inputs.include-native-driver || false }}
+        run: |
+          set -euo pipefail
+          driver_args=()
+          if [ "$INCLUDE_DRIVER" = true ]; then
+            driver_args=(--driver-dir native/macos/dist)
+          fi
+          python3 packaging/macos/build.py --unsigned --arch universal --runtime-dir artifacts/local-runtime --bin-dir artifacts/universal --output artifacts/installers "${driver_args[@]}"
       - name: Publish development installer (no distribution signature)
         uses: actions/upload-artifact@v4
         with:
@@ -148,3 +162,4 @@ jobs:
       runtime-name: ${{ matrix.architecture == 'x64' && 'windows-x86_64' || 'windows-aarch64' }}
       architecture: ${{ matrix.architecture }}
       target: ${{ matrix.architecture == 'x64' && 'x86_64-pc-windows-msvc' || 'aarch64-pc-windows-msvc' }}
+      include-native-driver: ${{ inputs.include-native-driver || false }}

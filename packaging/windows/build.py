@@ -62,27 +62,31 @@ def stage(binary, driver, destination, architecture, release, runtime_dir=None):
     for name in ('babel.exe', 'babel-tray.exe', 'babel-feedback.exe'):
         if pe_machine(binary / name) != MACHINES[architecture]:
             raise ValueError(f"Wrong {architecture} app architecture: {name}")
-    for name in DRIVER_FILES:
-        require_file(driver / name)
-    for name in ('BabelAudio.sys', 'babel-driver-installer.exe'):
-        if pe_machine(driver / name) != MACHINES[architecture]:
-            raise ValueError(f"Wrong {architecture} driver architecture: {name}")
-    inf_bytes = (driver / 'BabelAudio.inf').read_bytes()
-    inf = inf_bytes.decode('utf-16') if inf_bytes[:2] in (b'\xff\xfe', b'\xfe\xff') else inf_bytes.decode('utf-8-sig')
-    suffix = 'amd64' if architecture == 'x64' else 'arm64'
-    for token in ('ROOT\\BabelAudio', 'BabelAudio.sys', 'BabelAudio.cat', f'NT{suffix}'):
-        if token.casefold() not in inf.casefold():
-            raise ValueError(f"INF is incomplete or has the wrong architecture: {token}")
-    if '$ARCH$' in inf:
-        raise ValueError('INF was not processed by the WDK stamp task')
+    if driver is not None:
+        for name in DRIVER_FILES:
+            require_file(driver / name)
+        for name in ('BabelAudio.sys', 'babel-driver-installer.exe'):
+            if pe_machine(driver / name) != MACHINES[architecture]:
+                raise ValueError(f"Wrong {architecture} driver architecture: {name}")
+        inf_bytes = (driver / 'BabelAudio.inf').read_bytes()
+        inf = inf_bytes.decode('utf-16') if inf_bytes[:2] in (b'\xff\xfe', b'\xfe\xff') else inf_bytes.decode('utf-8-sig')
+        suffix = 'amd64' if architecture == 'x64' else 'arm64'
+        for token in ('ROOT\\BabelAudio', 'BabelAudio.sys', 'BabelAudio.cat', f'NT{suffix}'):
+            if token.casefold() not in inf.casefold():
+                raise ValueError(f"INF is incomplete or has the wrong architecture: {token}")
+        if '$ARCH$' in inf:
+            raise ValueError('INF was not processed by the WDK stamp task')
     destination.mkdir(parents=True, exist_ok=False)
     for name in ('babel.exe', 'babel-tray.exe', 'babel-feedback.exe'):
         shutil.copy2(binary / name, destination / name)
-    driver_out = destination / 'drivers' / 'windows'
-    driver_out.mkdir(parents=True)
-    for name in DRIVER_FILES:
-        shutil.copy2(driver / name, driver_out / name)
-    shutil.copy2(HERE / 'INSTALLATION.txt', destination / 'INSTALLATION.txt')
+    instructions = 'INSTALLATION.txt'
+    if driver is not None:
+        driver_out = destination / 'drivers' / 'windows'
+        driver_out.mkdir(parents=True)
+        for name in DRIVER_FILES:
+            shutil.copy2(driver / name, driver_out / name)
+        instructions = 'INSTALLATION-driver.txt'
+    shutil.copy2(HERE / instructions, destination / 'INSTALLATION.txt')
     shutil.copy2(ROOT / 'native/windows/LICENSE-MIT.txt', destination / 'LICENSE-MIT.txt')
     shutil.copy2(ROOT / 'Cargo.lock', destination / 'Cargo.lock')
     shutil.copy2(ROOT / 'README.md', destination / 'README.md')
@@ -96,7 +100,7 @@ def stage(binary, driver, destination, architecture, release, runtime_dir=None):
     shutil.copy2(ROOT / 'ui/fonts/OFL.txt', fonts / 'Manrope-OFL.txt')
     if runtime_dir is not None:
         runtime_package.stage(runtime_dir, destination / "local-runtime", "windows", ["x86_64" if architecture == "x64" else "aarch64"])
-    manifest = {"version": release, "architecture": architecture, "driver_signature": "not-verified-development",
+    manifest = {"version": release, "architecture": architecture, "driver_signature": "not-verified-development" if driver is not None else None,
                 "files": {p.relative_to(destination).as_posix(): hashlib.sha256(p.read_bytes()).hexdigest()
                           for p in sorted(destination.rglob('*')) if p.is_file()}}
     (destination / 'package-manifest.json').write_text(json.dumps(manifest, indent=2) + '\n')
@@ -125,9 +129,11 @@ def build(args):
         raise RuntimeError('Package output already exists; use an empty output directory')
     with tempfile.TemporaryDirectory(prefix='babel-installer-') as temp:
         payload = Path(temp) / 'payload'
-        manifest = stage(args.bin_dir.resolve(), args.driver_dir.resolve(), payload, args.architecture, release, args.runtime_dir)
+        driver = args.driver_dir.resolve() if args.driver_dir else None
+        manifest = stage(args.bin_dir.resolve(), driver, payload, args.architecture, release, args.runtime_dir)
         subprocess.run([str(compiler), f'/DBabelVersion={release}', f'/DTargetArch={args.architecture}',
-                        f'/DPayloadDir={payload}', f'/DOutputFolder={output}', str(HERE / 'Babel.iss')], check=True)
+                        f'/DIncludeDriver={int(driver is not None)}', f'/DPayloadDir={payload}',
+                        f'/DOutputFolder={output}', str(HERE / 'Babel.iss')], check=True)
         require_file(installer)
         pe_machine(installer)  # setup is an x86 bootstrapper; payload has the native architecture
         with zipfile.ZipFile(archive, 'x', compression=zipfile.ZIP_DEFLATED) as bundle:
@@ -150,7 +156,7 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--runtime-dir', type=Path, required=True)
     parser.add_argument('--bin-dir', type=Path, required=True)
-    parser.add_argument('--driver-dir', type=Path, required=True)
+    parser.add_argument('--driver-dir', type=Path, help='include an optional Babel driver development package')
     parser.add_argument('--architecture', choices=list(MACHINES), required=True)
     parser.add_argument('--output', type=Path, default=ROOT / 'artifacts/installers')
     parser.add_argument('--version')

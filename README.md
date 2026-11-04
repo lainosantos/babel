@@ -14,10 +14,9 @@ Babel routes original audio between the configured devices. Turning off a
 direction's translation preserves that routing during a session as well.
 
 > **Platform status:** Babel is **100% functional on Linux**.
-> **Windows and macOS have not been tested on native systems** and still require
-> **production driver signing**. Installation, virtual devices and audio routing
-> remain unvalidated on those platforms. Successful builds and CI checks do not
-> replace native-system testing.
+> **Windows and macOS have not been tested on native systems.** Their application
+> installers use separately installed virtual audio devices. See
+> [platform setup](docs/platforms.md) for installation and signing limitations.
 
 The command agent uses **only the original physical microphone**, with a
 configurable wake name (default: “Babel”), local Whisper, **Needle 3** and
@@ -73,8 +72,7 @@ works without a tray using `serve --no-tray`.
 The dashboard and tray identify the OS running Babel. Audio instructions,
 virtual-device controls and startup guidance follow that OS. On Linux, the
 dashboard offers to create/remove Babel devices; on macOS and Windows, it
-explains how to prepare/install Babel's own driver package and select its
-endpoints. Help opens directly at the section for the current OS.
+links to setup for separately installed virtual audio devices. Help opens directly at the section for the current OS.
 
 On Linux/macOS, `./scripts/run.sh` starts the built binary from this directory;
 on the first run, it builds if the binary does not exist. It also accepts
@@ -116,15 +114,12 @@ Legacy `loopback` configurations migrate to the Gemini profile with route
 translation and transcription disabled, without starting cloud calls. See
 [configuration migration](docs/configuration.md#files-and-keys).
 
-On macOS and Windows, the **native Babel driver** provides two independent
-routes. Source code and build scripts are in `native/macos` and `native/windows`;
-**production driver signing, distribution-package signing and native-system
-testing are still pending**.
-The app uses CoreAudio/WASAPI through CPAL, with persistent IDs and app-activity
-monitoring. On macOS, that detection requires **macOS 14.2+**. BlackHole and
-VB-CABLE remain optional alternatives, not dependencies of Babel's own driver.
-See [native builds and packages](docs/native-drivers.md) and
-[device maps by platform](docs/platforms.md).
+On macOS, use BlackHole 2ch and 16ch. On Windows x64, use Virtual Cables
+with the signed usbip-win2 transport. These free, separately installed devices
+provide two audio paths. Babel's application packages can be built without
+Babel's own driver or a publisher account. See [platform setup](docs/platforms.md)
+for permissions, Windows ARM64 scope, and unsigned application restrictions.
+Hardware validation on macOS and Windows is still pending.
 
 On Windows, the executable is `target\release\babel.exe`; the same subcommands
 work in PowerShell. On macOS, the tray event loop runs on the main thread. Grant

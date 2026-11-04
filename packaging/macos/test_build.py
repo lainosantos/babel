@@ -67,6 +67,24 @@ class PackagingTests(unittest.TestCase):
         self.assertEqual(tree.find("pkg-ref[@onConclusion='RequireRestart']").get("id"), BUILD.DRIVER_PACKAGE_ID)
         self.assertEqual(tree.find("pkg-ref/must-close/app").get("id"), BUILD.BUNDLE_ID)
 
+    def test_app_only_package_omits_driver_component_and_restart(self):
+        tree = BUILD.distribution({"arm64", "x86_64"}, include_driver=False).getroot()
+        self.assertEqual([node.get("id") for node in tree.findall("choice")], ["app"])
+        self.assertIsNone(tree.find("pkg-ref[@onConclusion='RequireRestart']"))
+        self.component()
+        self.assertEqual(set(BUILD.expanded_components(self.root, include_driver=False)), {BUILD.APP_PACKAGE_ID})
+        self.component(driver=True)
+        with self.assertRaisesRegex(RuntimeError, "Unexpected product components"):
+            BUILD.expanded_components(self.root, include_driver=False)
+
+    def test_app_only_bundle_can_stage_without_a_driver_directory(self):
+        for name in ["babel", "babel-tray", "babel-feedback"]:
+            self.file(f"bin/{name}", executable=True)
+        bundle = BUILD.stage_bundle(self.root / "Babel.app", self.root / "bin", None, "0.1.0")
+        resources = bundle / "Contents/Resources"
+        self.assertFalse((resources / "drivers").exists())
+        self.assertIn("BlackHole", (resources / "INSTALLATION.txt").read_text())
+
     def test_staging_preserves_driver_helpers_and_omits_user_files(self):
         binaries = self.root / "bin"
         drivers = self.root / "driver"

@@ -791,18 +791,25 @@ cargo clippy --locked --all-targets --target x86_64-pc-windows-gnu \
 
 `.github/workflows/native-checks.yml` runs portable core, ABI shim and package
 contract checks for commits and pull requests. The reusable
-`.github/workflows/native-drivers.yml` separates portable tests, macOS SDK builds,
-x64/ARM64 WDK builds and packaging for all three systems; release packaging is
-requested only by the release workflow for version tags or manual runs. These
-workflows use hosted runners and pinned versions/hashes of official SDK/WDK
-NuGet packages. CI does not load drivers or open audio devices. The Windows x64
+`.github/workflows/native-drivers.yml` builds packages on stable version tags
+and manual runs. Manual runs can also opt into the macOS HAL and Windows
+x64/ARM64 WDK driver builds. These workflows use hosted runners and pinned
+versions and hashes of official SDK/WDK NuGet packages. The Windows x64
 application installer is exercised in a temporary directory; the runtime matrix
 performs inference separately with synthetic inputs on five targets.
 Development artifacts are labeled accordingly. A workflow in the repository
 is not evidence that it has executed.
 
-After compiling, signing and installing on the target operating system, run the
-synthetic smoke test described in
+For the application-only packages, first install the external devices from the
+[platform guide](platforms.md). Verify that the app launches with the OS security
+settings intact, both paths carry distinct original audio, and selecting the
+same cable for both paths is rejected. Then check the microphone permission
+and test both paths in a calling app. The Windows x64 check uses two Virtual
+Cables and the signed USB/IP transport. The macOS check uses BlackHole 2ch and
+16ch. Test Windows Arm separately if using the emulated x64 helper.
+
+For the optional Babel drivers, after compiling, signing and installing on the
+target operating system, run the synthetic smoke test described in
 [native drivers](native-drivers.md#verifying-the-installed-transport). It requires
 four device IDs and never selects system defaults. Also test multiple
 readers/applications, OS suspend/resume, physical-device switching during a

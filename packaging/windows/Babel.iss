@@ -12,6 +12,10 @@
   #error TargetArch is required
 #endif
 
+#ifndef IncludeDriver
+  #define IncludeDriver 0
+#endif
+
 [Setup]
 AppId={{FB7BA988-D38F-48E3-883B-6C7AE36297A5}
 AppName=Babel
@@ -50,12 +54,10 @@ Source: "{#PayloadDir}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs
 
 [Icons]
 Name: "{group}\Babel"; Filename: "{app}\babel-tray.exe"; WorkingDir: "{app}"
-Name: "{group}\Driver installation guide"; Filename: "{app}\INSTALLATION.txt"
+Name: "{group}\Audio setup guide"; Filename: "{app}\INSTALLATION.txt"
 Name: "{group}\Uninstall Babel"; Filename: "{uninstallexe}"
 
-; Drivers and the app never start during installation. This development package
-; contains an unsigned catalog; kernel loading still requires Microsoft signing.
-; No Run entry, default-device change, certificate install or login task.
+; The application and drivers never start during setup.
 [Code]
 function InitializeUninstall(): Boolean;
 var
@@ -65,7 +67,11 @@ begin
   Result := False;
   Helper := ExpandConstant('{app}\drivers\windows\babel-driver-installer.exe');
   if not FileExists(Helper) then begin
+#if IncludeDriver == 1
     MsgBox('The Babel driver removal helper is missing. Repair this installation before removing it.', mbError, MB_OK);
+#else
+    Result := True;
+#endif
     Exit;
   end;
   { InitializeUninstall runs before the confirmation prompt. Check only; never

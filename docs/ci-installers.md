@@ -9,7 +9,7 @@ Pushing a stable release tag in the form `vX.Y.Z` triggers the release workflow.
 Its version must match `Cargo.toml`, with each numeric component at most 65535.
 Prerelease suffixes and build metadata are currently rejected before building
 because the native installer version fields do not support them.
-After its required checks pass, it builds installers and native drivers,
+After its required checks pass, it builds application installers,
 creates the corresponding GitHub Release and attaches the packages and
 integrity files. The reusable native-driver/installer workflow also supports
 manual package builds. Manual builds are useful for inspection and do not
@@ -20,7 +20,9 @@ For manual validation, select `all`, `linux`, `macos` or `windows` in the workfl
 artifact before publication.
 The optional `windows-architecture` selector limits manual Windows builds to
 `x64` or `ARM64`; its default is `all`, it does not affect Linux or macOS, and
-tagged releases always build both Windows architectures.
+tagged releases always build both Windows architectures. Set
+`include-native-driver` on a manual build to include the Babel development
+driver. Tagged releases use application-only packages on macOS and Windows.
 
 Publication waits for every required platform artifact and records all files
 in `release-manifest.json` and `SHA256SUMS.txt`. A partial draft can be resumed
@@ -43,7 +45,7 @@ artifacts are retained for 30 days:
 | Artifact | Contents | Runner |
 |---|---|---|
 | `babel-installers-linux-amd64` | `.deb`, `.rpm`, `.tar.gz`, manifests and hashes | Ubuntu 22.04 x64 |
-| `babel-installers-macos-universal-development` | `.pkg` with Babel.app + HAL driver, manifest and hashes | macOS 15 / Apple SDK |
+| `babel-installers-macos-universal-development` | `.pkg` with Babel.app, manifest and hashes | macOS 15 / Apple SDK |
 | `babel-installers-windows-x64-development` | `.exe` installer, complete `.zip`, manifest and hashes | Windows Server 2022 / VS2022 |
 | `babel-installers-windows-ARM64-development` | Same formats with ARM64 payload | Windows Server 2022 with cross-compilation |
 
@@ -125,51 +127,32 @@ running as root. PulseAudio/PipeWire-pulse remains the Linux backend;
 
 ### macOS
 
-Builds the app and HAL for `aarch64-apple-darwin` and `x86_64-apple-darwin`,
-combines slices using `lipo`, and verifies architectures. The HAL test loads
-the plugin only in a test process, outside the runner's CoreAudio service.
-Packaging checks the bundle, its binaries and expanded `.pkg` before upload.
-The app entry point is the Rust `babel-tray` binary, with a microphone access
-declaration in `Info.plist`. The installer includes both the app under
-`/Applications` and the original driver component under
-`/Library/Audio/Plug-Ins/HAL`.
+Builds the app for Intel and Apple Silicon, combines slices with `lipo`,
+and verifies the bundle and expanded `.pkg`. The app installs under
+`/Applications` and declares microphone access in `Info.plist`. With
+`include-native-driver`, the build also tests and packages the HAL plugin.
 
 ### Windows
 
-Setup restores **official SDK and WDK packages through NuGet**, with versions
-and hashes pinned in `native/windows/wdk-packages.json`. It uses the Visual
-Studio 2022 C++/WDK tools in the hosted image and verifies components before
-building. Headers, libraries and tools do not depend on mutable-branch downloads.
-The WDK creates and validates the `INF/SYS/CAT` package; the installation helper
-is built in Rust. The app uses the static C runtime, avoiding a separate Visual
-C++ redistributable requirement to start the app.
-
-Inno Setup creates the graphical installer with the app, complete driver
-package, documentation, licenses and shortcut. Packaging rejects mixed
-architectures, an unprocessed INF or a missing catalog/helper. It verifies
-all ZIP files against the manifest. The x64 job additionally installs the
-**application** in a temporary runner directory, compares files with the
-manifest, runs only `babel --version`, confirms no Babel driver was created,
-and tests uninstallation. It does not open audio or install the driver on the
-runner. ARM64 receives application/driver builds and inspection; these are not
-executed on the x64 host. ARM64 inference engines are built and exercised
-separately on the native Windows ARM64 `local-runtime` runner.
+Inno Setup builds the app installer and portable ZIP for x64 and ARM64.
+The app uses the static C runtime. The x64 job installs the application in
+a temporary runner directory, verifies the manifest, runs `babel --version`,
+and uninstalls it. For builds with `include-native-driver`, CI also restores the
+pinned WDK, inspects the driver payload and verifies that setup leaves the
+Babel driver unloaded. ARM64 applications are inspected on the x64 runner.
+ARM64 inference engines are exercised separately on a native ARM64 runner.
 
 ## Signing and validation scope
 
-macOS/Windows packages are explicitly marked **development**. They do not
-include signing credentials and are not presented as signed/notarized
-production distributions:
+The application-only builds use a local ad-hoc signature on macOS and unsigned
+executables on Windows. The build needs no publisher account. macOS can require
+manual approval, and Windows SmartScreen, Smart App Control or a managed-device
+policy can warn or block execution. See [platform setup](platforms.md) for the
+free virtual audio dependencies and system-specific limits.
 
-- On macOS, ad-hoc signing lets CI inspect the structure. Public distribution
-  requires appropriate Developer ID identities and notarization.
-- On Windows, generating a `.cat` does not sign it. The `.exe` installs the app
-  and provides driver files, but does not automatically activate an unsigned
-  driver. Normal activation requires a package signed under Microsoft policy
-  and explicitly running `install.ps1` as administrator. The installer does not
-  change Secure Boot, enable test signing or install certificates. If the driver
-  was activated, run `uninstall.ps1` before removing the app; the uninstaller
-  preserves the helper while a devnode exists.
+The optional Babel drivers have separate signing requirements. The development
+packages are intended for driver testing. See [native drivers](native-drivers.md)
+for package signing, installation and removal.
 
 A green job proves the listed checks, not audio stability on hardware.
 Microphone permissions, quality, latency, suspend/resume, Driver Verifier and

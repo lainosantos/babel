@@ -1,12 +1,20 @@
 #Requires -Version 7.0
 [CmdletBinding()]
-param([Parameter(Mandatory)][string]$BinaryDirectory, [Parameter(Mandatory)][string]$DriverDirectory)
+param([Parameter(Mandatory)][string]$BinaryDirectory, [string]$DriverDirectory)
 $ErrorActionPreference='Stop'
 Set-StrictMode -Version Latest
-if (!$IsWindows -or !$env:BABEL_VSINSTALL) { throw 'Run WDK setup on Windows first.' }
-$dumpbins=@(Get-ChildItem (Join-Path $env:BABEL_VSINSTALL 'VC\Tools\MSVC\*\bin\Hostx64\x64\dumpbin.exe') | Sort-Object FullName -Descending)
+if (!$IsWindows) { throw 'PE runtime inspection requires Windows.' }
+$visualStudio = $env:BABEL_VSINSTALL
+if (!$visualStudio) {
+    $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
+    $visualStudio = & $vswhere -latest -products '*' -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+    if ($LASTEXITCODE -or !$visualStudio) { throw 'Visual Studio C++ build tools are unavailable.' }
+}
+$dumpbins=@(Get-ChildItem (Join-Path $visualStudio 'VC\Tools\MSVC\*\bin\Hostx64\x64\dumpbin.exe') | Sort-Object FullName -Descending)
 if (!$dumpbins.Count) { throw 'MSVC dumpbin is unavailable.' }
-foreach ($file in @((Join-Path $BinaryDirectory 'babel.exe'),(Join-Path $BinaryDirectory 'babel-tray.exe'),(Join-Path $BinaryDirectory 'babel-feedback.exe'),(Join-Path $DriverDirectory 'babel-driver-installer.exe'))) {
+$files = @('babel.exe', 'babel-tray.exe', 'babel-feedback.exe' | ForEach-Object { Join-Path $BinaryDirectory $_ })
+if ($DriverDirectory) { $files += Join-Path $DriverDirectory 'babel-driver-installer.exe' }
+foreach ($file in $files) {
     $imports=& $dumpbins[0].FullName /DEPENDENTS $file
     if ($LASTEXITCODE) { throw "Could not inspect PE imports: $file" }
     if (($imports -join "`n") -match '(?i)\b(vcruntime\w*|msvcp\d\w*|msvcr\d\w*|concrt\w*|ucrtbased)\.dll\b') {

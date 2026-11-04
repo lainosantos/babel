@@ -1,0 +1,40 @@
+Babel for macOS 14.2 and later
+
+This installer contains the Babel menu-bar application and Babel's own virtual
+audio driver. It installs /Applications/Babel.app and
+/Library/Audio/Plug-Ins/HAL/BabelAudio.driver. Administrator authorization is
+requested by macOS Installer. Restart macOS after installation so Core Audio
+loads the driver. The installer does not start Babel or change default devices.
+
+Open Babel from Applications after restarting. Its controls are in the menu bar.
+Allow Microphone access when macOS asks, select the physical microphone and
+speaker in Babel, then select Babel Microphone / Babel Speaker in applications
+that should use Babel. Use Babel Settings to enable login startup if wanted.
+
+Configuration: ~/Library/Application Support/Babel/babel.toml
+Recordings/transcripts: the absolute base folder selected in Babel Settings.
+The dashboard and managed speech helpers use dynamically assigned local ports.
+API credentials, recordings, configuration and model downloads are not bundled.
+
+The driver adds a conservative 4096-frame (85.33 ms at 48 kHz) loopback delay.
+Translation/provider processing adds its own delay. Native audio behavior must
+be validated on each supported Mac before treating a development build as a
+production release.
+
+Local voice-command helpers are optional. Their installation is explicit and
+separate from installing Babel. Setup scripts and documentation are included in
+Babel.app/Contents/Resources. Do not write models or change files inside the
+signed application. Copy Resources/Support/scripts into the writable directory
+selected as the services directory, then follow Documentation/voice-commands.md.
+An empty services directory setting uses the configuration file's directory.
+
+To remove the driver: quit Babel, open Terminal, and explicitly run:
+sudo /Applications/Babel.app/Contents/Resources/drivers/macos/uninstall.sh
+Restart macOS afterwards. The script removes only Babel's identified driver and
+receipt. It preserves your configuration and recordings. Disable login startup
+in Babel first, then move Babel.app to Trash to remove the application.
+
+CI/development packages are unsigned and the app has an ad-hoc signature.
+They are not notarized public releases. Production distribution requires
+Developer ID Application/Installer signing and Apple notarization. No Apple
+security settings are changed by this installer.

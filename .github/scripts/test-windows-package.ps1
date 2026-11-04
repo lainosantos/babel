@@ -34,8 +34,12 @@ try {
     }
     & (Join-Path $destination 'babel.exe') --version
     if ($LASTEXITCODE -ne 0) { throw 'Installed application could not execute --version.' }
-    & (Join-Path $destination 'drivers\windows\babel-driver-installer.exe') check-absent
-    if ($LASTEXITCODE -ne 0) { throw 'Installer unexpectedly created a driver device.' }
+    if ($null -ne $manifest.driver_signature) {
+        & (Join-Path $destination 'drivers\windows\babel-driver-installer.exe') check-absent
+        if ($LASTEXITCODE -ne 0) { throw 'Installer unexpectedly created a driver device.' }
+    } elseif (Test-Path -LiteralPath (Join-Path $destination 'drivers')) {
+        throw 'App-only installer unexpectedly contains a driver.'
+    }
 } finally {
     $uninstaller=Join-Path $destination 'unins000.exe'
     if (Test-Path -LiteralPath $uninstaller) {
