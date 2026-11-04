@@ -36,7 +36,9 @@ pub(super) async fn run(
     let drain_timeout = (route.provider == "local" && !route.replay_translation_backlog)
         .then(|| Duration::from_secs(cfg.providers.local.request_timeout_secs));
     let originals = retained.clone();
-    let completion = run_retained(
+    // Keep the streaming and retry state off the worker stack when the
+    // session wraps this future in both deadline and cancellation handling.
+    let completion = Box::pin(run_retained(
         cfg,
         route,
         origin,
@@ -45,7 +47,7 @@ pub(super) async fn run(
         playback,
         mirror_metrics,
         usage,
-    );
+    ));
     let result = match drain_timeout {
         Some(timeout) => complete_after_capture_stop(&originals, timeout, completion).await,
         None => completion.await,
@@ -840,6 +842,48 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn local_translation_fits_the_session_processing_worker_stack() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = crate::retention::SessionRetention::create_in(directory.path(), "local-start")
+            .await
+            .unwrap();
+        let retained = retained::RetainedSession::new(
+            store,
+            Instant::now(),
+            &tokio::runtime::Handle::current(),
+        );
+        retained.close_capture();
+        let cfg = AppConfig::default();
+        let mut route = cfg.speaker.clone();
+        route.provider = "local".into();
+        let (_device, playback) = watch::channel("unused-device".into());
+        let (_selection, usage) = watch::channel(audio::activity::EndpointUse::default());
+        let metrics = Arc::new(RouteMetrics::default());
+        let translation = run(
+            cfg,
+            route,
+            TranscriptOrigin::Speaker,
+            retained,
+            metrics.clone(),
+            playback,
+            None,
+            usage,
+        );
+        let worker = crate::execution::processing_handle()
+            .unwrap()
+            .spawn(run_session_model(
+                CancellationToken::new(),
+                observe_session_writer(translation, "Speech translation", [Some(metrics), None]),
+                None,
+            ));
+        tokio::time::timeout(Duration::from_secs(5), worker)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+    }
 
     #[tokio::test(start_paused = true)]
     async fn local_stop_deadline_cancels_only_translation_and_preserves_originals() {
