@@ -560,6 +560,74 @@ impl Default for AppConfig {
     }
 }
 
+/// Restore the native cascade from the experimental Seamless configuration.
+/// Only disk loading migrates removed fields; API validation remains strict.
+fn restore_native_cascade(document: &mut toml::Value) -> bool {
+    let mut changed = false;
+    if let Some(local) = document
+        .get_mut("providers")
+        .and_then(|v| v.get_mut("local"))
+        .and_then(toml::Value::as_table_mut)
+        && local.contains_key("chunk_ms")
+        && local.contains_key("runtime_executable")
+    {
+        let timeout = local.get("request_timeout_secs").cloned();
+        *local = toml::Value::try_from(LocalProviderConfig::default())
+            .expect("local defaults")
+            .as_table()
+            .unwrap()
+            .clone();
+        if let Some(timeout) = timeout {
+            local.insert("request_timeout_secs".into(), timeout);
+        }
+        changed = true;
+    }
+    if let Some(stt) = document
+        .get_mut("transcription")
+        .and_then(toml::Value::as_table_mut)
+    {
+        for key in ["microphone_recognition", "speaker_recognition"] {
+            if let Some(route) = stt.get_mut(key).and_then(toml::Value::as_table_mut)
+                && route.get("provider").and_then(toml::Value::as_str) == Some("seamless")
+            {
+                route.insert("provider".into(), "whisper".into());
+                changed = true;
+            }
+        }
+        if let Some(providers) = stt.get_mut("providers").and_then(toml::Value::as_table_mut)
+            && providers.remove("seamless").is_some()
+        {
+            providers.entry("whisper".to_owned()).or_insert_with(|| {
+                toml::Value::try_from(WhisperSttConfig::default()).expect("Whisper defaults")
+            });
+            changed = true;
+        }
+    }
+    if let Some(agent) = document
+        .get_mut("agent")
+        .and_then(toml::Value::as_table_mut)
+    {
+        let language = agent.get("seamless_language").cloned();
+        let keys: Vec<_> = agent
+            .keys()
+            .filter(|key| key.starts_with("seamless_"))
+            .cloned()
+            .collect();
+        if !keys.is_empty() {
+            for key in keys {
+                agent.remove(&key);
+            }
+            agent.insert("whisper_endpoint".into(), "auto".into());
+            agent.insert("whisper_model".into(), DEFAULT_WHISPER_MODEL.into());
+            if let Some(language) = language {
+                agent.insert("whisper_language".into(), language);
+            }
+            changed = true;
+        }
+    }
+    changed
+}
+
 /// Upgrade only the legacy addresses that Babel itself generated as defaults.
 /// Custom endpoints, models and explicit new configurations remain external.
 fn migrate_managed_runtime(config: &mut AppConfig, document: &toml::Value) -> bool {
@@ -650,6 +718,7 @@ impl AppConfig {
     pub fn load(path: &Path) -> Result<Self> {
         let mut document = read_document(path)?;
         let _credentials = take_credentials(&mut document)?;
+        let migrate_seamless = restore_native_cascade(&mut document);
         let mut cfg: Self = document
             .clone()
             .try_into()
@@ -713,7 +782,13 @@ impl AppConfig {
             cfg.providers.local.piper_endpoint = "auto".into();
         }
         cfg.validate()?;
-        if migrate_base || migrate_provider || migrate_stt || migrate_runtime || migrate_voices {
+        if migrate_base
+            || migrate_provider
+            || migrate_stt
+            || migrate_runtime
+            || migrate_voices
+            || migrate_seamless
+        {
             cfg.save(path)
                 .context("Could not persist the configuration migration")?;
         }
@@ -1080,6 +1155,63 @@ fn canonical_device(id: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn seamless_rollback_preserves_local_routes_and_independent_recognition() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("babel.toml");
+        let mut expected = configured_routes();
+        expected.microphone.provider = "local".into();
+        expected.speaker.provider = "local".into();
+        expected.transcription.enabled = true;
+        expected.transcription.microphone_recognition.provider = "whisper".into();
+        expected.transcription.speaker_recognition.provider = "whisper".into();
+        expected.transcription.microphone_recognition.language = "pt-BR".into();
+        expected.transcription.speaker_recognition.language = "en-US".into();
+        expected.agent.whisper_language = "pt-BR".into();
+        expected.local_runtime.threads = 4;
+        let mut document = toml::Value::try_from(&expected).unwrap();
+        document["providers"]["local"] = toml::toml! {
+            endpoint = "auto"
+            runtime_executable = ""
+            device = "cpu"
+            chunk_ms = 320
+            request_timeout_secs = 30
+        }
+        .into();
+        for route in ["microphone_recognition", "speaker_recognition"] {
+            document["transcription"][route]["provider"] = "seamless".into();
+        }
+        let providers = document["transcription"]["providers"]
+            .as_table_mut()
+            .unwrap();
+        let mut removed = providers.remove("whisper").unwrap();
+        removed["model"] = "seamless-streaming".into();
+        providers.insert("seamless".into(), removed);
+        let agent = document["agent"].as_table_mut().unwrap();
+        for key in [
+            "whisper_endpoint",
+            "whisper_model",
+            "whisper_language",
+            "whisper_api_key_env",
+        ] {
+            agent.remove(key);
+        }
+        agent.insert("seamless_endpoint".into(), "auto".into());
+        agent.insert("seamless_language".into(), "pt-BR".into());
+        fs::write(&path, toml::to_string(&document).unwrap()).unwrap();
+        let restored = AppConfig::load(&path).unwrap();
+        assert_eq!(
+            serde_json::to_value(restored).unwrap(),
+            serde_json::to_value(expected).unwrap()
+        );
+        let persisted = fs::read_to_string(&path).unwrap();
+        assert!(!persisted.contains("seamless"));
+        assert_eq!(fs::read_to_string(&path).unwrap(), {
+            AppConfig::load(&path).unwrap();
+            fs::read_to_string(&path).unwrap()
+        });
+    }
 
     #[test]
     fn replaying_translation_backlog_requires_an_explicit_per_route_opt_in() {

@@ -591,6 +591,7 @@ async fn prepare_into(
                     "127.0.0.1",
                     "--port",
                     "0",
+                    "--no-gpu",
                     "-t",
                     &plan.threads.to_string(),
                     "-m",

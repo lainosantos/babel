@@ -228,7 +228,7 @@ impl ManagedServices {
                 let executable = whisper_binary(&root).context("Whisper is not installed in the local services folder; run scripts/setup_whisper.py")?;
                 let mut command = crate::execution::background_command(executable);
                 command
-                    .args(["--host", "127.0.0.1", "--port", "0", "-t"])
+                    .args(["--host", "127.0.0.1", "--port", "0", "--no-gpu", "-t"])
                     .arg(threads.to_string())
                     .arg("-m")
                     .arg(model);

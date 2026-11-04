@@ -222,6 +222,18 @@ forbids its own `unsafe`, but that does not make whisper.cpp, llama.cpp, ONNX or
 other native components memory-safe. They have their own contracts, updates
 and licenses; voice weights also have separate licenses.
 
+The managed Whisper + Qwen + Piper translation pipeline does not launch Python.
+Its orchestration and Piper HTTP gateway are Rust; the inference engines use
+native C/C++ libraries. Managed Whisper and Qwen explicitly run on CPU, even
+when a bundled backend supports GPU acceleration. External services control
+their own acceleration settings. The separate Needle voice-command interpreter
+still uses its documented Python adapter.
+
+Opening a configuration from the experimental SeamlessStreaming runtime restores
+managed Whisper + Qwen + Piper and changes Seamless original recognition to
+Whisper. Route devices, languages, enabled features and CPU thread limits remain
+selected. This migration applies only when loading saved configurations.
+
 Embedded recognition operates in segments. Local translation accumulates
 segmentation, recognition, translation and synthesis time. Tiny lowers cost but
 can sacrifice quality; Small may need more resources. Fixed latency or universal
