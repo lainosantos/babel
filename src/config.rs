@@ -311,6 +311,7 @@ impl HistoryConfig {
 pub struct ProviderProfiles {
     pub gemini: CloudProviderConfig,
     pub openai: CloudProviderConfig,
+    pub custom: CloudProviderConfig,
     #[serde(skip_serializing)]
     pub elevenlabs: RemovedSetting,
     pub local: LocalProviderConfig,
@@ -327,6 +328,8 @@ pub struct CloudProviderConfig {
     #[serde(skip_serializing)]
     pub tts_model: RemovedSetting,
     pub transcription_model: String,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub output_voice: String,
     pub connect_timeout_secs: u64,
     pub max_reconnect_attempts: u32,
 }
@@ -339,6 +342,7 @@ impl Default for CloudProviderConfig {
             voice: RemovedSetting,
             tts_model: RemovedSetting,
             transcription_model: String::new(),
+            output_voice: String::new(),
             connect_timeout_secs: 15,
             max_reconnect_attempts: 5,
         }
@@ -352,6 +356,13 @@ impl Default for ProviderProfiles {
                 api_key_env: "OPENAI_API_KEY".into(),
                 endpoint: String::new(),
                 model: "gpt-realtime-translate".into(),
+                ..CloudProviderConfig::default()
+            },
+            custom: CloudProviderConfig {
+                api_key_env: String::new(),
+                endpoint: "ws://127.0.0.1:8766/v1/realtime/translations".into(),
+                model: "gpt-realtime-translate".into(),
+                output_voice: "alloy".into(),
                 ..CloudProviderConfig::default()
             },
             elevenlabs: RemovedSetting,
@@ -595,6 +606,13 @@ fn restore_native_cascade(document: &mut toml::Value) -> bool {
         }
         changed = true;
     }
+    if let Some(local) = document
+        .get_mut("providers")
+        .and_then(|v| v.get_mut("local"))
+        .and_then(toml::Value::as_table_mut)
+    {
+        changed |= local.remove("translation_engine").is_some();
+    }
     if let Some(stt) = document
         .get_mut("transcription")
         .and_then(toml::Value::as_table_mut)
@@ -707,6 +725,7 @@ impl AppConfig {
     pub fn profile(&self, kind: &str) -> &CloudProviderConfig {
         match kind {
             "openai" => &self.providers.openai,
+            "custom" => &self.providers.custom,
             _ => &self.providers.gemini,
         }
     }
@@ -722,7 +741,16 @@ impl AppConfig {
                         .starts_with("gpt-realtime-translate-")))
     }
     pub fn capture_frame_ms(&self, route: &RouteConfig) -> u32 {
-        if route.enabled && self.continuous_translation(route) {
+        let custom_realtime = route.provider == "custom"
+            && self
+                .providers
+                .custom
+                .endpoint
+                .split_once(':')
+                .is_some_and(|(scheme, _)| {
+                    scheme.eq_ignore_ascii_case("ws") || scheme.eq_ignore_ascii_case("wss")
+                });
+        if route.enabled && (self.continuous_translation(route) || custom_realtime) {
             100
         } else {
             self.audio.quality.frame_ms()
@@ -882,14 +910,15 @@ impl AppConfig {
         for (name, p) in [
             ("gemini", &self.providers.gemini),
             ("openai", &self.providers.openai),
+            ("custom", &self.providers.custom),
         ] {
             let model = p.model.trim_start_matches("models/");
             ensure!(
                 !model.is_empty()
                     && model.len() <= 128
-                    && model
-                        .bytes()
-                        .all(|b| b.is_ascii_alphanumeric() || b"-._".contains(&b)),
+                    && model.bytes().all(|b| b.is_ascii_alphanumeric()
+                        || b"-._".contains(&b)
+                        || (name == "custom" && b == b'/')),
                 "Invalid model identifier for provider {name}"
             );
             ensure!(
@@ -898,10 +927,11 @@ impl AppConfig {
             );
             let env = &p.api_key_env;
             ensure!(
-                !env.is_empty()
-                    && env.len() <= 128
-                    && !env.as_bytes()[0].is_ascii_digit()
-                    && env.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_'),
+                (name == "custom" && env.is_empty())
+                    || (!env.is_empty()
+                        && env.len() <= 128
+                        && !env.as_bytes()[0].is_ascii_digit()
+                        && env.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')),
                 "Invalid environment variable name for {name}"
             );
             ensure!(
@@ -979,7 +1009,10 @@ impl AppConfig {
         }
         for (name, route) in [("microphone", &microphone), ("speaker", &self.speaker)] {
             ensure!(
-                matches!(route.provider.as_str(), "gemini" | "openai" | "local"),
+                matches!(
+                    route.provider.as_str(),
+                    "gemini" | "openai" | "local" | "custom"
+                ),
                 "Unknown translation provider for {name}"
             );
             for lang in [&route.source_language, &route.target_language] {
@@ -1102,7 +1135,11 @@ impl AppConfig {
                     "Select capture and playback devices for {name}"
                 );
             }
-            if route.enabled && matches!(route.provider.as_str(), "gemini" | "openai") {
+            if route.enabled
+                && (matches!(route.provider.as_str(), "gemini" | "openai")
+                    || (route.provider == "custom"
+                        && !self.providers.custom.api_key_env.is_empty()))
+            {
                 crate::credentials::get(&self.profile(&route.provider).api_key_env)?;
             }
         }
@@ -1168,6 +1205,32 @@ fn canonical_device(id: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn retired_managed_translation_option_preserves_local_routes() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("babel.toml");
+        let mut config = configured_routes();
+        config.microphone.provider = "local".into();
+        let mut document = toml::Value::try_from(&config).unwrap();
+        document["providers"]["local"]
+            .as_table_mut()
+            .unwrap()
+            .insert("translation_engine".into(), "seamless_streaming".into());
+        fs::write(&path, toml::to_string(&document).unwrap()).unwrap();
+
+        let migrated = AppConfig::load(&path).unwrap();
+        assert_eq!(migrated.microphone.provider, "local");
+        assert_eq!(
+            migrated.providers.local.translation_model,
+            config.providers.local.translation_model
+        );
+        assert!(
+            !fs::read_to_string(path)
+                .unwrap()
+                .contains("translation_engine")
+        );
+    }
 
     #[test]
     fn seamless_rollback_preserves_local_routes_and_independent_recognition() {

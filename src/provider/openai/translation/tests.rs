@@ -37,7 +37,16 @@ fn spawn(
     config: SessionConfig,
 ) -> (JoinHandle<SessionResult<()>>, mpsc::Receiver<ProviderEvent>) {
     let (events, receiver) = mpsc::channel(32);
-    let task = tokio::spawn(async move { run(socket, &mut audio, &events, &config).await });
+    let task = tokio::spawn(async move {
+        run(
+            socket,
+            &mut audio,
+            &events,
+            &config,
+            is_translation(&config.model),
+        )
+        .await
+    });
     (task, receiver)
 }
 

@@ -53,6 +53,34 @@ agent listens to an eligible Babel microphone, even without a session. Needle
 loads only to interpret a command. See [voice commands](voice-commands.md) for
 these components' CPU limits and idle unloading.
 
+## Custom speech-to-speech provider
+
+Choose **Custom speech-to-speech** for either translation route and open its
+profile in **Translation → Provider settings**. The profile has a separate
+endpoint, model, optional API key, timeout and reconnect setting. The **Local**
+provider keeps the Whisper, Qwen and Piper pipeline. Original transcription
+uses its own profile.
+
+- **WebSocket** (`ws://` or `wss://`) uses the
+  [Realtime Translation API](https://developers.openai.com/api/docs/guides/realtime-translation).
+  A compatible service creates the session, acknowledges its update, receives
+  continuous 24 kHz mono PCM16 in base64, and emits translated audio deltas.
+  The service determines source language and voice. Start a local service
+  separately and set the endpoint to its translation WebSocket, such as
+  `ws://127.0.0.1:8766/v1/realtime/translations`.
+- **HTTP** (`http://` or `https://`) uses audio Chat Completions. Babel sends
+  bounded speech segments as WAV and requests an audio reply. The service
+  streams base64 WAV fragments in `choices[0].delta.audio.data` over SSE.
+  Babel plays each segment after the response completes. Choose a model and
+  voice that support WAV input and PCM16 WAV output. For example, use
+  `https://openrouter.ai/api/v1/chat/completions` with `openai/gpt-audio`,
+  voice `alloy`, and an `OPENROUTER_API_KEY` credential. See the
+  [OpenRouter audio guide](https://openrouter.ai/docs/guides/overview/multimodal/audio).
+
+Use WSS or HTTPS for remote services. Babel allows plaintext connections on
+loopback only. Leave the credential field blank if the service accepts
+unauthenticated requests. Both transports run in the Rust application.
+
 ## Available models
 
 | Stage | Embedded catalog | Default and considerations |
@@ -229,10 +257,9 @@ when a bundled backend supports GPU acceleration. External services control
 their own acceleration settings. The separate Needle voice-command interpreter
 still uses its documented Python adapter.
 
-Opening a configuration from the experimental SeamlessStreaming runtime restores
-managed Whisper + Qwen + Piper and changes Seamless original recognition to
-Whisper. Route devices, languages, enabled features and CPU thread limits remain
-selected. This migration applies only when loading saved configurations.
+Opening a configuration with the removed experimental translation-engine field
+retains the **Local** route and uses the default cascade. Select the custom
+provider explicitly to connect to an external service.
 
 Embedded recognition operates in segments. Local translation accumulates
 segmentation, recognition, translation and synthesis time. Tiny lowers cost but

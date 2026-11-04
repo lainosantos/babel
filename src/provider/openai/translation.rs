@@ -11,9 +11,10 @@ pub(super) async fn run(
     audio: &mut mpsc::Receiver<Vec<i16>>,
     events: &mpsc::Sender<ProviderEvent>,
     config: &SessionConfig,
+    continuous_mode: bool,
 ) -> SessionResult<()> {
     let mut submitted = false;
-    let result = if is_translation(&config.model) {
+    let result = if continuous_mode {
         continuous(socket, audio, events, config, &mut submitted).await
     } else {
         // Segmentation owns consumed PCM, so errors cannot safely restart an

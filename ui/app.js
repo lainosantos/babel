@@ -531,6 +531,9 @@
 
   function updateProviderControls() {
     updateMicrophoneSource();
+    const customRealtime = /^wss?:/i.test(profileValue('custom', 'endpoint'));
+    byId('profile-custom-voice-field').hidden = customRealtime;
+    byId('profile-custom-output_voice').disabled = customRealtime;
     for (const route of routeNames) {
       const bypassed = !sourceAvailable(route);
       const translating = translatesRoute(route);
@@ -538,20 +541,26 @@
       byId(`${route}-provider`).disabled = bypassed;
       const dedicated = dedicatedRoute(route) && translating;
       const provider = routeProvider(route);
+      const customContinuous = provider === 'custom' && customRealtime && translating;
+      const voiceHint = byId(`translation-${route}-title`).closest('article').querySelector('.native-voice-hint');
+      voiceHint.hidden = provider === 'custom' && !customRealtime;
+      const automaticSource = dedicated || customContinuous;
       const source = byId(`${route}-source_language`);
-      source.disabled = dedicated || bypassed;
-      if (dedicated) { if (source.dataset.savedSource === undefined) source.dataset.savedSource = source.value; source.value = t("ui.automatic"); }
+      source.disabled = automaticSource || bypassed;
+      if (automaticSource) { if (source.dataset.savedSource === undefined) source.dataset.savedSource = source.value; source.value = t("ui.automatic"); }
       else if (!dedicated && source.dataset.savedSource !== undefined) { source.value = source.dataset.savedSource; delete source.dataset.savedSource; }
       byId(`${route}-target_language`).disabled = !translating;
       byId(`${route}-gain`).disabled = !translating;
       byId(`${route}-replay_translation_backlog`).disabled = !translating;
-      byId(`${route}-prompt`).disabled = !translating || dedicated;
+      byId(`${route}-prompt`).disabled = !translating || automaticSource;
       byId(`${route}-prompt-hint`).textContent = dedicated
         ? t("ui.this_continuous_model_does_not_accept_prompts_saving_in_this_mode_clears_th")
+        : customContinuous ? t('custom.realtime_prompt')
         : !translating ? t("ui.translation_instructions_are_not_used_while_this_translation_is_off")
         : t("ui.add_tone_terminology_and_proper_names_to_guide_translation");
       byId(`${route}-provider-hint`).textContent = !translating
         ? t("ui.original_audio_if_transcription_is_enabled_for_this_source_this_provider_re")
+        : provider === 'custom' ? t(customRealtime ? 'custom.realtime_route' : 'custom.http_route')
         : provider === 'local' ? t("ui.transcription_translation_and_voice_through_local_services_in_segments")
         : dedicated ? t("ui.continuous_translation_with_automatic_source_language_detection") : t("ui.conversation_model_usually_waits_for_pauses_before_responding");
     }
@@ -562,7 +571,8 @@
       return (!translates || routeProvider(route) === 'local')
         && (!transcribesRoute(route) || sttProvider(route) === 'whisper');
     });
-    byId('footer-state').textContent = local ? t("ui.session_configured_for_local_processing") : t("ui.session_configured_with_cloud_providers");
+    const custom = routeNames.some(route => translatesRoute(route) && routeProvider(route) === 'custom');
+    byId('footer-state').textContent = custom ? t('custom.session_hint') : local ? t("ui.session_configured_for_local_processing") : t("ui.session_configured_with_cloud_providers");
     updateLocalControls();
     updateTranscriptionControls();
     renderSignalPaths();
@@ -1161,7 +1171,7 @@
     }
     state.dirty = true;
     updateGainLabels();
-    if (['provider', 'enabled', 'engine', 'model', 'microphone_source'].includes(event.target.dataset.field) || event.target.dataset.section === 'transcription' || event.target.dataset.transcriptionProfile || event.target.dataset.profile === 'local') updateProviderControls();
+    if (['provider', 'enabled', 'engine', 'model', 'microphone_source'].includes(event.target.dataset.field) || event.target.dataset.section === 'transcription' || event.target.dataset.transcriptionProfile || ['local', 'custom'].includes(event.target.dataset.profile)) updateProviderControls();
     if (event.target.dataset.section === 'local_runtime') validateLocalDirectory();
     if (event.target.id === 'audio-quality') updateQualityHint();
     if (['files-base_path', 'transcription-directory', 'recording-directory'].includes(event.target.id)) scheduleFilePathPreview();
@@ -1273,7 +1283,7 @@
 
   function profileChanged() {
     const provider = byId('profile-selector').value;
-    for (const name of ['gemini', 'openai', 'local']) byId(`profile-${name}`).hidden = name !== provider;
+    for (const name of ['gemini', 'openai', 'local', 'custom']) byId(`profile-${name}`).hidden = name !== provider;
     refreshCredentialStatus(provider);
   }
 
@@ -1285,7 +1295,10 @@
     const environment = value(provider, 'api_key_env');
     const status = byId(`${prefix}credential-${provider}-status`);
     if (!environment) {
-      if (stt) i18n.message(status, t(provider === 'whisper' ? 'stt.optional_credential' : 'stt.credential_name_required'));
+      if (provider === 'custom') {
+        i18n.message(status, t('custom.no_key'));
+        byId('credential-custom-saved-path').textContent = '';
+      } else if (stt) i18n.message(status, t(provider === 'whisper' ? 'stt.optional_credential' : 'stt.credential_name_required'));
       return;
     }
     try {
@@ -1300,7 +1313,7 @@
   }
 
   byId('profile-selector').addEventListener('change', profileChanged);
-  for (const provider of ['gemini', 'openai']) {
+  for (const provider of ['gemini', 'openai', 'custom']) {
     byId(`profile-${provider}-api_key_env`).addEventListener('change', () => refreshCredentialStatus(provider));
   }
   function sttProfileChanged() {
@@ -1318,10 +1331,10 @@
   }));
   window.addEventListener('babel:credentials-changed', event => {
     if (event.detail?.origin === 'audio') return;
-    for (const [provider, stt] of [['gemini', false], ['openai', false], ...['gemini', 'openai', 'deepgram', 'whisper'].map(name => [name, true])]) refreshCredentialStatus(provider, stt);
+    for (const [provider, stt] of [['gemini', false], ['openai', false], ['custom', false], ...['gemini', 'openai', 'deepgram', 'whisper'].map(name => [name, true])]) refreshCredentialStatus(provider, stt);
   });
   async function refreshSharedCredentials(environment) {
-    const profiles = [['gemini', false], ['openai', false], ...['gemini', 'openai', 'deepgram', 'whisper'].map(name => [name, true])];
+    const profiles = [['gemini', false], ['openai', false], ['custom', false], ...['gemini', 'openai', 'deepgram', 'whisper'].map(name => [name, true])];
     await Promise.all(profiles.filter(([name, stt]) => (stt ? sttProfileValue : profileValue)(name, 'api_key_env') === environment).map(([name, stt]) => refreshCredentialStatus(name, stt)));
     window.dispatchEvent(new CustomEvent('babel:credentials-changed', { detail: { origin: 'audio' } }));
   }

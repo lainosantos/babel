@@ -11,7 +11,7 @@ function defaults() {
   const route = (values = {}) => ({ enabled: true, provider: 'gemini', capture_device: 'physical-mic', playback_device: 'babel_mic_bus', source_language: 'pt-BR', target_language: 'en-US', prompt: '', gain: 1, replay_translation_backlog: false, ...values });
   return {
     version: 1, interface: { language: 'system' }, local_runtime: { directory: '', threads: 2, idle_unload_secs: 60 },
-    providers: { gemini: cloud(), openai: cloud({ api_key_env: 'OPENAI_API_KEY', endpoint: '', model: 'gpt-realtime-translate' }), local: { whisper_endpoint: 'auto', whisper_model: 'base', ollama_endpoint: 'auto', translation_api: 'ollama', translation_model: 'qwen3-0.6b', piper_endpoint: 'auto', segment_ms: 2000, silence_ms: 300, vad_threshold: 0.01, request_timeout_secs: 30 } },
+    providers: { gemini: cloud(), openai: cloud({ api_key_env: 'OPENAI_API_KEY', endpoint: '', model: 'gpt-realtime-translate' }), custom: cloud({ api_key_env: '', endpoint: 'ws://127.0.0.1:8766/v1/realtime/translations', model: 'gpt-realtime-translate', output_voice: 'alloy' }), local: { whisper_endpoint: 'auto', whisper_model: 'base', ollama_endpoint: 'auto', translation_api: 'ollama', translation_model: 'qwen3-0.6b', piper_endpoint: 'auto', segment_ms: 2000, silence_ms: 300, vad_threshold: 0.01, request_timeout_secs: 30 } },
     audio: { microphone_source: 'physical_microphone', quality: 'balanced', capture_queue_ms: 200, playback_queue_ms: 2000, max_capture_age_ms: 200, device_latency_ms: 30 },
     microphone: route(), speaker: route({ capture_device: 'babel_speaker.monitor', playback_device: 'physical-speaker', source_language: 'en-US', target_language: 'pt-BR' }),
     transcription: { enabled: false, microphone: true, speaker: true, timestamps: true, directory: 'transcripts',
@@ -446,6 +446,33 @@ test('session switches save independent recording or transcription choices befor
   }
 });
 
+test('custom speech has its own profile and switches controls with the endpoint protocol', async t => {
+  const p = await page(t, { language: 'en' });
+  const before = structuredClone(p.config());
+  p.set('microphone-provider', 'custom');
+  const profile = p.byId('profile-selector');
+  profile.value = 'custom';
+  profile.dispatchEvent(new p.window.Event('change', { bubbles: true }));
+  assert.equal(p.byId('profile-custom').hidden, false);
+  const originalSource = p.byId('microphone-source_language').dataset.savedSource;
+  assert.equal(p.byId('microphone-prompt').disabled, true);
+  assert.equal(p.byId('profile-custom-voice-field').hidden, true);
+  const endpoint = 'https://openrouter.ai/api/v1/chat/completions';
+  p.set('profile-custom-endpoint', endpoint);
+  p.set('profile-custom-model', 'openai/gpt-audio');
+  p.set('profile-custom-api_key_env', 'OPENROUTER_API_KEY');
+  assert.equal(p.byId('profile-custom-voice-field').hidden, false);
+  assert.equal(p.byId('microphone-prompt').disabled, false);
+  assert.equal(p.byId('microphone-source_language').value, originalSource);
+  p.byId('save').click();
+  await settle(() => p.config().providers.custom.endpoint === endpoint && !p.byId('settings').disabled);
+  assert.equal(p.config().microphone.provider, 'custom');
+  assert.equal(p.config().providers.custom.model, 'openai/gpt-audio');
+  assert.equal(p.config().providers.custom.api_key_env, 'OPENROUTER_API_KEY');
+  assert.deepEqual(p.config().providers.local, before.providers.local);
+  assert.deepEqual(p.config().transcription, before.transcription);
+});
+
 test('session switches prevent an empty session and update history eligibility without selecting history', async t => {
   const p = await page(t, { language: 'en' });
   p.set('session-translation-enabled', false);
@@ -505,7 +532,7 @@ test('each route has its own provider; dedicated modes remove unsupported settin
   assert.equal(p.config().microphone.provider, 'gemini');
   assert.equal(p.config().speaker.provider, 'openai');
   assert.equal(p.config().speaker.prompt, 'Use termos técnicos.');
-  assert.deepEqual(Object.keys(p.config().providers).sort(), ['gemini', 'local', 'openai']);
+  assert.deepEqual(Object.keys(p.config().providers).sort(), ['custom', 'gemini', 'local', 'openai']);
   p.set('profile-openai-model', 'gpt-realtime-translate-2026-09-29');
   p.byId('save').click();
   await settle(() => p.config().speaker.prompt === '');
@@ -526,13 +553,13 @@ test('temporary keys use a separate authenticated endpoint, clear the input, and
   assert.match(p.byId('credential-gemini-status').textContent, /Nenhuma chave/);
 });
 
-test('translation uses only native default voices without library, uploads or synthesis profiles', async t => {
+test('built-in translation providers use native default voices without a voice library', async t => {
   const p = await page(t, { language: 'en' });
   assert.equal(p.byId('nav-translation').textContent, 'Translation');
   assert.equal(p.doc.querySelectorAll('.native-voice-hint').length, 2);
   assert.equal(p.doc.querySelector('[data-voice-route], .library-open, input[type="file"]'), null);
   for (const id of ['voice-library', 'profile-elevenlabs', 'profile-gemini-voice', 'profile-openai-voice', 'profile-gemini-tts_model', 'profile-local-piper_voice']) assert.equal(p.byId(id), null);
-  assert.deepEqual([...p.byId('profile-selector').options].map(option => option.value), ['gemini', 'openai', 'local']);
+  assert.deepEqual([...p.byId('profile-selector').options].map(option => option.value), ['gemini', 'openai', 'local', 'custom']);
   for (const provider of ['local', 'openai', 'gemini']) {
     for (const route of ['microphone', 'speaker']) p.set(`${route}-provider`, provider);
     p.byId('save').click();

@@ -448,7 +448,7 @@ fn whisper_language(language: &str) -> String {
         "auto".into()
     }
 }
-fn encode_wav(samples: &[i16]) -> Result<Vec<u8>> {
+pub(super) fn encode_wav(samples: &[i16]) -> Result<Vec<u8>> {
     let mut bytes = Cursor::new(Vec::with_capacity(samples.len() * 2 + 44));
     {
         let mut writer = hound::WavWriter::new(
@@ -472,7 +472,7 @@ fn encode_wav(samples: &[i16]) -> Result<Vec<u8>> {
     }
     Ok(bytes.into_inner())
 }
-fn decode_wav(bytes: &[u8], max_duration_ms: u32) -> Result<Vec<i16>> {
+pub(super) fn decode_wav(bytes: &[u8], max_duration_ms: u32) -> Result<Vec<i16>> {
     let mut reader = hound::WavReader::new(Cursor::new(bytes))
         .map_err(|_| anyhow::anyhow!("Piper returned invalid WAV audio"))?;
     let spec = reader.spec();
@@ -701,7 +701,7 @@ pub(super) fn history_options(silence_ms: u32) -> LocalProviderConfig {
         ..Default::default()
     }
 }
-async fn render_audio(
+pub(super) async fn render_audio(
     mut rendered: mpsc::Receiver<Vec<i16>>,
     events: &mpsc::Sender<ProviderEvent>,
 ) -> Result<()> {

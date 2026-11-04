@@ -775,6 +775,22 @@ mod tests {
     use super::*;
 
     #[test]
+    fn external_speech_to_speech_skips_managed_translation_but_keeps_whisper_recognition() {
+        let mut config = AppConfig::default();
+        config.microphone.provider = "local".into();
+        assert!(!Plan::active(&config).unwrap().empty());
+
+        config.microphone.provider = "custom".into();
+        assert!(Plan::active(&config).unwrap().empty());
+
+        config.transcription.enabled = true;
+        config.transcription.microphone_recognition.provider = "whisper".into();
+        let plan = Plan::active(&config).unwrap();
+        assert_eq!(plan.whisper.len(), 1);
+        assert!(plan.translation.is_none() && plan.voices.is_empty());
+    }
+
+    #[test]
     fn speaker_mirroring_never_prepares_or_loads_remembered_microphone_models() {
         let mut cfg = AppConfig::default();
         cfg.audio.microphone_source = crate::config::MicrophoneSource::SpeakerOriginal;

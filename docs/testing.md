@@ -358,6 +358,10 @@ files are reused. Python is required by this test, not by the installed
 application. The test proves loading/protocol behavior, not per-language
 quality, diarization, sustained memory usage or end-to-end latency.
 
+Custom speech-to-speech tests exercise a local Realtime Translation WebSocket
+and an audio Chat Completions HTTP fixture, including WAV input and split
+base64 SSE output. The automated fixtures use no credentials or model weights.
+
 ## Linux audio-server integration
 
 `pactl`, `parec` and `pacat` must be in `PATH`, with a running

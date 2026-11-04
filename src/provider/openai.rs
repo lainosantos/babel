@@ -40,6 +40,7 @@ pub struct OpenAiProvider {
     endpoint: String,
     transcription_model: String,
     transcription_only: bool,
+    custom_translation: bool,
 }
 
 impl OpenAiProvider {
@@ -58,7 +59,15 @@ impl OpenAiProvider {
             endpoint,
             transcription_model,
             transcription_only: false,
+            custom_translation: false,
         })
+    }
+
+    pub(super) fn custom_translation(endpoint: String) -> Result<Self> {
+        validate_endpoint(&endpoint)?;
+        let mut provider = Self::new(endpoint, String::new())?;
+        provider.custom_translation = true;
+        Ok(provider)
     }
 
     pub fn transcription(endpoint: String, model: String) -> Result<Self> {
@@ -148,7 +157,7 @@ fn validate_endpoint(endpoint: &str) -> Result<Url> {
     Ok(url)
 }
 
-fn validate(config: &SessionConfig) -> Result<()> {
+fn validate(config: &SessionConfig, continuous: bool) -> Result<()> {
     ensure!(
         (1..=120).contains(&config.connect_timeout_secs) && config.max_reconnect_attempts <= 20,
         "invalid OpenAI timeout/reconnect limits"
@@ -172,7 +181,7 @@ fn validate(config: &SessionConfig) -> Result<()> {
         config.prompt.len() <= 16_384,
         "OpenAI prompt exceeds the limit"
     );
-    if is_translation(&config.model) {
+    if continuous {
         ensure!(
             config.prompt.trim().is_empty(),
             "OpenAI Realtime Translate does not support custom prompts; use standard Realtime for custom instructions"
@@ -193,13 +202,13 @@ fn validate(config: &SessionConfig) -> Result<()> {
     Ok(())
 }
 
-fn setup(config: &SessionConfig, transcription_model: &str) -> Value {
+fn setup(config: &SessionConfig, transcription_model: &str, continuous: bool) -> Value {
     let transcription = if config.input_transcription {
         json!({"model":transcription_model})
     } else {
         Value::Null
     };
-    if is_translation(&config.model) {
+    if continuous {
         return json!({"type":"session.update", "session":{"audio":{"input":{"transcription":transcription}, "output":{"language":config.target_language}}}});
     }
     let instructions = format!(
@@ -220,7 +229,11 @@ fn setup(config: &SessionConfig, transcription_model: &str) -> Value {
 #[async_trait]
 impl SpeechProvider for OpenAiProvider {
     fn id(&self) -> &'static str {
-        "openai"
+        if self.custom_translation {
+            "custom"
+        } else {
+            "openai"
+        }
     }
     async fn run(
         &self,
@@ -229,13 +242,24 @@ impl SpeechProvider for OpenAiProvider {
         events: mpsc::Sender<ProviderEvent>,
         cancel: CancellationToken,
     ) -> Result<()> {
+        if self.custom_translation {
+            config.prompt.clear();
+            config.input_transcription = false;
+        }
         if self.transcription_only {
             config.model.clone_from(&self.transcription_model);
             config.input_transcription = true;
             config.output_transcription = false;
             transcription::validate(&config).map_err(super::permanent_error)?;
         } else {
-            validate(&config).map_err(super::permanent_error)?;
+            validate(
+                &config,
+                self.custom_translation || is_translation(&config.model),
+            )
+            .map_err(super::permanent_error)?;
+        }
+        if self.custom_translation && config.api_key_env.is_empty() {
+            return self.run_sessions(&config, "", audio, events, cancel).await;
         }
         let key = crate::credentials::get(&config.api_key_env).map_err(super::permanent_error)?;
         ensure!(!key.trim().is_empty(), "OpenAI API key is empty");
@@ -344,10 +368,12 @@ impl OpenAiProvider {
         let mut request = endpoint
             .into_client_request()
             .map_err(|_| Failure::fatal("invalid OpenAI endpoint"))?;
-        let mut authorization = HeaderValue::from_str(&format!("Bearer {}", key.trim()))
-            .map_err(|_| Failure::fatal("OpenAI key contains invalid header characters"))?;
-        authorization.set_sensitive(true);
-        request.headers_mut().insert("Authorization", authorization);
+        if !key.is_empty() {
+            let mut authorization = HeaderValue::from_str(&format!("Bearer {}", key.trim()))
+                .map_err(|_| Failure::fatal("OpenAI key contains invalid header characters"))?;
+            authorization.set_sensitive(true);
+            request.headers_mut().insert("Authorization", authorization);
+        }
         let ws_config = WebSocketConfig::default()
             .read_buffer_size(16 * 1024)
             .write_buffer_size(0)
@@ -373,7 +399,11 @@ impl OpenAiProvider {
                                 (if self.transcription_only {
                                     transcription::setup(config, &self.transcription_model)
                                 } else {
-                                    setup(config, self.transcription_model(config))
+                                    setup(
+                                        config,
+                                        self.transcription_model(config),
+                                        self.custom_translation || is_translation(&config.model),
+                                    )
                                 })
                                 .to_string()
                                 .into(),
@@ -406,7 +436,14 @@ impl OpenAiProvider {
         if self.transcription_only {
             return transcription::run_live(socket, audio, events, config.vad_silence_ms).await;
         }
-        translation::run(socket, audio, events, config).await
+        translation::run(
+            socket,
+            audio,
+            events,
+            config,
+            self.custom_translation || is_translation(&config.model),
+        )
+        .await
     }
 }
 
@@ -665,8 +702,8 @@ mod tests {
                     voice: legacy_voice.into(),
                     ..config()
                 };
-                validate(&cfg).unwrap();
-                let request = setup(&cfg, "gpt-realtime-whisper");
+                validate(&cfg, is_translation(&cfg.model)).unwrap();
+                let request = setup(&cfg, "gpt-realtime-whisper", is_translation(&cfg.model));
                 assert!(request.pointer("/session/audio/output/voice").is_none());
                 assert!(!request.to_string().contains("voice_old_clone"));
             }
@@ -682,7 +719,7 @@ mod tests {
                 .unwrap()
                 .contains("/realtime/translations?model=")
         );
-        let translated = setup(&config(), provider.transcription_model(&config()));
+        let translated = setup(&config(), provider.transcription_model(&config()), true);
         assert_eq!(
             translated.pointer("/session/audio/output/language"),
             Some(&json!("en"))
@@ -697,7 +734,7 @@ mod tests {
             voice: "voice_custom123".into(),
             ..config()
         };
-        let message = setup(&standard, provider.transcription_model(&standard));
+        let message = setup(&standard, provider.transcription_model(&standard), false);
         assert!(message.pointer("/session/audio/output/voice").is_none());
         assert_eq!(
             message.pointer("/session/audio/input/turn_detection"),

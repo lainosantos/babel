@@ -3,6 +3,7 @@
 //! All serialization/network work runs outside audio callbacks. Callers own the
 //! bounded channels and cancel a session before changing its configuration.
 
+mod custom;
 mod deepgram;
 mod failure;
 use failure::Failure;
@@ -221,6 +222,7 @@ pub fn create_configured_provider(
             cloud.endpoint.clone(),
             cloud.transcription_model.clone(),
         )?)),
+        "custom" => custom::create(cloud),
         "local" => Ok(Arc::new(local::LocalProvider::new(local.clone())?)),
         _ => create_provider(kind),
     }
