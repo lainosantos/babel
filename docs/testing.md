@@ -1,5 +1,24 @@
 # Verification and test limitations
 
+## F.I.R.S.T. test criteria
+
+- **Fast.** Use virtual time for deadlines and explicit readiness signals for
+  worker coordination. Keep real-device, installer, and full-model runs separate
+  from portable checks.
+- **Independent.** Give each case its own temporary directory, listener on an
+  OS-assigned port, and fixture state. Clean up child processes and test audio
+  endpoints even after a failure.
+- **Repeatable.** Use deterministic audio and protocol fixtures with fixed
+  expectations. Keep live hardware and provider probes explicitly selectable.
+- **Self-validating.** Assert the observable result and expected failure mode.
+  A wall-clock timeout can bound a stalled fixture without serving as the result.
+- **Timely.** Cover the public behavior and the failure case while changing the
+  feature, including configuration persistence and cancellation boundaries.
+
+Run the Rust targets, dashboard tests, script unit tests, and workflow checks
+independently. The live audio scripts, native platform harnesses and opt-in
+full-model smoke tests require their documented environments.
+
 ## Native CI and smoke tests without devices
 
 The matrix in `.github/workflows/checks.yml` runs formatting, Clippy, Rust tests,

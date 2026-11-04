@@ -155,9 +155,10 @@ async fn original_tones_share_one_recorded_timeline_without_changing_babel_devic
     cfg.recording.enabled = true;
     cfg.recording.microphone = true;
     cfg.recording.speaker = true;
+    cfg.recording.layout = babel_audio::config::RecordingLayout::Mixed;
     // Verify original-source capture at fixed headroom. Recording-only level
     // balance and microphone priority have separate synthetic DSP regressions.
-    cfg.recording.mix.microphone_priority = false;
+    cfg.recording.mix = babel_audio::config::RecordingMixConfig::transparent();
     cfg.recording.directory = directory
         .path()
         .join("recordings")
@@ -195,13 +196,22 @@ async fn original_tones_share_one_recorded_timeline_without_changing_babel_devic
             }
         }
         tokio::time::sleep(Duration::from_millis(250)).await;
+        let active = controller.status().await;
+        ensure!(active.session_name.as_deref() == Some("Gravação simultânea / teste"), "Session name was not preserved");
+        ensure!(active.microphone.captured_frames > 20 && active.speaker.captured_frames > 20, "Both original capture routes must feed the recorder");
+        ensure!(active.microphone.translated_samples == 0 && active.speaker.translated_samples == 0, "Original recording must not invoke translation");
         controller.stop().await?;
-        let elapsed=started.elapsed().as_secs_f64();
-        let status=controller.status().await;
-        ensure!(!status.running && status.last_error.is_none(),"Normal stop failed: {status:?}");
-        ensure!(status.session_name.as_deref()==Some("Gravação simultânea / teste"),"Session name was not preserved");
-        ensure!(status.microphone.captured_frames>20 && status.speaker.captured_frames>20,"Both original capture routes must feed the recorder");
-        ensure!(status.microphone.translated_samples==0 && status.speaker.translated_samples==0,"Original recording must not invoke translation");
+        let elapsed = started.elapsed().as_secs_f64();
+        let stopped = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let status = controller.status().await;
+                if !status.finalizing {
+                    break status;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        }).await.context("Recording did not finish writing after Stop")?;
+        ensure!(!stopped.running && stopped.last_error.is_none(), "Normal stop failed: {stopped:?}");
         let files=std::fs::read_dir(&recordings)?.collect::<std::io::Result<Vec<_>>>()?;
         ensure!(files.len()==1,"Expected one mixed WAV, found {} files",files.len());
         let path=files[0].path();let name=path.file_name().unwrap().to_string_lossy();
@@ -324,6 +334,8 @@ async fn idle_routing_recording_and_transcription_are_independent_without_cloud(
     cfg.recording.enabled = true;
     cfg.recording.microphone = true;
     cfg.recording.speaker = true;
+    cfg.recording.layout = babel_audio::config::RecordingLayout::Mixed;
+    cfg.recording.mix.ducking_db = 12.0;
     cfg.recording.directory = directory
         .path()
         .join("recordings")
@@ -390,7 +402,7 @@ async fn idle_routing_recording_and_transcription_are_independent_without_cloud(
         let path=files[0].path();ensure!(path.file_name().unwrap().to_string_lossy().starts_with("noai_gravação-sem-ia_"),"Recording-only name pattern was not applied");
         let mut wav=hound::WavReader::open(path)?;
         let samples=wav.samples::<i16>().collect::<std::result::Result<Vec<_>,_>>()?;
-        // Default microphone priority reduces only the recorded incoming tone.
+        // The configured microphone priority reduces only the recorded incoming tone.
         // The live observations above still require both original routes at
         // full level, including while this recording-only session is active.
         ensure!(samples.windows(16000).step_by(1600).any(|window| {

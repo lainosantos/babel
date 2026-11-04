@@ -47,7 +47,6 @@ async fn rpc(
             state.call_started.notify_one();
             if state.mode == "cancel" { state.call_released.notified().await; }
             if state.mode == "expired" { return StatusCode::NOT_FOUND.into_response(); }
-            if state.mode == "slow" { tokio::time::sleep(Duration::from_secs(3)).await; }
             json!({"content":[{"type":"text","text":"done"}],"isError":state.mode == "error"})
         },
         "notifications/cancelled" => return StatusCode::ACCEPTED.into_response(),
@@ -556,7 +555,7 @@ async fn oauth_pkce_discovery_callback_refresh_and_invalidation_work() {
 
 #[tokio::test]
 async fn simultaneous_operations_are_bounded_and_cancellation_releases_slots() {
-    let (config, state, server) = fixture("slow", false).await;
+    let (config, state, server) = fixture("cancel", false).await;
     let client = Arc::new(McpClient::new());
     let cancel = CancellationToken::new();
     let mut tasks = Vec::new();
@@ -572,23 +571,24 @@ async fn simultaneous_operations_are_bounded_and_cancellation_releases_slots() {
     }
     tokio::time::timeout(Duration::from_secs(2), async {
         while state.calls.load(Ordering::Relaxed) != 4 {
-            tokio::time::sleep(Duration::from_millis(10)).await;
+            state.call_started.notified().await;
         }
     })
     .await
     .unwrap();
-    let now = Instant::now();
-    let error = client
-        .call_tool(
+    let error = tokio::time::timeout(
+        Duration::from_secs(2),
+        client.call_tool(
             &config,
             "echo",
             json!({"text":"fifth"}),
             &CancellationToken::new(),
-        )
-        .await
-        .unwrap_err();
+        ),
+    )
+    .await
+    .expect("the busy response must arrive while the first calls are gated")
+    .unwrap_err();
     assert!(error.to_string().contains("MCP is busy"));
-    assert!(now.elapsed() < Duration::from_millis(200));
     assert_eq!(state.calls.load(Ordering::Relaxed), 4);
     assert!(
         client

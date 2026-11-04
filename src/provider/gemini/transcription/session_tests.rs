@@ -176,7 +176,9 @@ async fn retained_window_accepts_a_final_later_than_the_old_five_second_deadline
     let server = AbortOnDropHandle::new(tokio::spawn(async move {
         let mut socket = accept(&listener, true).await;
         assert_eq!(turn(&mut socket).await, vec![420; 1600]);
+        tokio::time::pause();
         tokio::time::sleep(Duration::from_secs(6)).await;
+        tokio::time::resume();
         socket
             .send(Message::Text(
                 json!({"serverContent":{"inputTranscription":{"text":"Delayed original speech."}}})
@@ -304,7 +306,9 @@ async fn a_missing_final_is_a_retryable_error_and_never_acknowledges_original_au
     let server = AbortOnDropHandle::new(tokio::spawn(async move {
         let mut socket = accept(&listener, true).await;
         assert_eq!(turn(&mut socket).await, vec![1; 1600]);
+        tokio::time::pause();
         while let Some(Ok(_)) = socket.next().await {}
+        tokio::time::resume();
     }));
     let (result, events) = window(&endpoint, vec![1; 1600], CancellationToken::new()).await;
     let error = result.unwrap_err();
@@ -410,7 +414,9 @@ async fn activity_end_cannot_complete_an_unfinished_hypothesis() {
         turn(&mut socket).await;
         socket.send(Message::Text(json!({"serverContent":{"interimInputTranscription":{"text":"Unconfirmed words."}}}).to_string().into())).await.unwrap();
         activity_end(&mut socket, "0.1s").await;
+        tokio::time::pause();
         while let Some(Ok(_)) = socket.next().await {}
+        tokio::time::resume();
     }));
     let (result, events) = window(&endpoint, vec![420; 1600], CancellationToken::new()).await;
     assert!(

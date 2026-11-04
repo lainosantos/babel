@@ -205,6 +205,7 @@ enabled = false
 [recording]
 enabled = false
 directory = "recordings"
+layout = "mixed"
 ''')
         sandbox.run([executable, "--config", config, "setup"])
         self.output = sandbox.root / "babel.stdout"

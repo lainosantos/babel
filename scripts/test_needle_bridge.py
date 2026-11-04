@@ -132,7 +132,11 @@ class Needle:
         def complete():
             with LOCAL_HTTP.open(Request(url + "/complete", json.dumps(payload()).encode(),
                                          {"Content-Type": "application/json"}), timeout=5) as response:
-                return json.load(response)
+                result = json.load(response)
+            # The handler can send the result before it releases the planner.
+            self.assertTrue(planner.lock.acquire(timeout=5))
+            planner.lock.release()
+            return result
         def health():
             with LOCAL_HTTP.open(url + "/health", timeout=3) as response:
                 return json.load(response)
@@ -148,6 +152,8 @@ class Needle:
             while time.monotonic() < deadline and health()["model_loaded"]:
                 time.sleep(0.05)
             self.assertFalse(health()["model_loaded"])
+            self.assertTrue(planner.lock.acquire(timeout=5))
+            planner.lock.release()
             self.assertIsNotNone(worker.poll())
             self.assertNotEqual(complete()["worker_pid"], worker.pid)
             latest_worker = planner.agent.process
