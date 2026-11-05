@@ -190,6 +190,7 @@ impl SessionActivity {
         self.signal.active.load(Ordering::Acquire) & self.mask != 0
     }
     pub fn new(signal: Arc<ActivitySignal>) -> Result<Arc<Self>> {
+        #[allow(deprecated)] // Atomic::try_update is unavailable on Rust 1.90.
         let before = signal
             .occupied
             .fetch_update(Ordering::AcqRel, Ordering::Acquire, |bits| {

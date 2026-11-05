@@ -285,6 +285,7 @@ impl SessionRetention {
         &self,
         plaintext: &mut Zeroizing<Vec<u8>>,
     ) -> Result<(RecordId, [u8; HEADER_BYTES])> {
+        #[allow(deprecated)] // Atomic::try_update is unavailable on Rust 1.90.
         let sequence = self
             .next
             .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |v| v.checked_add(1))

@@ -288,6 +288,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::result_large_err)] // Tungstenite fixes the handshake callback error type.
     async fn custom_websocket_uses_translation_events_with_an_arbitrary_model_and_no_key() {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let profile = CloudProviderConfig {

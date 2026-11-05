@@ -91,6 +91,7 @@ pub unsafe extern "C" fn BabelCreate(
     unsafe { BabelHALCreate(allocator, requested_type) }
 }
 #[unsafe(no_mangle)]
+#[allow(deprecated)] // Atomic::try_update is unavailable on Rust 1.85.
 pub extern "C" fn BabelRetain() -> u32 {
     REFERENCES
         .fetch_update(SeqCst, SeqCst, |v| Some(v.saturating_add(1)))
@@ -98,6 +99,7 @@ pub extern "C" fn BabelRetain() -> u32 {
         .saturating_add(1)
 }
 #[unsafe(no_mangle)]
+#[allow(deprecated)] // Atomic::try_update is unavailable on Rust 1.85.
 pub extern "C" fn BabelRelease() -> u32 {
     REFERENCES
         .fetch_update(SeqCst, SeqCst, |v| Some(v.saturating_sub(1)))
