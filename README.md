@@ -13,107 +13,94 @@ Translation, transcription and recording are independent. Outside a session,
 Babel routes original audio between the configured devices. Turning off a
 direction's translation preserves that routing during a session as well.
 
-> **Platform status:** Babel is **100% functional on Linux**.
-> **Windows and macOS have not been tested on native systems.** Their application
-> installers use separately installed virtual audio devices. See
-> [platform setup](docs/platforms.md) for installation and signing limitations.
-
-```text
-Physical microphone → translation → Babel Microphone → calling app
-Calling app → Babel Speaker → translation → physical headphones
-```
-
-Cloud translation streams native model audio over persistent connections.
-Gemini Live Translate and OpenAI Realtime Translate are the continuous
-translation adapters.
-Conversational models wait for end-of-speech detection; the local option works
-in segments. Both directions use the selected model's native default voice.
-**Streaming does not mean zero latency or guarantee a hard real-time deadline.**
-
 ## Getting started
 
-Requires Rust **1.90 or later**. Clone/open this directory and build:
+[Linux](#linux) · [macOS](#macos) · [Windows](#windows) ·
+[First session](#first-session)
+
+Download the Babel installer for your system from [Releases](https://github.com/lainosantos/babel/releases).
+Open **Babel** and choose **Settings** from its tray or menu bar icon to open the
+dashboard. The installer includes the local inference engines. You can install
+and run Babel without Python.
+
+### Linux
+
+1. Install the `.deb` on Debian or Ubuntu, or the `.rpm` on Fedora and other
+   compatible distributions. Use PipeWire with `pipewire-pulse` or PulseAudio
+   in your desktop session.
+2. Open Babel. In dashboard **Settings**, click **Create virtual devices**.
+3. In **Routing**, send microphone audio to **Babel_Microphone_Bus**
+   (`babel_mic_bus`) and capture received audio from
+   `babel_speaker.monitor`.
+4. In your calling app, select **Babel_Microphone** as the microphone and
+   **Babel_Speaker** as the speaker.
+
+If your desktop has no tray icon, run `babel serve --no-tray` and open the
+dashboard link printed in the terminal.
+
+[Linux setup and troubleshooting](docs/platforms.md#linux)
+
+### macOS
+
+1. On macOS 14.2 or later, install Babel's universal `.pkg`. Install both
+   [BlackHole 2ch and BlackHole 16ch](https://github.com/ExistentialAudio/BlackHole#installation-instructions).
+2. Open Babel from **Applications**, grant microphone access, and click
+   **Refresh devices** in dashboard **Settings**.
+3. In **Routing**, send microphone audio to **BlackHole 2ch** and capture
+   received audio from **BlackHole 16ch**.
+4. In your calling app, select **BlackHole 2ch** as the microphone and
+   **BlackHole 16ch** as the speaker.
+
+[macOS permissions and setup](docs/platforms.md#macos)
+
+### Windows
+
+1. Install Babel's `.exe` for your system architecture. On Windows x64,
+   install the signed [usbip-win2 transport](https://github.com/vadimgrn/usbip-win2/releases)
+   and [Virtual Cables](https://github.com/tarekwasfy01/Virtual-Cables/releases).
+2. Open Virtual Cables, create two cables, and leave it running. Open Babel
+   from the **Start** menu and click **Refresh devices** in dashboard **Settings**.
+3. In **Routing**, send microphone audio to the playback side of
+   **Virtual Cable 01** and capture received audio from the recording side of
+   **Virtual Cable 02**.
+4. In your calling app, select **Virtual Cable 01** as the microphone and
+   **Virtual Cable 02** as the speaker.
+
+The Virtual Cables setup on Windows on Arm still needs validation.
+
+[Windows permissions, VB-CABLE and Windows on Arm](docs/platforms.md#windows)
+
+### First session
+
+1. In **Routing**, select your physical microphone as the microphone source
+   and your headphones as the physical output. Click **Save settings** and
+   test both directions in a call with the original audio.
+2. In **Translation**, select a provider and the languages for each direction
+   you want to translate. For a cloud provider, enter its API key in the
+   profile. For local translation, choose **Local** and save to prepare the
+   models.
+3. To save the original audio or text, enable **Recording**, **Transcription**,
+   or both. Transcription has its own provider and language settings.
+4. Click **Save settings**, then **Start session**. **End session** stops
+   translation and transcription. Audio and text already received finish saving
+   in the background, and the call returns to original audio.
+
+For a call using only original audio, save the routing settings and place the
+call directly.
+
+### Run from source
+
+With Rust **1.90 or later**, run these commands from the repository:
 
 ```sh
-cargo build --release --locked
-cargo run --release -- init
-```
-
-On Linux, install `pulseaudio-utils` (Ubuntu/Debian), with PipeWire +
-pipewire-pulse or PulseAudio running in the user session. Do not run Babel as root.
-
-```sh
-sudo apt install pulseaudio-utils
-cargo run --release -- setup
+cargo build --release --locked --bins
 cargo run --release -- serve
 ```
 
-The OS chooses an available dashboard port on each run. The terminal prints the
-actual address with a session token; open that complete link or **Settings**
-from the tray, which tracks the current address. The tray offers **Settings**,
-**Start session**, **Stop session** and **Quit**. Stopping a session cancels
-translation and transcription and returns to original audio. The recording and
-text already received finish saving in the background. Quitting Babel also
-stops local routing.
-You can select the **physical microphone** and **physical output**, whether
-translation is stopped or running, and refresh the device list. Switching keeps
-the AI session and files open; a brief audio gap is possible. The dashboard also
-works without a tray using `serve --no-tray`.
-
-The dashboard and tray identify the OS running Babel. Audio instructions,
-virtual-device controls and startup guidance follow that OS. On Linux, the
-dashboard offers to create/remove Babel devices; on macOS and Windows, it
-links to setup for separately installed virtual audio devices. Help opens directly at the section for the current OS.
-
-On Linux/macOS, `./scripts/run.sh` starts the built binary from this directory;
-on the first run, it builds if the binary does not exist. It also accepts
-subcommands, for example `./scripts/run.sh doctor`.
-
-1. In **Translation**, configure the profiles used for translation.
-   Cloud providers receive a temporary or saved key through the dashboard or the named
-   environment variable. Recording or routing originals alone skips this step.
-2. On the same page, select each direction's translator. One provider's settings
-   do not overwrite another's. The default is Gemini Live Translate.
-3. In **Routing**, select physical devices and your OS's virtual endpoints.
-   On Linux, use the physical microphone as capture and `babel_mic_bus` as
-   microphone playback; for incoming audio, use `babel_speaker.monitor` as
-   capture and your headphones as playback. The [platform guide](docs/platforms.md)
-   lists macOS/Windows endpoints.
-4. In **Translation**, choose each direction's languages,
-   enabling only the translations you want. AI profiles and supported translation
-   prompts are grouped on this page; voices follow the model's native defaults.
-5. In **Transcription**, choose the originals to save and each source's STT
-   provider and language: Gemini, OpenAI, Deepgram or Whisper. Transcription
-   profiles and credentials live here, independently of translation profiles.
-   In **Recording**, select the original audio to save. Both pages link to the
-   base folder and filenames in **Settings**. You can record, transcribe or
-   combine features.
-6. Save settings, optionally enter a **Session name**, and click **Start session**.
-   The session bar mirrors the current Translation, Recording and Transcription
-   switches so you can adjust them before starting. In the calling app, select
-   **Babel_Microphone** and **Babel_Speaker** on Linux, **BlackHole 2ch** and
-   **BlackHole 16ch** on macOS, or **Virtual Cable 01** and **Virtual Cable 02** on Windows. Without an active session, these
-   routes carry original audio.
-
-To use original audio only, leave translation off in both directions. Routing
-continues while an app uses the Babel devices; selecting Babel as the default
-microphone also activates its microphone route. To save audio, enable
-**Recording** and start a session; no special provider, AI key or transcription
-is required.
-
-Legacy `loopback` configurations migrate to the Gemini profile with route
-translation and transcription disabled, without starting cloud calls. See
-[configuration migration](docs/configuration.md#files-and-keys).
-
-On macOS, use BlackHole 2ch and 16ch. On Windows x64, use Virtual Cables
-with the signed usbip-win2 transport. These free, separately installed devices
-provide two audio paths. Babel's application packages can be built without a publisher account. See [platform setup](docs/platforms.md)
-for permissions, Windows ARM64 scope, and unsigned application restrictions.
-Hardware validation on macOS and Windows is still pending.
-
-On Windows, the executable is `target\release\babel.exe`; the same subcommands
-work in PowerShell. On macOS, the tray event loop runs on the main thread. Grant
-microphone capture permission to the app/terminal.
+Open the complete dashboard link printed in the terminal, or use **Settings**
+from the tray. Use `serve --no-tray` for a dashboard-only launch. Follow the
+[local model guide](docs/local-inference.md) for preparing the native engines
+when building from source.
 
 ## Documentation
 
@@ -148,6 +135,10 @@ source guides below.
   Commits, checks and release policy.
 
 ## Implemented integrations
+
+Gemini Live Translate and OpenAI Realtime Translate stream translated audio continuously.
+Conversational models wait for end-of-speech detection, and local translation
+works in segments. Output voices follow each model's defaults.
 
 | Translation integration | Audio translation | Native output |
 |---|---|---|
@@ -243,8 +234,8 @@ babel serve --port 0           Dashboard on an OS-selected port (default)
 babel serve --no-tray          Local dashboard only
 babel init                    Create the user config file without overwriting
 babel devices                 List actual capture/playback IDs
-babel setup                   Create Linux devices; show driver guidance elsewhere
-babel uninstall               Remove Linux devices; show native removal guidance
+babel setup                   Create Linux devices or show external device setup
+babel uninstall               Remove Linux devices or show external device removal guidance
 babel doctor                  Local diagnostics without sending audio to the cloud
 babel run                     Run configuration without dashboard; Ctrl+C stops
 babel run --session "Meeting"  Start a named session without dashboard
