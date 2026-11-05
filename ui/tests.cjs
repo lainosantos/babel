@@ -117,7 +117,7 @@ async function page(t, options = {}) {
       value = filePathsHandler ? await filePathsHandler(body, options, resolvePaths) : resolvePaths(body);
       if (value instanceof Response) return value;
     }
-    else if (parsed.pathname === '/api/devices') value = [{ id: 'physical-mic', name: 'Physical mic', direction: 'input', is_virtual: false }, { id: 'physical-speaker', name: 'Headphones', direction: 'output', is_virtual: false }, { id: 'babel_mic_bus', name: platformOs === 'macos' ? 'Babel Microphone' : platformOs === 'windows' ? 'Babel Microphone Feed' : 'Virtual microphone', direction: 'output', is_virtual: true }, { id: 'babel_speaker.monitor', name: platformOs === 'macos' ? 'Babel Speaker' : platformOs === 'windows' ? 'Babel Speaker Monitor' : 'Virtual output', direction: 'input', is_virtual: true }, ...extraInputDevices];
+    else if (parsed.pathname === '/api/devices') value = [{ id: 'physical-mic', name: 'Physical mic', direction: 'input', is_virtual: false }, { id: 'physical-speaker', name: 'Headphones', direction: 'output', is_virtual: false }, { id: 'babel_mic_bus', name: platformOs === 'macos' ? 'BlackHole 2ch' : platformOs === 'windows' ? 'Virtual Cable 01' : 'Virtual microphone', direction: 'output', is_virtual: true }, { id: 'babel_speaker.monitor', name: platformOs === 'macos' ? 'BlackHole 16ch' : platformOs === 'windows' ? 'Virtual Cable 02' : 'Virtual output', direction: 'input', is_virtual: true }, ...extraInputDevices];
     else if (parsed.pathname === '/api/retention') {
       value = retentionRequest ? await retentionRequest() : retainedSessions;
       if (value instanceof Response) return value;
@@ -1432,8 +1432,8 @@ test('macOS shows BlackHole setup, permissions and LaunchAgent instead of Linux 
   assert.match(p.byId('platform-device-setup').textContent, /BlackHole 2ch.*BlackHole 16ch/);
   assert.match(p.byId('platform-device-permissions').textContent, /Privacidade e Segurança.*Microfone/);
   assert.match(p.byId('platform-autostart').textContent, /LaunchAgent/);
-  assert.equal(p.byId('microphone-virtual-label').textContent, 'Babel Microphone');
-  assert.equal(p.byId('speaker-virtual-label').textContent, 'Babel Speaker');
+  assert.equal(p.byId('microphone-virtual-label').textContent, 'BlackHole 2ch');
+  assert.equal(p.byId('speaker-virtual-label').textContent, 'BlackHole 16ch');
   assert.equal(p.byId('platform-guide').getAttribute('href'), '/help/platforms');
   assert.equal(p.byId('device-external-guide').getAttribute('href'), '/help/platforms');
   assert.equal(p.byId('refresh-devices').disabled, false);
@@ -1448,8 +1448,8 @@ test('Windows displays cable directions, microphone privacy and per-user startup
   assert.match(p.byId('platform-device-permissions').textContent, /aplicativos desktop.*Windows/);
   assert.match(p.byId('platform-autostart').textContent, /Agendador de Tarefas/);
   assert.equal(p.byId('install-devices').hidden, true); assert.equal(p.byId('uninstall-devices').disabled, true);
-  assert.equal(p.byId('microphone-virtual-label').textContent, 'Babel Microphone Feed');
-  assert.equal(p.byId('speaker-virtual-label').textContent, 'Babel Speaker Monitor');
+  assert.equal(p.byId('microphone-virtual-label').textContent, 'Virtual Cable 01');
+  assert.equal(p.byId('speaker-virtual-label').textContent, 'Virtual Cable 02');
   p.set('speaker-target_language', 'ja-JP');
   p.byId('autostart-enabled').click();
   await chooseInterface(p, 'en');
@@ -1495,7 +1495,7 @@ test('unknown or unavailable host metadata never assumes Linux and refresh recov
   assert.equal(p.calls.some(call => call.path.startsWith('/api/virtual/')), false);
 });
 
-test('virtual audio guide maps both independent paths, links local build guidance and survives locale changes', async t => {
+test('virtual audio guide maps both independent paths, links the platform guide and survives locale changes', async t => {
   for (const os of ['macos', 'windows']) {
     const p = await page(t, { platform: os });
     const guide = p.byId('platform-native-guide');
@@ -1509,10 +1509,9 @@ test('virtual audio guide maps both independent paths, links local build guidanc
       ? ['BlackHole 2ch', 'BlackHole 2ch', 'BlackHole 16ch', 'BlackHole 16ch']
       : ['Virtual Cable 01', 'Virtual Cable 01', 'Virtual Cable 02', 'Virtual Cable 02']);
     assert.equal(guide.querySelectorAll('tbody th[scope="row"]').length, 6);
-    assert.match(guide.textContent, /pacote de distribuição assinado.*validação em hardware.*pendentes/);
     assert.match(guide.textContent, os === 'macos' ? /macOS 14\.2.*BlackHole.*gratuitos/ : /Virtual Cables.*WASAPI.*gratuito.*Windows x64/);
     const links = [...guide.querySelectorAll('a')];
-    assert.deepEqual(links.map(link => new URL(link.href).pathname), ['/help/native-drivers', '/help/platforms']);
+    assert.deepEqual(links.map(link => new URL(link.href).pathname), ['/help/platforms']);
     for (const link of links) {
       assert.equal(link.target, '_blank');
       assert.equal(link.rel, 'noopener noreferrer');

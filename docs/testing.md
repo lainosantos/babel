@@ -532,10 +532,9 @@ every Windows application's session enumeration or real-driver behavior.
 
 ### Validation checklist for the target operating system
 
-Use macOS 14.2+ or Windows 10/11 with both native Babel cables installed as
-described in [native drivers](native-drivers.md). BlackHole/VB-CABLE cables are
-optional alternatives with their own installation. Record the OS version,
-architecture, commit, driver, physical device, calling application and granted
+Use macOS 14.2+ with BlackHole 2ch and 16ch, or Windows 10/11 with two
+Virtual Cables or supported VB-CABLE pairs. Follow the [platform guide](platforms.md)
+and record the OS version, architecture, commit, driver, physical device, calling application and granted
 permissions. Start with translation/transcription off, using synthetic audio
 and a test application that can select input/output independently. Use
 headphones if you later test a physical microphone.
@@ -543,8 +542,8 @@ headphones if you later test a physical microphone.
 | Scenario | Expected result to verify |
 |---|---|
 | No application using the cables; physical default microphone | Both routes wait; Babel opens no physical stream, and instantaneous meters are zero. |
-| Babel is the default microphone, with no capturing application | The microphone opens, meters respond and enabled commands can listen; output remains inactive. |
-| Default changes from Babel to a physical microphone, with no explicit consumer | The microphone closes and commands stop listening. |
+| Babel is the default microphone, with no capturing application | The microphone opens, and meters respond; output remains inactive. |
+| Default changes from Babel to a physical microphone, with no explicit consumer | The microphone route closes. |
 | Babel selected only as default output, without playback | Output remains inactive; Babel's own streams do not cause feedback. |
 | Application captures only the virtual microphone endpoint | Only the microphone opens; audio reaches application capture and Babel output keeps waiting. |
 | Application plays audio only to the output cable | Only output opens; audio reaches the chosen physical destination. |
@@ -560,7 +559,7 @@ headphones if you later test a physical microphone.
 
 Check activity in both the dashboard and the operating system's audio tool;
 a zero meter alone does not prove capture was closed. On macOS, select each
-Babel device directly, without Aggregate/Multi-Output. On Windows, start with
+BlackHole device directly, without Aggregate/Multi-Output. On Windows, start with
 shared WASAPI and record whether a new session remains waiting; do not treat
 ASIO, Kernel Streaming or exclusive mode as validated.
 
@@ -578,8 +577,7 @@ a pending checklist for target hardware, not a record of completed execution.
   chosen hardware. The real Whisper/Qwen/Piper smoke test passed on Linux;
   native macOS/Windows execution is checked separately by CI. Optional external
   servers such as Ollama require their own validation.
-- Loading/installing native Babel drivers (or optional external cables),
-  signatures, Windows Driver Verifier, microphone permissions, physical
+- Installing external cables, microphone permissions, physical
   disconnection and device recovery.
 - End-to-end latency, jitter, CPU/RAM and sustained stability measurements under
   load. Bounded queues prevent unlimited backlog growth; this is not a benchmark
@@ -767,62 +765,15 @@ The bridge's protocol and safety tests use no paid endpoints:
 .tools/cascade-benchmark-venv/bin/python scripts/test_gemini_cascade_bridge.py
 ```
 
-## Native drivers: tests separate from the application
-
-The `native/macos`, `native/windows/transport` and `native/windows/installer`
-workspaces neither inherit nor remove the application's `forbid(unsafe_code)`.
-The safe transport has its own tests; FFI, SDK and WDK require separate
-validation. Run these commands from the checkout:
+## Installer and physical volume checks
 
 ```sh
-cargo test --locked --manifest-path native/macos/Cargo.toml
-cargo test --locked --manifest-path native/windows/transport/Cargo.toml --lib
-cargo test --locked --manifest-path native/windows/installer/Cargo.toml
-python3 -m unittest discover -s native/windows/tests -p 'test_*.py' -v
-cargo test --locked --example native_driver_smoke
-```
-
-On Linux, the first command tests the core and Rust contract; it does not compile
-the bridge against the Apple SDK. Windows transport tests cover PCM frames,
-memory limits, isolation and flushing when an endpoint stops. Its C++/Rust
-harness uses WDK stubs only in tests and does not validate real IRQL/DPC behavior.
-The installer has portable tests rejecting similar identities and OEM paths
-that escape the package.
-
-Cross-compilation checks also cover the installer:
-
-```sh
-cargo clippy --locked --all-targets --target x86_64-pc-windows-gnu -- -D warnings
+cargo test --locked --manifest-path native/windows/volume-control/Cargo.toml
 cargo clippy --locked --all-targets --target x86_64-pc-windows-gnu \
-  --manifest-path native/windows/installer/Cargo.toml -- -D warnings
+  --manifest-path native/windows/volume-control/Cargo.toml -- -D warnings
 ```
 
-`.github/workflows/native-checks.yml` runs portable core, ABI shim and package
-contract checks for commits and pull requests. The reusable
-`.github/workflows/native-drivers.yml` builds packages on stable version tags
-and manual runs. Manual runs can also opt into the macOS HAL and Windows
-x64/ARM64 WDK driver builds. These workflows use hosted runners and pinned
-versions and hashes of official SDK/WDK NuGet packages. The Windows x64
-application installer is exercised in a temporary directory; the runtime matrix
-performs inference separately with synthetic inputs on five targets.
-Development artifacts are labeled accordingly. A workflow in the repository
-is not evidence that it has executed.
-
-For the application-only packages, first install the external devices from the
-[platform guide](platforms.md). Verify that the app launches with the OS security
-settings intact, both paths carry distinct original audio, and selecting the
-same cable for both paths is rejected. Then check the microphone permission
-and test both paths in a calling app. The Windows x64 check uses two Virtual
-Cables and the signed USB/IP transport. The macOS check uses BlackHole 2ch and
-16ch. Test Windows Arm separately if using the emulated x64 helper.
-
-For the optional Babel drivers, after compiling, signing and installing on the
-target operating system, run the synthetic smoke test described in
-[native drivers](native-drivers.md#verifying-the-installed-transport). It requires
-four device IDs and never selects system defaults. Also test multiple
-readers/applications, OS suspend/resume, physical-device switching during a
-session, disconnection, reinstallation, removal and restart. On Windows, run
-Driver Verifier/WDK validation on a test machine and check notifications, DPC
-cancellation and audio recovery before production. On macOS, validate the bundle
-in real CoreAudio, microphone privacy, clock behavior and buffer sizes. None of
-these results can be inferred from queue tests on Linux.
+The portable CI job also tests application packaging and runtime payloads.
+The Windows x64 installer is exercised in a disposable runner. Before
+validating audio on Windows or macOS, install the external virtual devices
+described in the [platform guide](platforms.md).

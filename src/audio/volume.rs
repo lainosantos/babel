@@ -1,8 +1,7 @@
 //! Endpoint volume belongs to the control plane, never to PCM callbacks.
 //!
-//! A verified control-only virtual endpoint exposes the physical output's
-//! master control. Other cables keep their existing gain behavior and expose
-//! a separate physical control instead of multiplying two synchronized gains.
+//! Linux can synchronize its control-only virtual output with physical volume.
+//! macOS and Windows expose the selected physical output directly.
 
 #[cfg(target_os = "linux")]
 mod linux;
@@ -41,6 +40,28 @@ pub(super) struct Snapshot {
     pub physical_state: VolumeState,
     pub synchronized: bool,
     pub limitation: Option<String>,
+}
+
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+impl Snapshot {
+    fn physical(state: VolumeState, limitation: Option<&str>) -> Self {
+        Self {
+            virtual_state: state,
+            physical_state: state,
+            synchronized: false,
+            limitation: Some(limitation.unwrap_or("System volume synchronization is unavailable with external virtual audio devices.").into()),
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+use backend::set_virtual;
+
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+async fn set_virtual(_: &str, _: VolumeState, _: CancellationToken) -> Result<()> {
+    anyhow::bail!(
+        "System volume synchronization is unavailable with external virtual audio devices."
+    )
 }
 
 #[derive(Clone, Debug, Default, Serialize)]
@@ -279,7 +300,7 @@ async fn run(
                         let updated = match action {
                             Change::Virtual => {
                                 guarded(&mut playback, &mut usage, &cancel, |token| {
-                                    backend::set_virtual(&capture, snapshot.physical_state, token)
+                                    set_virtual(&capture, snapshot.physical_state, token)
                                 })
                                 .await
                             }
@@ -323,11 +344,7 @@ async fn run(
                                 // write failed, especially for a rejected mute.
                                 if action == Change::Physical {
                                     let _ = guarded(&mut playback, &mut usage, &cancel, |token| {
-                                        backend::set_virtual(
-                                            &capture,
-                                            snapshot.physical_state,
-                                            token,
-                                        )
+                                        set_virtual(&capture, snapshot.physical_state, token)
                                     })
                                     .await;
                                 }

@@ -1,6 +1,6 @@
 #Requires -Version 7.0
 [CmdletBinding()]
-param([Parameter(Mandatory)][string]$BinaryDirectory, [string]$DriverDirectory)
+param([Parameter(Mandatory)][string]$BinaryDirectory)
 $ErrorActionPreference='Stop'
 Set-StrictMode -Version Latest
 if (!$IsWindows) { throw 'PE runtime inspection requires Windows.' }
@@ -13,7 +13,6 @@ if (!$visualStudio) {
 $dumpbins=@(Get-ChildItem (Join-Path $visualStudio 'VC\Tools\MSVC\*\bin\Hostx64\x64\dumpbin.exe') | Sort-Object FullName -Descending)
 if (!$dumpbins.Count) { throw 'MSVC dumpbin is unavailable.' }
 $files = @('babel.exe', 'babel-tray.exe' | ForEach-Object { Join-Path $BinaryDirectory $_ })
-if ($DriverDirectory) { $files += Join-Path $DriverDirectory 'babel-driver-installer.exe' }
 foreach ($file in $files) {
     $imports=& $dumpbins[0].FullName /DEPENDENTS $file
     if ($LASTEXITCODE) { throw "Could not inspect PE imports: $file" }

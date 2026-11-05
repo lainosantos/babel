@@ -10,7 +10,7 @@ use std::{
     },
 };
 
-use crate::audio::{DeviceDirection, native_ids};
+use super::super::native_ids;
 use anyhow::{Context, Result, ensure};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -40,15 +40,6 @@ enum Cable {
 }
 
 fn family(endpoint: &Endpoint) -> Option<Cable> {
-    let direction = match endpoint.direction {
-        Direction::Capture => DeviceDirection::Input,
-        Direction::Render => DeviceDirection::Output,
-    };
-    if let Some(cable) =
-        native_ids::babel_windows_cable(&endpoint.description, &endpoint.adapter, direction)
-    {
-        return Some(Cable::Named(cable));
-    }
     if let Some(number) = native_ids::usb_virtual_cable_number(&endpoint.adapter) {
         // The USB audio class driver supplies the product name for both sides.
         return Some(Cable::VirtualUsb(number));
@@ -86,7 +77,7 @@ pub(super) fn pair(endpoints: &[Endpoint], id: &str, direction: Direction) -> Re
         "the selected Windows virtual endpoint is missing or ambiguous; refresh and select it again"
     );
     let selected = selected[0];
-    let family = family(selected).context("automatic Windows activity detection requires an unambiguous Virtual Cables, Babel Audio v1, or supported VB-CABLE pair")?;
+    let family = family(selected).context("automatic Windows activity detection requires an unambiguous Virtual Cables or supported VB-CABLE pair")?;
     let related: Vec<_> = endpoints
         .iter()
         .filter(|endpoint| self::family(endpoint) == Some(family))
@@ -267,31 +258,6 @@ mod tests {
         .collect()
     }
 
-    fn babel_endpoints() -> Vec<Endpoint> {
-        [
-            (
-                "babel-mic-render",
-                Direction::Render,
-                "Babel Microphone Feed",
-            ),
-            ("babel-mic-capture", Direction::Capture, "Babel Microphone"),
-            ("babel-speaker-render", Direction::Render, "Babel Speaker"),
-            (
-                "babel-speaker-capture",
-                Direction::Capture,
-                "Babel Speaker Monitor",
-            ),
-        ]
-        .into_iter()
-        .map(|(id, direction, description)| Endpoint {
-            id: id.into(),
-            direction,
-            description: description.into(),
-            adapter: native_ids::BABEL_WINDOWS_ADAPTER.into(),
-        })
-        .collect()
-    }
-
     #[test]
     fn numbered_usb_cables_require_distinct_unambiguous_pairs() {
         let mut endpoints: Vec<_> = [
@@ -353,61 +319,6 @@ mod tests {
         );
         endpoints.last_mut().unwrap().adapter = "Virtual Cable 01".into();
         assert!(pair(&endpoints, "mic-render", Direction::Render).is_err());
-    }
-
-    #[test]
-    fn babel_pairs_are_independent_and_coexist_with_external_cables() {
-        let mut endpoints = babel_endpoints();
-        endpoints.extend(self::endpoints());
-        endpoints.reverse();
-        let mic = pair(&endpoints, "babel-mic-render", Direction::Render).unwrap();
-        let speaker = pair(&endpoints, "babel-speaker-capture", Direction::Capture).unwrap();
-        assert_eq!(mic.opposite, "babel-mic-capture");
-        assert_eq!(speaker.opposite, "babel-speaker-render");
-        independent(&mic, &speaker).unwrap();
-        independent(
-            &mic,
-            &pair(&endpoints, "capture-a", Direction::Capture).unwrap(),
-        )
-        .unwrap();
-        assert!(
-            independent(
-                &mic,
-                &pair(&endpoints, "babel-mic-capture", Direction::Capture).unwrap()
-            )
-            .is_err()
-        );
-    }
-
-    #[test]
-    fn babel_requires_exact_driver_roles_and_a_unique_opposite_endpoint() {
-        let original = babel_endpoints();
-        for (description, adapter) in [
-            (
-                "Babel Microphone Feed renamed",
-                native_ids::BABEL_WINDOWS_ADAPTER,
-            ),
-            ("Babel Microphone", native_ids::BABEL_WINDOWS_ADAPTER),
-            ("Babel Microphone Feed", "Babel Audio v1 copy"),
-            ("Babel Microphone Feed", "VB-Audio Cable A"),
-        ] {
-            let mut endpoints = original.clone();
-            endpoints[0].description = description.into();
-            endpoints[0].adapter = adapter.into();
-            assert!(pair(&endpoints, "babel-mic-render", Direction::Render).is_err());
-        }
-        let mut missing = original.clone();
-        missing.remove(1);
-        assert!(pair(&missing, "babel-mic-render", Direction::Render).is_err());
-        // Failure of the microphone cable does not invalidate the speaker cable.
-        assert!(pair(&missing, "babel-speaker-capture", Direction::Capture).is_ok());
-        let mut ambiguous = original.clone();
-        ambiguous.push(Endpoint {
-            id: "second-mic-capture".into(),
-            ..original[1].clone()
-        });
-        assert!(pair(&ambiguous, "babel-mic-render", Direction::Render).is_err());
-        assert!(pair(&ambiguous, "babel-speaker-capture", Direction::Capture).is_ok());
     }
 
     #[test]
@@ -544,23 +455,19 @@ mod tests {
     }
     #[test]
     fn system_capture_default_matches_paired_capture_id_and_keeps_app_authorization() {
-        let mic = pair(&babel_endpoints(), "babel-mic-render", Direction::Render).unwrap();
+        let mic = pair(&endpoints(), "render-a", Direction::Render).unwrap();
+        assert!(microphone_requested(&mic, &["capture-a".into()], false));
         assert!(microphone_requested(
             &mic,
-            &["babel-mic-capture".into()],
-            false
-        ));
-        assert!(microphone_requested(
-            &mic,
-            &["physical-capture".into(), "babel-mic-capture".into()],
+            &["physical-capture".into(), "capture-a".into()],
             false
         ));
         for defaults in [
             vec![],
             vec!["physical-capture".into()],
-            vec!["babel-mic-render".into()],
-            vec!["babel-speaker-capture".into()],
-            vec!["babel-mic-capture-copy".into()],
+            vec!["render-a".into()],
+            vec!["capture-b".into()],
+            vec!["capture-a-copy".into()],
         ] {
             assert!(!microphone_requested(&mic, &defaults, false));
             assert!(microphone_requested(&mic, &defaults, true));
@@ -577,21 +484,16 @@ mod tests {
 
     #[test]
     fn default_render_selection_keeps_speaker_tail_authorized_after_client_eof() {
-        let speaker = pair(
-            &babel_endpoints(),
-            "babel-speaker-capture",
-            Direction::Capture,
-        )
-        .unwrap();
-        let defaults = ["babel-speaker-render".into()];
+        let speaker = pair(&endpoints(), "capture-b", Direction::Capture).unwrap();
+        let defaults = ["render-b".into()];
         assert!(speaker_selected(&speaker, &defaults, true));
         assert!(speaker_selected(&speaker, &defaults, false));
         assert!(!client_epoch_changed(true, true, 1, 2));
         for defaults in [
             vec![],
             vec!["physical-render".into()],
-            vec!["babel-speaker-capture".into()],
-            vec!["babel-mic-render".into()],
+            vec!["capture-b".into()],
+            vec!["render-a".into()],
         ] {
             assert!(!speaker_selected(&speaker, &defaults, false));
             assert!(speaker_selected(&speaker, &defaults, true));

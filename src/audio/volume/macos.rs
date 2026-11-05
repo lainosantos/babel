@@ -1,5 +1,4 @@
-//! Hardware volume control stays on Tokio's blocking control workers. The HAL
-//! plug-in's speaker controls are metadata; original PCM is never attenuated.
+//! Physical output volume control through CoreAudio on a blocking worker.
 use std::{
     collections::{BTreeMap, BTreeSet},
     sync::{Mutex, OnceLock},
@@ -15,10 +14,7 @@ use cpal::traits::DeviceTrait;
 use tokio_util::sync::CancellationToken;
 
 use super::{Snapshot, VolumeState};
-use crate::audio::{
-    DeviceDirection, native,
-    native_ids::{BABEL_MICROPHONE_UID, BABEL_SPEAKER_UID},
-};
+use crate::audio::native;
 
 // Devices without a master control expose channel controls instead. Preserve
 // their relative balance, including a trip through zero, without touching DSP.
@@ -32,8 +28,8 @@ struct Endpoint {
     uid: String,
 }
 
-fn resolve(setting: &str, direction: DeviceDirection) -> Result<Endpoint> {
-    let device = native::resolve(setting, direction)?;
+fn resolve(setting: &str) -> Result<Endpoint> {
+    let device = native::resolve_physical_output(setting)?;
     let uid = device
         .id()
         .context("reading CoreAudio volume device UID")?
@@ -100,10 +96,6 @@ impl Controls {
         if let Ok(level) = object.get_property(DEVICE_OUTPUT_VOLUME_SCALAR.for_element(0)) {
             volumes.push((0, level));
         } else {
-            ensure!(
-                endpoint.uid != BABEL_SPEAKER_UID,
-                "The installed Babel Audio driver has no output volume controls"
-            );
             // Require every actual output channel, rather than silently
             // controlling only the subset with readable volume properties.
             for channel in output_channels(object)? {
@@ -264,43 +256,17 @@ impl Controls {
     }
 }
 
-pub(super) async fn inspect(capture: &str, playback: &str) -> Result<Snapshot> {
-    let capture = capture.to_owned();
+pub(super) async fn inspect(_capture: &str, playback: &str) -> Result<Snapshot> {
     let playback = playback.to_owned();
     tokio::task::spawn_blocking(move || {
-        let physical = resolve(&playback, DeviceDirection::Output)?;
-        ensure!(!matches!(physical.uid.as_str(), BABEL_SPEAKER_UID | BABEL_MICROPHONE_UID), "A physical output is required for volume control");
-        let physical_controls = Controls::read(&physical)?;
-        let physical_state = physical_controls.state();
-        let controls = resolve(&capture, DeviceDirection::Input).ok()
-            .filter(|endpoint| endpoint.uid == BABEL_SPEAKER_UID)
-            .and_then(|endpoint| Controls::read(&endpoint).ok());
-        let synchronized = physical_controls.writable && controls.as_ref().is_some_and(|controls| controls.writable);
-        let limitation = if !physical_controls.writable {
-            Some("The physical output does not expose writable volume and mute controls to macOS. Use its hardware controls.".into())
-        } else if controls.as_ref().is_none_or(|controls| !controls.writable) {
-            Some("System volume synchronization requires the updated Babel Audio driver. Other virtual devices do not expose Babel's control-only output controls.".into())
-        } else { None };
-        Ok(Snapshot { virtual_state: controls.as_ref().map_or(physical_state, Controls::state), physical_state, synchronized, limitation })
-    }).await.context("CoreAudio volume inspection worker failed")?
-}
-
-pub(super) async fn set_virtual(
-    capture: &str,
-    state: VolumeState,
-    cancel: CancellationToken,
-) -> Result<()> {
-    let capture = capture.to_owned();
-    tokio::task::spawn_blocking(move || {
-        let endpoint = resolve(&capture, DeviceDirection::Input)?;
-        ensure!(
-            endpoint.uid == BABEL_SPEAKER_UID,
-            "System volume synchronization requires Babel Speaker"
+        let controls = Controls::read(&resolve(&playback)?)?;
+        let limitation = (!controls.writable).then_some(
+            "The physical output does not expose writable volume and mute controls to macOS. Use its hardware controls.",
         );
-        Controls::read(&endpoint)?.write(&endpoint, state, &cancel)
+        Ok(Snapshot::physical(controls.state(), limitation))
     })
     .await
-    .context("CoreAudio virtual volume worker failed")?
+    .context("CoreAudio volume inspection worker failed")?
 }
 
 pub(super) async fn set_physical(
@@ -310,14 +276,7 @@ pub(super) async fn set_physical(
 ) -> Result<()> {
     let playback = playback.to_owned();
     tokio::task::spawn_blocking(move || {
-        let endpoint = resolve(&playback, DeviceDirection::Output)?;
-        ensure!(
-            !matches!(
-                endpoint.uid.as_str(),
-                BABEL_SPEAKER_UID | BABEL_MICROPHONE_UID
-            ),
-            "A physical output is required for volume control"
-        );
+        let endpoint = resolve(&playback)?;
         Controls::read(&endpoint)?.write(&endpoint, state, &cancel)
     })
     .await

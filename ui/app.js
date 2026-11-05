@@ -488,12 +488,11 @@
         row.append(label, value); body.append(row);
       }
       table.append(body); scroll.append(table); guide.append(scroll);
-      guide.append(text('p', `platform.${os}_driver_status`), text('p', 'platform.native_install_manual'), text('p', `platform.${os}_activity`), text('p', `platform.${os}_external`));
+      guide.append(text('p', 'platform.native_install_manual'), text('p', `platform.${os}_activity`), text('p', `platform.${os}_external`));
       const links = document.createElement('div'); links.className = 'platform-help';
-      const urls = ['/help/native-drivers', '/help/platforms'];
-      for (const [index, key] of ['platform.native_driver_guide', 'platform.native_routing_guide'].entries()) {
-        const link = text('a', key); link.href = urls[index]; link.target = '_blank'; link.rel = 'noopener noreferrer'; links.append(link);
-      }
+      const link = text('a', 'platform.native_routing_guide');
+      link.href = '/help/platforms'; link.target = '_blank'; link.rel = 'noopener noreferrer';
+      links.append(link);
       guide.append(links);
     }
     i18n.apply(guide);

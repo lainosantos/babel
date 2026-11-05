@@ -34,11 +34,8 @@ try {
     }
     & (Join-Path $destination 'babel.exe') --version
     if ($LASTEXITCODE -ne 0) { throw 'Installed application could not execute --version.' }
-    if ($null -ne $manifest.driver_signature) {
-        & (Join-Path $destination 'drivers\windows\babel-driver-installer.exe') check-absent
-        if ($LASTEXITCODE -ne 0) { throw 'Installer unexpectedly created a driver device.' }
-    } elseif (Test-Path -LiteralPath (Join-Path $destination 'drivers')) {
-        throw 'App-only installer unexpectedly contains a driver.'
+    if (Test-Path -LiteralPath (Join-Path $destination 'drivers')) {
+        throw 'The installer unexpectedly contains a driver.'
     }
 } finally {
     $uninstaller=Join-Path $destination 'unins000.exe'
@@ -46,7 +43,7 @@ try {
         Invoke-Wait $uninstaller @('/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART',('/LOG="'+$uninstallLog+'"'))
     }
 }
-foreach ($name in @('babel.exe','babel-tray.exe','drivers\windows\babel-driver-installer.exe')) {
+foreach ($name in @('babel.exe','babel-tray.exe')) {
     if (Test-Path -LiteralPath (Join-Path $destination $name)) { throw "Uninstall left a program payload: $name" }
 }
 Write-Host 'Actual x64 installer payload, CLI startup, absent driver and uninstall verified.'

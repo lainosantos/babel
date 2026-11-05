@@ -430,8 +430,6 @@ fn endpoints(enumerator: &DeviceEnumerator) -> Result<Vec<Endpoint>> {
             // PKEY_Device_DeviceDesc + PKEY_DeviceInterface_FriendlyName are
             // supplied by the driver. Do not substitute get_friendlyname():
             // that endpoint display name can be changed in Windows Settings.
-            // Babel's four role descriptions are fixed in BabelAudio.inf; the
-            // policy requires a unique opposite endpoint from the same cable.
             let description = device
                 .get_description()
                 .context("reading Windows audio driver description")?;

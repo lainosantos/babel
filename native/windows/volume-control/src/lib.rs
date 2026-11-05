@@ -5,7 +5,7 @@
 #[cfg(windows)]
 mod win32;
 #[cfg(windows)]
-pub use win32::{inspect, set_physical, set_virtual};
+pub use win32::{inspect, set_physical};
 
 #[cfg(any(windows, test))]
 use anyhow::{Result, ensure};
@@ -16,14 +16,6 @@ pub struct VolumeState {
     pub muted: bool,
 }
 
-#[derive(Clone, Debug)]
-pub struct Snapshot {
-    pub virtual_state: VolumeState,
-    pub physical_state: VolumeState,
-    pub synchronized: bool,
-    pub limitation: Option<String>,
-}
-
 #[cfg(any(windows, test))]
 fn validate(state: VolumeState) -> Result<()> {
     ensure!(
@@ -31,20 +23,6 @@ fn validate(state: VolumeState) -> Result<()> {
         "Windows endpoint volume must be between zero and one"
     );
     Ok(())
-}
-
-#[cfg(any(windows, test))]
-const DRIVER: &str = "org.babel.audio.driver.v1";
-#[cfg(any(windows, test))]
-const CAPABILITY: &str = "control-only-volume-v1";
-#[cfg(any(windows, test))]
-const SPEAKER_CAPTURE: &str = "babel:speaker:capture:v1";
-#[cfg(any(windows, test))]
-const SPEAKER_RENDER: &str = "babel:speaker:render:v1";
-
-#[cfg(any(windows, test))]
-fn compatible(driver: &str, role: &str, capability: &str, expected_role: &str) -> bool {
-    driver == DRIVER && role == expected_role && capability == CAPABILITY
 }
 
 #[cfg(any(windows, test))]
@@ -76,30 +54,6 @@ fn apply(
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn only_exact_control_only_speaker_roles_authorize_synchronization() {
-        assert!(compatible(
-            DRIVER,
-            SPEAKER_CAPTURE,
-            CAPABILITY,
-            SPEAKER_CAPTURE
-        ));
-        assert!(compatible(
-            DRIVER,
-            SPEAKER_RENDER,
-            CAPABILITY,
-            SPEAKER_RENDER
-        ));
-        for (driver, role, capability) in [
-            (DRIVER, SPEAKER_RENDER, ""),
-            (DRIVER, SPEAKER_RENDER, "control-only-volume-v2"),
-            ("VB-CABLE", SPEAKER_RENDER, CAPABILITY),
-            (DRIVER, "babel:mic:render:v1", CAPABILITY),
-        ] {
-            assert!(!compatible(driver, role, capability, SPEAKER_RENDER));
-        }
-    }
 
     #[test]
     fn invalid_levels_are_rejected_before_any_os_write() {

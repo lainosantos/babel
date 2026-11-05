@@ -6,7 +6,7 @@ https://github.com/tarekwasfy01/Virtual-Cables/releases
 
 Use the signed usbip-win2 transport from its official releases and configure two
 cables as described in docs\platforms.md. The Virtual Cables project documents
-x64 support. The guide also covers existing VB-CABLE and Babel driver pairs.
+x64 support. The guide also covers existing VB-CABLE pairs.
 Babel leaves the Windows default audio devices alone.
 
 Babel's installer and portable executables are unsigned. Windows SmartScreen

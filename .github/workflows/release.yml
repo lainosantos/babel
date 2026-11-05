@@ -30,7 +30,7 @@ jobs:
     uses: ./.github/workflows/checks.yml
   installers:
     needs: checks
-    uses: ./.github/workflows/native-drivers.yml
+    uses: ./.github/workflows/installers.yml
   publish:
     needs: [version, checks, installers]
     runs-on: ubuntu-22.04

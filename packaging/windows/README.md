@@ -2,7 +2,6 @@
 
 The release workflow runs this packager on `windows-2022`, with Python 3.12,
 Inno Setup 6.3+ (included in the runner image), and previously built binaries.
-WDK setup is documented in [native/windows](../../native/windows/README.md).
 
 ```powershell
 python packaging/windows/build.py --architecture x64 `
@@ -22,14 +21,8 @@ local inference engines. They use separately installed audio devices. See
 [Windows routing](../../docs/platforms.md#windows). The packages are unsigned,
 so SmartScreen can warn and execution policy can block them.
 
-Pass `--driver-dir native/windows/dist/x64` (or `dist/ARM64` for ARM64) to
-include the optional Babel driver development payload. PE checks then also
-verify the driver and helper architecture. A CAT file by itself does not
-prove that the driver is signed. To remove an installed Babel driver, use
-its explicit removal helper before uninstalling the application.
-
 The application uses `%APPDATA%\Babel\babel.toml`. Autostart is disabled
-by default. The installer starts no app or driver and preserves user files.
+by default. The installer leaves the app closed and preserves user files.
 
 Local engines ship in `local-runtime/windows-x86_64` or
 `local-runtime/windows-aarch64`: Whisper, llama.cpp, Piper, ONNX Runtime, eSpeak
@@ -54,7 +47,6 @@ python3 -m unittest discover -s packaging/windows -p 'test_*.py' -v
 
 The x64 release job uses `.github/scripts/test-windows-package.ps1` to install
 and remove the **application** in a disposable runner, compare payload hashes,
-and run `--version`. The script refuses to run outside GitHub Actions and does
-not install the driver. ARM64 application and driver binaries are inspected and
+and run `--version`. The script runs only inside GitHub Actions. ARM64 application binaries are inspected and
 compiled on x64; ARM64 inference engines compile and run `--help` on a native
 Windows ARM64 runner.

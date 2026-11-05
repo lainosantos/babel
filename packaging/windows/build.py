@@ -2,8 +2,8 @@
 """Build a complete development Windows installer with Inno Setup 6.3+.
 
 Stages an explicit file allowlist, verifies native PE architecture for every
-executable/driver, produces an installer and portable ZIP, and hashes outputs.
-Never executes the installer, app or driver. Python 3.11+ is required.
+executable, produces an installer and portable ZIP, and hashes outputs.
+Never executes the installer or app. Python 3.11+ is required.
 """
 import argparse
 import hashlib
@@ -24,12 +24,6 @@ HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(ROOT / "scripts"))
 import local_runtime_packaging as runtime_package
 MACHINES = {"x64": 0x8664, "ARM64": 0xAA64}
-DRIVER_FILES = ("BabelAudio.inf", "BabelAudio.sys", "BabelAudio.cat",
-                "babel-driver-installer.exe", "install.ps1", "uninstall.ps1",
-                "LICENSE-Microsoft.txt", "LICENSE-MIT.txt", "README.md",
-                "toolchain.json", "SHA256SUMS")
-
-
 def version(value=None):
     value = value or tomllib.loads((ROOT / "Cargo.toml").read_text())["package"]["version"]
     if not re.fullmatch(r"\d+\.\d+\.\d+", value) or any(int(v) > 65535 for v in value.split('.')):
@@ -58,36 +52,15 @@ def pe_machine(path):
         return struct.unpack_from('<H', signature, 4)[0]
 
 
-def stage(binary, driver, destination, architecture, release, runtime_dir=None):
+def stage(binary, destination, architecture, release, runtime_dir=None):
     for name in ('babel.exe', 'babel-tray.exe'):
         if pe_machine(binary / name) != MACHINES[architecture]:
             raise ValueError(f"Wrong {architecture} app architecture: {name}")
-    if driver is not None:
-        for name in DRIVER_FILES:
-            require_file(driver / name)
-        for name in ('BabelAudio.sys', 'babel-driver-installer.exe'):
-            if pe_machine(driver / name) != MACHINES[architecture]:
-                raise ValueError(f"Wrong {architecture} driver architecture: {name}")
-        inf_bytes = (driver / 'BabelAudio.inf').read_bytes()
-        inf = inf_bytes.decode('utf-16') if inf_bytes[:2] in (b'\xff\xfe', b'\xfe\xff') else inf_bytes.decode('utf-8-sig')
-        suffix = 'amd64' if architecture == 'x64' else 'arm64'
-        for token in ('ROOT\\BabelAudio', 'BabelAudio.sys', 'BabelAudio.cat', f'NT{suffix}'):
-            if token.casefold() not in inf.casefold():
-                raise ValueError(f"INF is incomplete or has the wrong architecture: {token}")
-        if '$ARCH$' in inf:
-            raise ValueError('INF was not processed by the WDK stamp task')
     destination.mkdir(parents=True, exist_ok=False)
     for name in ('babel.exe', 'babel-tray.exe'):
         shutil.copy2(binary / name, destination / name)
-    instructions = 'INSTALLATION.txt'
-    if driver is not None:
-        driver_out = destination / 'drivers' / 'windows'
-        driver_out.mkdir(parents=True)
-        for name in DRIVER_FILES:
-            shutil.copy2(driver / name, driver_out / name)
-        instructions = 'INSTALLATION-driver.txt'
-    shutil.copy2(HERE / instructions, destination / 'INSTALLATION.txt')
-    shutil.copy2(ROOT / 'native/windows/LICENSE-MIT.txt', destination / 'LICENSE-MIT.txt')
+    shutil.copy2(HERE / 'INSTALLATION.txt', destination / 'INSTALLATION.txt')
+    shutil.copy2(HERE / 'LICENSE-MIT.txt', destination / 'LICENSE-MIT.txt')
     shutil.copy2(ROOT / 'Cargo.lock', destination / 'Cargo.lock')
     shutil.copy2(ROOT / 'README.md', destination / 'README.md')
     docs = destination / 'docs'
@@ -100,7 +73,7 @@ def stage(binary, driver, destination, architecture, release, runtime_dir=None):
     shutil.copy2(ROOT / 'ui/fonts/OFL.txt', fonts / 'Manrope-OFL.txt')
     if runtime_dir is not None:
         runtime_package.stage(runtime_dir, destination / "local-runtime", "windows", ["x86_64" if architecture == "x64" else "aarch64"])
-    manifest = {"version": release, "architecture": architecture, "driver_signature": "not-verified-development" if driver is not None else None,
+    manifest = {"version": release, "architecture": architecture,
                 "files": {p.relative_to(destination).as_posix(): hashlib.sha256(p.read_bytes()).hexdigest()
                           for p in sorted(destination.rglob('*')) if p.is_file()}}
     (destination / 'package-manifest.json').write_text(json.dumps(manifest, indent=2) + '\n')
@@ -129,10 +102,9 @@ def build(args):
         raise RuntimeError('Package output already exists; use an empty output directory')
     with tempfile.TemporaryDirectory(prefix='babel-installer-') as temp:
         payload = Path(temp) / 'payload'
-        driver = args.driver_dir.resolve() if args.driver_dir else None
-        manifest = stage(args.bin_dir.resolve(), driver, payload, args.architecture, release, args.runtime_dir)
+        manifest = stage(args.bin_dir.resolve(), payload, args.architecture, release, args.runtime_dir)
         subprocess.run([str(compiler), f'/DBabelVersion={release}', f'/DTargetArch={args.architecture}',
-                        f'/DIncludeDriver={int(driver is not None)}', f'/DPayloadDir={payload}',
+                        f'/DPayloadDir={payload}',
                         f'/DOutputFolder={output}', str(HERE / 'Babel.iss')], check=True)
         require_file(installer)
         pe_machine(installer)  # setup is an x86 bootstrapper; payload has the native architecture
@@ -156,7 +128,6 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--runtime-dir', type=Path, required=True)
     parser.add_argument('--bin-dir', type=Path, required=True)
-    parser.add_argument('--driver-dir', type=Path, help='include an optional Babel driver development package')
     parser.add_argument('--architecture', choices=list(MACHINES), required=True)
     parser.add_argument('--output', type=Path, default=ROOT / 'artifacts/installers')
     parser.add_argument('--version')

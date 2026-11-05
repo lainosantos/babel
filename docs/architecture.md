@@ -328,12 +328,8 @@ without silently overwriting tray selections.
 
 ## Memory-safety guarantees and boundaries
 
-The main application and portable driver-transport cores use
-`#![forbid(unsafe_code)]`. HAL/WDK integration and the installer have separate
-FFI boundaries, with pointers and OS calls documented under `native/`. On macOS,
-a C bridge uses Apple SDK layouts; on Windows, C++ handles WaveRT/PortCls
-integration and Rust `no_std` transports PCM in fixed storage. See
-[driver boundaries and installation](native-drivers.md).
+The main application uses `#![forbid(unsafe_code)]`. Windows endpoint volume
+control uses a separate COM adapter in `native/windows/volume-control`.
 Rust checks buffer ownership/access in the safe core. Networking, audio, OS
 libraries, drivers, firmware, whisper.cpp/llama.cpp/Piper/ONNX and external models
 do not inherit a safety proof just because their caller is Rust. There is no

@@ -4,8 +4,7 @@ The translation process runs in Rust in user space. On Linux, Babel creates
 selectable devices through the existing audio server. On macOS and Windows,
 Babel connects to separately installed virtual devices through CoreAudio and
 WASAPI. BlackHole on macOS and Virtual Cables on Windows x64 provide two paths
-at no cost and without an evaluation period. Babel's own drivers remain
-available for [native driver builds](native-drivers.md).
+at no cost and without an evaluation period.
 
 The dashboard and tray use the operating system running Babel, regardless of
 where the browser is open. Use **Refresh devices** after installing an external
@@ -13,9 +12,7 @@ audio driver. Installers and device setup require separate user authorization.
 
 The device help opened at `/help/platforms` contains only instructions for the
 current system. The full version is available at `/help/platforms/all` and in
-this document. The native driver build and packaging guide opens at
-`/help/native-drivers`. This lets users consult another system explicitly without
-mixing its setup steps into their current configuration.
+this document.
 
 The two paths must remain independent:
 
@@ -100,7 +97,7 @@ and [PipeWire remap source](https://docs.pipewire.org/page_pulse_module_remap_so
 Linking properties are described in the
 [official WirePlumber policy](https://pipewire.pages.freedesktop.org/wireplumber/policies/linking.html).
 
-## macOS: BlackHole or Babel virtual devices
+## macOS: BlackHole
 
 <a id="macos"></a>
 
@@ -131,49 +128,18 @@ When opening a trusted Babel download without notarization, macOS may offer
 launch or installation attempt. Managed Macs may restrict the option.
 See [Apple's Gatekeeper instructions](https://support.apple.com/en-us/102445).
 
-### Optional Babel Audio driver on macOS
-
-**BabelAudio.pkg** installs Babel's AudioServerPlugIn with two separate paths:
-**Babel Microphone** and **Babel Speaker**. Each device has an input and an output
-side. Source and build instructions are in
-[native/macos](../native/macos/README.md); the distribution places
-`drivers/macos/BabelAudio.pkg` beside the application. Source and a build path
-are available, but this repository does not currently provide a signed package
-validated on hardware. See [driver preparation](native-drivers.md).
-
-Babel's usage monitor requires **macOS 14.2 or later**. Install the package
-explicitly and follow the system authorization and package restart instructions.
-The dashboard does not run installers or request elevation. Devices appear in
-Sound settings and Audio MIDI Setup, not as applications in the Applications
-folder. Use **Refresh devices** after installation.
-
 Authorize microphone access for the application or terminal running Babel under
 System Settings → Privacy & Security → Microphone. Capture availability depends
 on that permission. Reopen the application if macOS requests it.
 
-| Field/application | Device |
-|---|---|
-| Babel microphone capture | Your physical microphone |
-| Babel translated microphone playback | **Babel Microphone** output |
-| Call application microphone | **Babel Microphone** input |
-| Call application speaker | **Babel Speaker** output |
-| Babel output capture for translation | **Babel Speaker** input |
-| Babel translated output playback | Your physical headphones/speaker |
-
-Fixed UIDs are `org.babel.audio.microphone.v1` and
-`org.babel.audio.speaker.v1`. Selection uses device UID and direction; renaming
-a visible description does not create another cable. Use the IDs listed by
-Babel. The native devices offer stereo at 48 kHz; speech processing converts a
-separate copy to the translation format. No Aggregate or Multi-Output device
-is required.
-
 The CoreAudio monitor queries external processes using the **selected UID**,
-distinguishes capture from playback, and excludes Babel itself. Choosing Babel
-Microphone as the default macOS input opens the physical microphone route even when no application is capturing audio.
-Explicit capture of Babel Microphone also opens the route. Selecting the
-physical microphone as default closes it only if no application still uses Babel.
+distinguishes capture from playback, and excludes Babel itself. Choosing the
+selected virtual microphone as the default macOS input opens the microphone
+route even without a capturing application. An app that explicitly captures
+that device also opens the route. Selecting the physical microphone as default
+closes the route when no app still captures from the virtual microphone.
 
-Playback to Babel Speaker opens the route to the headphones; merely selecting
+Playback to the selected virtual output opens the route to the headphones; merely selecting
 it as default output is insufficient. When activity ends, the route shows
 **Routing inactive**, closes its streams, and discards queued audio. The other
 direction and session files continue.
@@ -181,20 +147,13 @@ direction and session files continue.
 Select devices directly in applications: the monitor does not automatically
 expand Aggregate/Multi-Output devices. Systems older than 14.2, unavailable APIs,
 and query errors keep affected routes closed with a diagnostic. Process queries
-are periodic, so suspension is not instantaneous. Compilation and driver core
-tests do not replace validation on a real Mac, including permissions and use
-by call applications.
-
-Babel driver removal uses the package's `uninstall.sh`, explicitly invoked with
-the required authorization. `babel setup` and `babel uninstall` identify the
-local package or helper when found; they neither execute those files nor claim
-to have installed or removed devices.
+are periodic, so suspension is not instantaneous. Validate permissions and calling applications on a real Mac.
 
 Official references: [devices used by a CoreAudio process](https://developer.apple.com/documentation/coreaudio/kaudioprocesspropertydevices)
 and [Apple's process API example for macOS 14.2+](https://developer.apple.com/documentation/coreaudio/capturing-system-audio-with-core-audio-taps).
 Babel queries processes/devices without creating taps to capture global audio.
 
-## Windows: Virtual Cables or Babel virtual devices
+## Windows: Virtual Cables
 
 <a id="windows"></a>
 
@@ -240,33 +199,6 @@ and managed device policies can block execution.
 See [Microsoft's SmartScreen guidance](https://learn.microsoft.com/en-us/windows/apps/package-and-deploy/smartscreen-reputation)
 and [Smart App Control guidance](https://learn.microsoft.com/en-us/windows/apps/develop/smart-app-control/overview).
 
-### Optional Babel Audio driver on Windows
-
-The **BabelAudio** package supplies four WASAPI endpoints forming two independent
-cables. WaveRT driver source and build scripts are in
-[native/windows](../native/windows/README.md). The INF targets Windows 10 build
-19041 or later. The package must match the system architecture.
-**A signed distribution package and real Windows validation of installation,
-streams, and removal are still required.** Source code is not a production-approved
-installer.
-
-The `drivers/windows` distribution directory beside the Babel executable contains
-`BabelAudio.inf`, `BabelAudio.sys`, the catalog, and installation/removal helpers.
-Follow the [driver guide](native-drivers.md) to obtain or build the package and
-install it explicitly with administrator authorization. The dashboard only shows
-instructions and hides the creation/removal actions used by the Linux backend.
-`babel setup` and `babel uninstall` identify available files without executing
-scripts, elevating permissions, or claiming successful installation.
-
-| Field/application | Device |
-|---|---|
-| Babel microphone capture | Your physical microphone |
-| Babel translated microphone playback | **Babel Microphone Feed** (playback) |
-| Call application microphone | **Babel Microphone** (recording) |
-| Call application speaker | **Babel Speaker** (playback) |
-| Babel output capture for translation | **Babel Speaker Monitor** (recording) |
-| Babel translated output playback | Your physical headphones/speaker |
-
 Authorize microphone access for desktop applications in Windows privacy settings.
 Babel uses the device's shared-mode configuration through WASAPI. Do not enable
 “Listen to this device” on the virtual devices: it creates a second route outside
@@ -274,17 +206,18 @@ Babel's control. Use **Refresh devices** after installation and select the
 endpoints listed above.
 
 The monitor checks the Windows default microphone and external WASAPI sessions.
-Choosing **Babel Microphone** as default opens the microphone route even when no application is capturing audio. Explicit
-capture of Babel Microphone also opens the route. Selecting the physical
-microphone as default closes it only if no application still uses Babel.
+Choosing the selected virtual microphone as default opens the route even
+without a capturing application. An app that explicitly captures that device
+also opens the route. Selecting the physical microphone as default closes
+the route when no app still captures from the virtual microphone.
 
-Application playback to **Babel Speaker** opens the output route; choosing it
+Application playback to the selected virtual output opens the route; choosing it
 as default without playback is insufficient. Babel's own sessions are excluded.
 Each direction shows **Routing inactive** when its activity condition is unmet,
 even if the other direction or session is still active.
 
-Pairing checks the **Babel Audio v1** interface and its endpoint descriptions,
-or the numbered USB adapter identity for Virtual Cables. WASAPI endpoint IDs
+Pairing checks the numbered USB adapter identity for Virtual Cables and
+the adapter and endpoint descriptions for VB-CABLE. WASAPI endpoint IDs
 remain opaque. Missing or ambiguous endpoints and query failures keep the
 affected direction closed with a diagnostic. Selecting both sides of the same
 cable for both routes blocks both.
@@ -297,12 +230,11 @@ the application checks types and APIs but does not prove loaded-driver behavior
 on Windows.
 
 **Optional alternative:** two independent VB-CABLE or CABLE-A/B/C/D pairs remain
-recognized. With CABLE-A and CABLE-B, replace the four Babel endpoints in the
+recognized. With CABLE-A and CABLE-B, replace the four virtual endpoints in the
 table with CABLE-A Input, CABLE-A Output, CABLE-B Input, and CABLE-B Output,
 respectively. One cable does not provide two independent paths. Obtain drivers
 and licenses directly from [VB-Audio](https://vb-audio.com/Cable/) and consult
 its [distribution terms](https://vb-audio.com/Services/licensing.htm).
-Babel's own driver does not depend on those packages.
 
 Official reference: [WASAPI session enumeration limitations](https://learn.microsoft.com/en-us/windows/win32/api/audiopolicy/nf-audiopolicy-iaudiosessionmanager2-getsessionenumerator).
 
@@ -368,7 +300,7 @@ on real macOS and Windows machines.
 
 ### Speaker volume
 
-Supported Babel speaker endpoints expose one output volume control: changing
+On supported Linux PipeWire setups, the Babel speaker exposes one volume control: changing
 Babel's volume in the operating system changes the selected physical speaker's
 master volume and mute. Connecting or switching speakers adopts the new physical
 device's current level. Babel does not force hardware volume to 100%. Changes
@@ -393,13 +325,9 @@ does not pause original capture, transcription or recording.
   adjusts the physical device directly, including during a session. Set the
   virtual control to 100% if you want only the physical control to attenuate
   playback. PulseAudio amplification above 100% also disables automatic mirroring.
-- **macOS:** requires the updated Babel Audio driver with control-only speaker
-  volume and mute properties and a physical endpoint with writable controls.
-  Read-only digital outputs and older drivers can require hardware volume keys.
-- **Windows:** requires the updated Babel driver advertising the control-only
-  volume capability. Older Babel drivers and VB-CABLE keep the separate physical
-  control. This native path requires validation on Windows hardware; compiling
-  it is not an end-to-end driver test.
+- **macOS and Windows:** the **Speaker volume** control in Audio routing
+  adjusts the selected physical output. Outputs with read-only controls
+  may require hardware volume keys.
 
 The routing page shows synchronization failures and unsupported endpoint details.
 A failed physical volume write does not stop original routing; Babel attempts to

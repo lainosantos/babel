@@ -21,58 +21,33 @@ def pe(path, machine):
 
 class PackageTests(unittest.TestCase):
     def fixture(self, root, arch):
-        binary, driver = root / 'bin', root / 'driver'
+        binary = root / 'bin'
         binary.mkdir()
-        driver.mkdir()
         for name in ('babel.exe', 'babel-tray.exe'):
             pe(binary / name, build.MACHINES[arch])
-        for name in build.DRIVER_FILES:
-            (driver / name).write_text('fixture')
-        for name in ('BabelAudio.sys', 'babel-driver-installer.exe'):
-            pe(driver / name, build.MACHINES[arch])
-        suffix = 'amd64' if arch == 'x64' else 'arm64'
-        (driver / 'BabelAudio.inf').write_text(f'ROOT\\BabelAudio\nBabelAudio.sys\nBabelAudio.cat\nBabel.NT{suffix}\n')
-        return binary, driver
+        return binary
 
-    def test_app_only_payload_requires_no_driver_package(self):
-        with tempfile.TemporaryDirectory() as temp:
-            root = Path(temp)
-            binary, _ = self.fixture(root, 'x64')
-            payload = root / 'payload'
-            manifest = build.stage(binary, None, payload, 'x64', '0.1.0')
-            self.assertIsNone(manifest['driver_signature'])
-            self.assertFalse((payload / 'drivers').exists())
-            self.assertIn('babel-tray.exe', manifest['files'])
-            self.assertIn('Virtual Cables', (payload / 'INSTALLATION.txt').read_text())
-
-    def test_complete_allowlisted_payload_and_rejection_of_wrong_native_driver(self):
+    def test_stages_only_supported_application_files(self):
         for arch in build.MACHINES:
             with self.subTest(arch=arch), tempfile.TemporaryDirectory() as temp:
                 root = Path(temp)
-                binary, driver = self.fixture(root, arch)
-                (driver / 'private.key').write_text('not a package file')
-                manifest = build.stage(binary, driver, root / 'payload', arch, '0.1.0')
-                self.assertIn('drivers/windows/BabelAudio.cat', manifest['files'])
+                binary = self.fixture(root, arch)
+                (binary / 'private.key').write_text('not a package file')
+                payload = root / 'payload'
+                manifest = build.stage(binary, payload, arch, '0.1.0')
+                self.assertEqual(manifest['architecture'], arch)
+                self.assertIn('babel.exe', manifest['files'])
                 self.assertIn('babel-tray.exe', manifest['files'])
-                self.assertFalse((root / 'payload/drivers/windows/private.key').exists())
-                other = 'ARM64' if arch == 'x64' else 'x64'
-                pe(driver / 'BabelAudio.sys', build.MACHINES[other])
-                with self.assertRaisesRegex(ValueError, 'architecture'):
-                    build.stage(binary, driver, root / 'bad', arch, '0.1.0')
-                self.assertFalse((root / 'bad').exists())
+                self.assertFalse((payload / 'private.key').exists())
+                self.assertIn('Virtual Cables', (payload / 'INSTALLATION.txt').read_text())
 
-    def test_missing_catalog_and_unstamped_inf_fail_before_staging(self):
+    def test_rejects_wrong_application_architecture_before_staging(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
-            binary, driver = self.fixture(root, 'x64')
-            (driver / 'BabelAudio.cat').unlink()
-            with self.assertRaisesRegex(ValueError, 'Missing'):
-                build.stage(binary, driver, root / 'out', 'x64', '0.1.0')
-            (driver / 'BabelAudio.cat').write_text('fixture')
-            with (driver / 'BabelAudio.inf').open('a') as handle:
-                handle.write('$ARCH$')
-            with self.assertRaisesRegex(ValueError, 'stamp'):
-                build.stage(binary, driver, root / 'out', 'x64', '0.1.0')
+            binary = self.fixture(root, 'x64')
+            with self.assertRaisesRegex(ValueError, 'architecture'):
+                build.stage(binary, root / 'payload', 'ARM64', '0.1.0')
+            self.assertFalse((root / 'payload').exists())
 
     def test_pe_bounds_and_version_reject_invalid_inputs(self):
         with tempfile.TemporaryDirectory() as temp:

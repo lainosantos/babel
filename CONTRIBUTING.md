@@ -35,7 +35,7 @@ Examples:
 ```text
 feat(transcription): add a provider-specific language selector
 fix(audio): keep original routing active when recording fails
-docs: explain native driver signing requirements
+docs: explain application signing requirements
 ci(release): publish installers for version tags
 ```
 
@@ -86,9 +86,8 @@ for development inspection. See [installer details](docs/ci-installers.md).
 
 Creating a release tag is an explicit publishing action. Before tagging,
 verify the version, required checks, release notes and package/signing status.
-Do not describe development-signed or unsigned native drivers as approved for
-production. macOS signing/notarization, Windows driver signing and native
-hardware tests remain separate requirements from building release assets.
+macOS signing and notarization, Windows application signing, and hardware
+validation are separate from building release assets.
 
 ## Documentation website
 

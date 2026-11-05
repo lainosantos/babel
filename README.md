@@ -91,8 +91,8 @@ subcommands, for example `./scripts/run.sh doctor`.
 6. Save settings, optionally enter a **Session name**, and click **Start session**.
    The session bar mirrors the current Translation, Recording and Transcription
    switches so you can adjust them before starting. In the calling app, select
-   **Babel_Microphone** and **Babel_Speaker** on Linux, or **Babel Microphone**
-   and **Babel Speaker** on macOS/Windows. Without an active session, these
+   **Babel_Microphone** and **Babel_Speaker** on Linux, **BlackHole 2ch** and
+   **BlackHole 16ch** on macOS, or **Virtual Cable 01** and **Virtual Cable 02** on Windows. Without an active session, these
    routes carry original audio.
 
 To use original audio only, leave translation off in both directions. Routing
@@ -107,8 +107,7 @@ translation and transcription disabled, without starting cloud calls. See
 
 On macOS, use BlackHole 2ch and 16ch. On Windows x64, use Virtual Cables
 with the signed usbip-win2 transport. These free, separately installed devices
-provide two audio paths. Babel's application packages can be built without
-Babel's own driver or a publisher account. See [platform setup](docs/platforms.md)
+provide two audio paths. Babel's application packages can be built without a publisher account. See [platform setup](docs/platforms.md)
 for permissions, Windows ARM64 scope, and unsigned application restrictions.
 Hardware validation on macOS and Windows is still pending.
 
@@ -133,8 +132,6 @@ source guides below.
   routing, permissions, drivers and troubleshooting.
 - [GitHub Actions installers](docs/ci-installers.md): platform packages,
   artifacts, checks, tagged releases and signing.
-- [Native Babel drivers](docs/native-drivers.md): source, builds,
-  package preparation and explicit installation requirements.
 - [Gemini Live](docs/providers.md): protocols, models, transcriptions,
   capabilities and continuous translation restrictions.
 - [OpenAI, Deepgram and open-source services](docs/other-providers.md): Realtime
@@ -267,10 +264,8 @@ transcription or recording. You can undo startup registration on the same page.
 
 ## Validation status
 
-Tests cover simulated WebSocket/HTTP protocols, queues/cancellation,
-configuration, transcription, resampling, dashboard authentication and real
-PipeWire with synthetic audio. Cross-compilation checks Windows code. Babel's
-drivers have core tests and build paths separate from the application. Loaded
-driver tests on macOS/Windows hardware, signed distribution packages and calls
-with real provider accounts/keys are still required before presenting the product
-as validated for production. See [reproducing the tests](docs/testing.md).
+Tests cover simulated WebSocket and HTTP protocols, configuration, audio
+processing, and routing through PipeWire with synthetic audio. Windows
+cross-compilation and installer contract tests check the portable code and
+packaging. Audio on macOS and Windows still requires validation on those
+systems. See [reproducing the tests](docs/testing.md).

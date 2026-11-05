@@ -259,15 +259,6 @@ fn router(state: DashboardState) -> Router {
             }),
         )
         .route(
-            "/help/native-drivers",
-            get(|| async {
-                (
-                    [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
-                    include_str!("../docs/native-drivers.md"),
-                )
-            }),
-        )
-        .route(
             "/help/voices",
             get(|| async {
                 (

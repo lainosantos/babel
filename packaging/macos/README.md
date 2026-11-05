@@ -1,11 +1,9 @@
-# macOS application and driver installer
+# macOS application installer
 
 `build.py` packages the prebuilt `babel` and `babel-tray`
 binaries into `Babel.app` and a universal `.pkg`, with checksums and a manifest.
 The default installer contains the application and local inference engines.
 Follow [macOS routing](../../docs/platforms.md#macos) to install BlackHole.
-Pass `--driver-dir native/macos/dist` to include the optional Babel HAL driver
-and its original installer scripts.
 
 Run packaging on macOS with Python 3.11+ and the Xcode command-line tools.
 The application requires macOS 14.2 or later. Both Mach-O executables must
@@ -41,7 +39,7 @@ needs CMake 3.26+, Git and a C++17 compiler; users need none of those tools.
 
 Omit `--version` to read the root Cargo.toml package version. Numeric `X.Y.Z`
 versions are accepted. `--arch arm64` or `--arch x86_64` can package a single
-architecture if the application binaries and any included driver use that
+architecture if the application binaries use that
 architecture. The packager uses prebuilt inputs.
 
 The script inspects both slices using `lipo` and `otool`, stages the application,
@@ -56,8 +54,7 @@ release. Successful compilation/package inspection is not proof that audio
 works on hardware, that permissions are granted or that Gatekeeper accepts a
 public download. Test installation and audio on Intel and Apple Silicon Macs
 before distribution, including upgrade, microphone permission, device changes,
-login startup and removal. The native driver's conservative 4096-frame
-loopback delay is approximately 85.33 ms at 48 kHz.
+login startup and removal.
 
 Portable script tests need only Python; they don't invoke Apple tools:
 
@@ -70,8 +67,7 @@ sh -n packaging/macos/installer/preinstall
 ## Bundle and installed locations
 
 The installer writes `/Applications/Babel.app` and uses the system
-authorization prompt. An optional driver package also writes
-`/Library/Audio/Plug-Ins/HAL/BabelAudio.driver` and requests a restart.
+authorization prompt.
 The installer asks the user to close a running app before upgrading.
 
 `CFBundleExecutable` is the real `babel-tray` Mach-O, with `LSUIElement=true`.
@@ -85,7 +81,6 @@ The bundle includes:
 
 - `Contents/MacOS/{babel,babel-tray}`;
 - the repository's `docs/*.md` guides;
-- driver package, removal helper, and licenses when `--driver-dir` is supplied;
 - `Contents/Resources/local-runtime/macos-{aarch64,x86_64}` with Whisper,
   llama.cpp, Piper, ONNX Runtime, eSpeak data and their licenses. CPU backends
   and Metal are included; no Homebrew or separately installed AI daemon is used;
@@ -99,15 +94,8 @@ the outer app, and payload hashes are regenerated after signing. Users can
 install and run Babel without Python. The bundle excludes credentials, user
 configuration and recordings.
 
-Disable login startup and quit Babel before removal. If you installed the
-optional Babel driver, its removal
-command is explicit, checks Babel's bundle identity and preserves user files:
-
-```sh
-sudo /Applications/Babel.app/Contents/Resources/drivers/macos/uninstall.sh
-```
-
-Restart macOS, then move Babel.app to Trash. User configuration, credentials,
+Disable login startup, quit Babel and move Babel.app to Trash.
+User configuration, credentials,
 model cache and recordings are intentionally retained for user-directed cleanup.
 
 ## Signed distribution
@@ -125,8 +113,6 @@ python3 packaging/macos/build.py --arch universal \
   --notary-profile YOUR_EXISTING_KEYCHAIN_PROFILE
 ```
 
-For a combined package, build and sign the optional driver separately with
-`native/macos/build.py` and pass its output through `--driver-dir`.
 The signed app build signs the auxiliary CLI before the app bundle, enables hardened runtime and
 timestamps, signs the outer installer, and optionally submits only that final
 installer to Apple's notary service and staples the ticket. There are no
