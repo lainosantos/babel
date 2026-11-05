@@ -100,17 +100,18 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let config = directory.path().join("new-user/babel/babel.toml");
         let guard = InstanceGuard::acquire(&config).unwrap();
-        assert_eq!(guard.config_path(), config);
+        let parent = config.parent().unwrap();
+        let canonical_config = parent
+            .canonicalize()
+            .unwrap()
+            .join(config.file_name().unwrap());
+        assert_eq!(guard.config_path(), canonical_config);
         assert!(!config.exists());
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
             assert_eq!(
-                std::fs::metadata(config.parent().unwrap())
-                    .unwrap()
-                    .permissions()
-                    .mode()
-                    & 0o777,
+                std::fs::metadata(parent).unwrap().permissions().mode() & 0o777,
                 0o700
             );
         }
