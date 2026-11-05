@@ -1,7 +1,7 @@
 //! Separate executors for deadlines, processing and the control plane.
 //!
 //! Only device transport and short PCM operations belong on `audio_handle`.
-//! Providers, commands, history and file writers use `processing_handle`; their
+//! Providers, history and file writers use `processing_handle`; their
 //! blocking pool cannot consume the device workers. The runtimes live until
 //! process exit so dropping a controller in async code never drops a runtime.
 //!
@@ -138,7 +138,7 @@ pub fn audio_handle() -> Result<Handle> {
     shared_handle(&AUDIO, true, "babel-audio")
 }
 
-/// Bounded, separate runtime for providers, transcripts, commands and storage.
+/// Bounded, separate runtime for providers, transcripts and storage.
 pub fn processing_handle() -> Result<Handle> {
     static PROCESSING: OnceLock<std::result::Result<Runtime, String>> = OnceLock::new();
     shared_handle(&PROCESSING, false, "babel-processing")
@@ -240,7 +240,7 @@ mod tests {
     fn processing_saturation_cannot_starve_audio_executor_or_device_pool() {
         // Use the production builder but private runtimes: deliberately
         // saturating the global processing executor would interfere with
-        // concurrent MCP/provider tests rather than testing this boundary.
+        // concurrent provider tests rather than testing this boundary.
         let processing_runtime = runtime(false, "babel-processing").unwrap();
         let audio_runtime = runtime(true, "babel-audio").unwrap();
         let processing = processing_runtime.handle();

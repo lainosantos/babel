@@ -21,13 +21,6 @@ Translation/provider processing adds its own delay. Native audio behavior must
 be validated on each supported Mac before treating a development build as a
 production release.
 
-Local voice-command helpers are optional. Their installation is explicit and
-separate from installing Babel. Setup scripts and documentation are included in
-Babel.app/Contents/Resources. Do not write models or change files inside the
-signed application. Copy Resources/Support/scripts into the writable directory
-selected as the services directory, then follow Documentation/voice-commands.md.
-An empty services directory setting uses the configuration file's directory.
-
 To remove the driver: quit Babel, open Terminal, and explicitly run:
 sudo /Applications/Babel.app/Contents/Resources/drivers/macos/uninstall.sh
 Restart macOS afterwards. The script removes only Babel's identified driver and

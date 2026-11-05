@@ -6,7 +6,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const { JSDOM } = require('jsdom');
 
-const views = ['routing', 'translation', 'transcription', 'recording', 'commands', 'settings'];
+const views = ['routing', 'translation', 'transcription', 'recording', 'settings'];
 async function workspace(t, options = {}) {
   const html = `<!doctype html><html><body>
     <a class="skip-link" id="skip-link" href="#workspace-routing" data-workspace-target="routing">Skip to controls</a>
@@ -19,7 +19,6 @@ async function workspace(t, options = {}) {
       <section id="workspace-recording" class="workspace-panel" data-workspace-panel="recording"><input id="recording-directory" value="recordings"><button type="button" id="recording-folder-shortcut" data-workspace-field="files-base_path">Common folder</button></section>
       <section id="workspace-settings-files" class="workspace-panel" data-workspace-panel="settings"><label><span>Base folder</span><input id="files-base_path" required value="/home/test/Babel"></label><details id="file-details"><summary>Files</summary><label><span>Filename pattern</span><input id="file-pattern" required value="{session}-{id}"></label></details></section>
     </fieldset></form>
-    <section id="workspace-commands" class="workspace-panel" data-workspace-panel="commands"><form id="agent-form"><details id="agent-details"><summary>Local service</summary><label><span>Speech service</span><input id="agent-endpoint" type="url" required value="http://127.0.0.1:8080"></label></details></form></section>
     <section id="workspace-settings" class="workspace-panel" data-workspace-panel="settings"><label><span>Start at login</span><input id="autostart-enabled" type="checkbox"></label></section>
     </main><section class="session-dock">Session controls</section><dialog id="test-dialog"><div class="dialog-header"><h2>Test dialog</h2></div><input id="test-upload" type="file"><textarea id="test-description"></textarea></dialog>
     </body></html>`;
@@ -41,7 +40,7 @@ async function workspace(t, options = {}) {
   return { window, doc, byId, nav, requests, api: window.BabelWorkspace, panes: view => [...doc.querySelectorAll(`[data-workspace-panel="${view}"]`)] };
 }
 
-test('six views switch immediately without backend requests or remounting controls, uploads and dialogs', async t => {
+test('five views switch immediately without backend requests or remounting controls, uploads and dialogs', async t => {
   const p = await workspace(t, { beforeLanguage: true });
   assert.equal(p.api.current, 'routing'); assert.equal(p.byId('page-title').textContent, 'Audio routing');
   const input = p.byId('mic-language'); const style = p.byId('translation-prompt'); const file = p.byId('test-upload');
@@ -74,8 +73,7 @@ test('navigation localizes the current heading and description without reverting
   assert.equal(p.byId('page-description').textContent, p.window.BabelI18n.t('workspace.recording_description'));
   assert.equal(p.doc.activeElement, input); assert.equal(input.value, 'unsaved-audio');
   p.window.BabelI18n.apply(); assert.equal(p.byId('page-title').textContent, p.window.BabelI18n.t('workspace.recording_title'));
-  p.nav('commands').click(); assert.equal(p.byId('page-title').textContent, 'Comandos de voz');
-  await p.window.BabelI18n.setLanguage('en'); assert.equal(p.byId('page-title').textContent, 'Voice commands');
+  await p.window.BabelI18n.setLanguage('en'); assert.equal(p.byId('page-title').textContent, 'Recording');
 });
 
 test('keyboard arrows and Home/End navigate normal buttons with aria-current and pane associations', async t => {
@@ -106,7 +104,7 @@ test('internal shortcuts and saved views work when storage is available, denied 
   p.nav('recording').click(); assert.equal(scrolls, 2);
   delete p.doc.documentElement.scrollTo; p.doc.documentElement.scrollTop = 720;
   p.nav('settings').click(); assert.equal(p.doc.documentElement.scrollTop, 0);
-  const saved = await workspace(t, { stored: 'commands' }); assert.equal(saved.api.current, 'commands');
+  const saved = await workspace(t, { stored: 'settings' }); assert.equal(saved.api.current, 'settings');
   const invalid = await workspace(t, { stored: 'admin' }); assert.equal(invalid.api.current, 'routing');
   const denied = await workspace(t, { storageThrows: true }); denied.nav('settings').click(); assert.equal(denied.api.current, 'settings');
 });
@@ -218,12 +216,8 @@ test('validation opens transcription and recording separately and reveals common
   assert.equal(p.api.reportValidity(p.byId('configuration')), true);
 });
 
-test('agent validation and modal validation open the right controls without closing a separate dialog', async t => {
+test('modal validation focuses the field and keeps the dialog open', async t => {
   const p = await workspace(t, { language: 'pt' });
-  p.byId('agent-endpoint').value = '';
-  const invalid = new p.window.Event('invalid', { cancelable: true }); p.byId('agent-endpoint').dispatchEvent(invalid);
-  assert.equal(p.api.current, 'commands'); assert.equal(p.byId('agent-details').open, true);
-  assert.equal(p.doc.activeElement, p.byId('agent-endpoint')); assert.match(p.byId('workspace-validation').textContent, /Revise/);
   p.byId('test-dialog').open = true; p.byId('test-description').required = true;
   assert.equal(p.api.reportValidity(p.byId('test-description')), false);
   assert.equal(p.byId('test-dialog').open, true);

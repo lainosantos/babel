@@ -260,7 +260,7 @@ meter::-moz-meter-bar { background: var(--channel-accent); }
 .transcripts p { margin-top: 12px; color: var(--text); font-size: 12px; line-height: 1.75; overflow-wrap: anywhere; }
 
 /* Secondary workspaces are broad editing surfaces, with hierarchy through spacing. */
-.shared-settings, .file-settings, .transcription-settings, .recording-settings, .agent-settings, .startup-settings, .device-setup { padding: 28px 30px; border: 1px solid var(--line); border-radius: 12px; background: var(--panel); }
+.shared-settings, .file-settings, .transcription-settings, .recording-settings, .startup-settings, .device-setup { padding: 28px 30px; border: 1px solid var(--line); border-radius: 12px; background: var(--panel); }
 .shared-settings { padding-bottom: 3px; }
 .audio-tuning { margin-top: 22px; padding: 17px 22px; border: 1px solid var(--line); border-radius: 9px; background: #f8fafd; }
 .audio-tuning > summary { width: 100%; font-size: 12px; }
@@ -355,116 +355,6 @@ meter::-moz-meter-bar { background: var(--channel-accent); }
 footer { display: flex; justify-content: space-between; gap: 20px; padding: 28px 0 0; color: #75849a; font-size: 10px; }
 .footer-separator { margin: 0 8px; color: #a9b5c7; }
 
-/* Voice commands have their own live state, independently of the session form. */
-.agent-settings > .field-hint { max-width: 94ch; margin: -7px 0 25px; }
-.agent-settings .section-heading { align-items: flex-start; }
-.agent-settings > .section-heading { flex-wrap: wrap; }
-.agent-heading-controls { display: flex; flex-shrink: 0; align-items: center; gap: 16px; max-width: 100%; margin-left: auto; }
-.agent-heading-controls .agent-stage { flex-shrink: 1; min-width: 0; }
-.agent-primary-fields { display: grid; grid-template-columns: minmax(0, 1fr) minmax(180px, 1fr); align-items: center; gap: 24px; }
-.agent-primary-fields .checkbox-label { padding-top: 0; }
-.agent-stage { flex-shrink: 0; max-width: 34ch; padding: 5px 9px; border-radius: 5px; background: #f2f5f9; color: #61738d; font-size: 11px; line-height: 1.65; text-align: right; }
-.agent-stage[data-stage="listening"], .agent-stage[data-stage="succeeded"] { color: #176c60; background: #edf7f3; }
-.agent-stage[data-stage="failed"], .agent-stage[data-stage="unavailable"] { color: #a03c49; background: #fff0f2; }
-.agent-advanced { margin-top: 24px; padding: 19px 0 0; border-top: 1px solid var(--line); }
-.agent-advanced > .profile-grid { padding-top: 20px; }
-.agent-advanced summary { color: #3e5575; }
-.agent-advanced .field-hint { margin-top: 15px; }
-.mcp-settings { margin-top: 27px; padding-top: 26px; border-top: 1px solid var(--line); }
-.mcp-list { border-top: 1px solid var(--line); }
-.mcp-empty { padding: 24px 0; color: var(--muted); font-size: 12px; line-height: 1.8; }
-.mcp-item { padding: 19px 0; border-bottom: 1px solid var(--line); }
-.mcp-item > summary { color: var(--text); overflow-wrap: anywhere; }
-.mcp-item > summary > span { margin-left: 10px; color: var(--muted); font-size: 11px; font-weight: 450; }
-.mcp-item .profile-grid { margin: 22px 0; }
-.mcp-item .checkbox-label { padding-top: 0; }
-.mcp-item input, .mcp-item select, .mcp-item textarea { min-width: 0; }
-.mcp-item textarea { font-size: 12px; }
-.mcp-item label.wide { grid-column: 1 / -1; }
-.mcp-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
-.mcp-actions .button { min-height: 34px; padding: 8px 11px; font-size: 11px; }
-.mcp-tools, .mcp-message { margin-top: 15px; color: var(--muted); font-size: 12px; line-height: 1.75; overflow-wrap: anywhere; }
-.mcp-tools { max-height: 180px; padding-left: 20px; overflow: auto; }
-.mcp-tools li { margin: 6px 0; }
-.mcp-auth-link { display: inline-block; margin-top: 12px; font-size: 12px; }
-.agent-save-row { display: flex; align-items: center; gap: 17px; padding-top: 25px; }
-.agent-credentials { margin-top: 24px; padding-top: 22px; border-top: 1px solid var(--line); }
-.agent-credentials .credential-row { padding-top: 14px; border: 0; }
-.agent-credentials > label { max-width: 530px; }
-.agent-settings > .profile-help { padding-bottom: 0; }
-/* Command feedback stays compact; the brand carries the only motion. */
-/* Command history is a compact activity list, independent of settings drafts. */
-.agent-history { margin: 28px 0; padding: 24px 0; border-block: 1px solid var(--line); }
-.agent-history-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 20px; }
-.agent-history-heading p { max-width: 72ch; margin-top: 7px; color: var(--muted); font-size: 11px; line-height: 1.7; }
-.agent-history-heading > .button { flex-shrink: 0; min-height: 32px; padding: 5px 0 5px 12px; font-size: 11px; }
-.agent-history-empty { margin-top: 20px; padding: 17px 0 0; color: var(--muted); font-size: 12px; }
-.agent-history-notice { display: flex; align-items: center; gap: 16px; margin-top: 14px; color: var(--danger); font-size: 12px; }
-.agent-history-notice p { flex: 1; overflow-wrap: anywhere; }
-.agent-history-notice .button { min-height: 30px; padding: 3px 0; font-size: 11px; }
-.agent-history-list { max-height: 430px; margin: 17px 0 0; padding: 0 6px 0 0; overflow: auto; scrollbar-gutter: stable; list-style: none; }
-.agent-history-list > li + li { border-top: 1px solid var(--line); }
-.command-history-summary { display: grid; grid-template-columns: 68px minmax(0, 1fr) minmax(110px, auto) 12px; align-items: start; gap: 13px; padding: 16px 1px; list-style: none; cursor: pointer; }
-.command-history-summary::-webkit-details-marker { display: none; }
-.command-history-summary::after { content: ''; width: 6px; height: 6px; margin-top: 7px; border-right: 1.5px solid var(--muted); border-bottom: 1.5px solid var(--muted); transform: rotate(45deg); }
-.command-history-entry[open] > .command-history-summary::after { margin-top: 10px; transform: rotate(225deg); }
-.command-history-time { padding-top: 2px; color: var(--muted); font-size: 11px; font-variant-numeric: tabular-nums; white-space: nowrap; }
-.command-history-main { min-width: 0; }
-.command-history-command { display: -webkit-box; overflow: hidden; -webkit-box-orient: vertical; -webkit-line-clamp: 2; color: var(--text); font-size: 12px; font-weight: 600; line-height: 1.7; overflow-wrap: anywhere; }
-.command-history-tools { display: block; margin-top: 5px; color: var(--muted); font-size: 11px; line-height: 1.7; overflow-wrap: anywhere; }
-.command-history-meta { display: grid; justify-items: end; gap: 6px; }
-.command-history-phase { max-width: 30ch; padding: 2px 6px; border-radius: 4px; color: #3455a0; background: var(--accent-soft); font-size: 10px; line-height: 1.65; text-align: right; }
-.command-history-entry[data-phase="succeeded"] .command-history-phase { color: #176c60; background: #edf7f3; }
-.command-history-entry[data-phase="failed"] .command-history-phase { color: #a03c49; background: #fff0f2; }
-.command-history-confidence { color: var(--muted); font-size: 10px; line-height: 1.65; font-variant-numeric: tabular-nums; white-space: nowrap; }
-.command-history-body { display: grid; gap: 15px; padding: 0 26px 19px 81px; font-size: 12px; }
-.command-history-full-command { overflow-wrap: anywhere; line-height: 1.8; }
-.command-history-tool { padding-top: 13px; border-top: 1px solid var(--line); }
-.command-history-tool h4 { margin: 0 0 7px; font-size: 12px; font-weight: 650; overflow-wrap: anywhere; }
-.command-history-body pre { max-height: 220px; margin: 7px 0 0; padding: 11px; overflow: auto; border-radius: 6px; background: var(--raised); font: inherit; font-size: 11px; line-height: 1.8; white-space: pre-wrap; overflow-wrap: anywhere; }
-.command-history-label, .command-history-tool-status { color: var(--muted); font-size: 11px; line-height: 1.7; }
-.command-history-error { color: var(--danger); white-space: pre-wrap; overflow-wrap: anywhere; line-height: 1.8; }
-.command-history-timing { display: flex; flex-wrap: wrap; gap: 6px 18px; color: var(--muted); font-size: 11px; font-variant-numeric: tabular-nums; }
-@media (max-width: 680px) {
-  .agent-history-heading { gap: 12px; }
-  .command-history-summary { grid-template-columns: minmax(0, 1fr) minmax(90px, auto) 12px; gap: 7px 10px; }
-  .command-history-time { grid-column: 1; grid-row: 1; }
-  .command-history-main { grid-column: 1; grid-row: 2; }
-  .command-history-meta { grid-column: 2; grid-row: 1 / 3; }
-  .command-history-summary::after { grid-column: 3; grid-row: 1 / 3; }
-  .command-history-body { padding-left: 0; padding-right: 22px; }
-}
-
-.agent-activity { --feedback-color: #345cf4; position: fixed; z-index: 30; right: 24px; bottom: calc(var(--session-dock-height) + 18px); width: min(360px, calc(100vw - 36px)); max-height: min(520px, calc(100dvh - var(--session-dock-height) - 48px)); padding: 18px; overflow: auto; border: 1px solid #d5deec; border-radius: 16px; background: #fff; box-shadow: 0 8px 32px #19335218; }
-.agent-activity[data-stage="succeeded"] { --feedback-color: #147d80; }
-.agent-activity[data-stage="failed"] { --feedback-color: #b35e55; }
-.agent-activity-header { display: flex; align-items: center; gap: 14px; }
-.agent-activity-header > div:nth-child(2) { flex: 1; min-width: 0; }
-.agent-activity-icon { position: relative; display: grid; flex: 0 0 46px; place-items: center; width: 46px; height: 46px; color: var(--feedback-color); }
-.agent-activity-icon > img { display: block; width: 36px; height: 36px; border-radius: 10px; }
-.agent-activity-orbit { position: absolute; inset: 0; border: 1px solid currentColor; border-radius: 15px; opacity: .22; }
-.agent-activity[data-stage="activated"] .agent-activity-orbit { animation: command-listening 2.4s ease-in-out 1; }
-.agent-activity:is([data-stage="processing"], [data-stage="transcribing"], [data-stage="deciding"], [data-stage="executing"]) .agent-activity-orbit { border-color: #345cf426; border-top-color: #345cf4a6; border-radius: 50%; animation: command-processing 1.8s ease-in-out 1; }
-.agent-activity-outcome { display: none; position: absolute; right: -3px; bottom: -3px; width: 20px; height: 20px; padding: 2px; border: 2px solid white; border-radius: 50%; background: var(--feedback-color); color: white; }
-.agent-activity:is([data-stage="succeeded"], [data-stage="failed"]) .agent-activity-outcome { display: block; }
-.agent-outcome-success, .agent-outcome-failure { display: none; }
-.agent-activity[data-stage="succeeded"] .agent-outcome-success, .agent-activity[data-stage="failed"] .agent-outcome-failure { display: block; }
-.agent-activity-header h2 { font-size: 14px; line-height: 1.5; letter-spacing: -.2px; }
-#agent-activity-name { margin-bottom: 2px; color: var(--muted); font-size: 10px; overflow-wrap: anywhere; }
-#agent-dismiss { align-self: flex-start; min-width: 28px; min-height: 28px; padding: 0; font-size: 22px; line-height: 1; }
-#agent-activity-detail { margin-top: 13px; color: var(--muted); font-size: 12px; line-height: 1.65; }
-.agent-feedback-details { margin-top: 13px; border-top: 1px solid var(--line); padding-top: 11px; }
-.agent-feedback-details > summary { width: fit-content; color: var(--muted); font-size: 11px; }
-#agent-activity-command { margin-top: 13px; color: #344c6e; font-size: 12px; font-weight: 550; line-height: 1.65; overflow-wrap: anywhere; }
-#agent-activity-tool, #agent-activity-error { margin-top: 9px; color: var(--muted); font-size: 11px; line-height: 1.75; white-space: pre-wrap; overflow-wrap: anywhere; }
-#agent-cancel { margin-top: 11px; min-height: 30px; padding: 5px 0; color: var(--muted); font-size: 11px; }
-#agent-result-container { margin-top: 13px; }
-#agent-result-container h3 { font-size: 11px; font-weight: 600; }
-#agent-result { max-height: 220px; margin-top: 7px; padding: 10px; overflow: auto; border-radius: 7px; background: #f4f7fb; color: var(--text); font-family: inherit; font-size: 11px; line-height: 1.8; white-space: pre-wrap; overflow-wrap: anywhere; }
-@keyframes command-listening { 0%, 100% { opacity: .16; transform: scale(.96); } 50% { opacity: .48; transform: scale(1.035); } }
-@keyframes command-processing { from { transform: rotate(0); } to { transform: rotate(360deg); } }
-@media (prefers-reduced-motion: reduce) { .agent-activity .agent-activity-orbit { animation: none; transform: none; } }
-
 .sr-only { position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0; overflow: hidden; border: 0; clip: rect(0, 0, 0, 0); white-space: nowrap; }
 .skip-link { position: fixed; z-index: 100; top: -80px; left: 20px; padding: 12px 16px; border-radius: 6px; background: var(--accent); color: #fff; }
 .skip-link:focus { top: 12px; color: #fff; }
@@ -532,7 +422,7 @@ footer { display: flex; justify-content: space-between; gap: 20px; padding: 28px
   .brand-mark { width: 32px; height: 32px; }
   .brand-caption { margin: 8px 0 0; font-size: 10px; }
   .app-sidebar > .local-label { position: absolute; top: 20px; right: 20px; margin: 8px 0 0; }
-  .workspace-nav { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 4px; margin: 18px -4px 0; padding-bottom: 10px; }
+  .workspace-nav { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 4px; margin: 18px -4px 0; padding-bottom: 10px; }
   .nav-item { flex-direction: column; justify-content: flex-start; width: 100%; min-width: 0; min-height: 58px; gap: 6px; padding: 9px 3px; border-radius: 6px; font-size: 10px; line-height: 1.35; text-align: center; white-space: normal; }
   .nav-item > span { max-width: 100%; overflow-wrap: anywhere; }
   .nav-item svg { width: 17px; height: 17px; }
@@ -568,7 +458,7 @@ footer { display: flex; justify-content: space-between; gap: 20px; padding: 28px
   .session-hint { line-height: 1.6; }
   .config-conflict { flex-direction: column; align-items: flex-start; gap: 12px; }
   .section-heading { align-items: flex-start; gap: 16px; }
-  .shared-settings, .file-settings, .transcription-settings, .recording-settings, .agent-settings, .startup-settings, .device-setup { padding: 22px; }
+  .shared-settings, .file-settings, .transcription-settings, .recording-settings, .startup-settings, .device-setup { padding: 22px; }
   .shared-settings { padding-bottom: 2px; }
   .profile-toolbar { flex-wrap: wrap; gap: 15px; }
   .profile-toolbar > label { width: 100%; min-width: 0; }
@@ -583,13 +473,6 @@ footer { display: flex; justify-content: space-between; gap: 20px; padding: 28px
   .transcription-routes { gap: 18px; }
   .startup-actions { flex-wrap: wrap; gap: 18px; }
   .startup-actions .checkbox-label { font-size: 11px; }
-  .agent-primary-fields { grid-template-columns: 1fr; gap: 22px; }
-  .agent-settings .section-heading { flex-wrap: wrap; gap: 12px; }
-  .agent-stage { text-align: left; }
-  .agent-save-row { flex-direction: column; align-items: flex-start; gap: 10px; }
-  .agent-activity { right: 18px; padding: 17px; }
-  .agent-save-row .save-state { max-width: none; }
-  .mcp-settings .section-heading { flex-direction: column; align-items: flex-start; }
   footer { flex-direction: column; gap: 7px; padding-top: 24px; font-size: 9px; }
 }
 @media (max-width: 480px) {
@@ -630,12 +513,11 @@ footer { display: flex; justify-content: space-between; gap: 20px; padding: 28px
   .session-hint { font-size: 9px; }
   #session-identity { font-size: 9px; }
   .transcription-routes { grid-template-columns: 1fr; gap: 0; }
-  .shared-settings, .file-settings, .transcription-settings, .recording-settings, .agent-settings, .startup-settings, .device-setup { padding: 20px 17px; }
+  .shared-settings, .file-settings, .transcription-settings, .recording-settings, .startup-settings, .device-setup { padding: 20px 17px; }
   .shared-settings { padding-bottom: 2px; }
   .provider-profile { padding: 16px; }
   .credential-row .button { padding: 9px 11px; font-size: 10px; }
   .save-state { max-width: 85px; }
-  .agent-save-row .save-state { max-width: none; }
   .device-actions { align-items: stretch; flex-direction: column; }
   .device-actions .text-button { align-self: flex-start; }
 }

@@ -379,8 +379,6 @@ not prevent the session.
   session and can still complete while the route is inactive. No further audio
   is captured from an unselected route. Translated playback never survives this
   boundary.
-  Voice-command activation remains limited to the microphone and uses its own
-  configuration, independently of file transcription STT.
 - Each selected STT source opens its provider lazily on the first captured frame.
   Its input queue holds at most 20 seconds of original PCM, with separate frame
   and sample limits. A slow recognizer reads the remaining accepted originals

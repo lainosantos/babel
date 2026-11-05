@@ -12,7 +12,7 @@ if (!$visualStudio) {
 }
 $dumpbins=@(Get-ChildItem (Join-Path $visualStudio 'VC\Tools\MSVC\*\bin\Hostx64\x64\dumpbin.exe') | Sort-Object FullName -Descending)
 if (!$dumpbins.Count) { throw 'MSVC dumpbin is unavailable.' }
-$files = @('babel.exe', 'babel-tray.exe', 'babel-feedback.exe' | ForEach-Object { Join-Path $BinaryDirectory $_ })
+$files = @('babel.exe', 'babel-tray.exe' | ForEach-Object { Join-Path $BinaryDirectory $_ })
 if ($DriverDirectory) { $files += Join-Path $DriverDirectory 'babel-driver-installer.exe' }
 foreach ($file in $files) {
     $imports=& $dumpbins[0].FullName /DEPENDENTS $file

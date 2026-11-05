@@ -3,7 +3,7 @@
   "private": true,
   "description": "Development-only regression tests for the dependency-free Babel dashboard",
   "scripts": {
-    "test": "node --test tests.cjs agent-tests.cjs workspace-tests.cjs"
+    "test": "node --test tests.cjs workspace-tests.cjs"
   },
   "engines": {
     "node": ">=22.12.0"

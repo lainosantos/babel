@@ -32,7 +32,7 @@ zero. For version `0.1.0`, outputs are:
 - `babel-audio-0.1.0-linux-amd64.tar.gz`;
 - `babel-audio-0.1.0-linux-amd64.manifest.json`, containing artifact SHA-256 hashes.
 
-Generation inspects the three executables as amd64 ELF and extracts glibc
+Generation inspects the application and tray executables as amd64 ELF and extracts glibc
 requirements. An unknown dynamic library stops the build until an explicit
 dependency mapping is supplied. Building on Ubuntu 22.04 broadens compatibility;
 a newer distribution can require a newer glibc. The measured minimum appears
@@ -54,20 +54,15 @@ starting Babel or audio.
 sudo apt install ./babel-audio_0.1.0_amd64.deb
 ```
 
-The package installs `babel`, `babel-tray`, `babel-feedback`, and `babel-launch`
+The package installs `babel`, `babel-tray`, and `babel-launch`
 into `/usr/bin`, plus a **Babel** application-menu entry and icon. Documentation
 and the content manifest live in `/usr/share/doc/babel-audio`; Whisper, llama.cpp,
 and Piper engines live in `/usr/share/babel/local-runtime/linux-x86_64` alongside
-libraries, data, and licenses. The optional Needle helper is at
-`/usr/share/babel/scripts/needle_bridge.py`.
+libraries, data, and licenses.
 
 Declared dependencies include build-compatible glibc, `libgcc-s1` when used by
 the binaries, `libstdc++6` for native engines, `pulseaudio-utils`, `xdg-utils`, and
-a session D-Bus provider. The native command overlay also declares `libx11-6`,
-`libx11-xcb1`, `libxcursor1`, `libxi6`, `libxkbcommon0`, and `libxkbcommon-x11-0`.
-These standard desktop libraries load at runtime and may not appear in `ldd` or
-the executable's `NEEDED` entries, so the package declares them explicitly.
-Xvfb is used only in CI tests and is not an application runtime dependency.
+a session D-Bus provider.
 `pipewire-pulse` or `pulseaudio` appears only as **Suggests**: the Babel package
 must not choose, replace, or start the audio server. Use the desktop's configured
 server. The tray requires StatusNotifier/AppIndicator support, which can depend
@@ -89,10 +84,8 @@ On openSUSE, use `sudo zypper install ./babel-audio-0.1.0-1.x86_64.rpm`.
 The RPM installs the same files, launcher, and user unit as the DEB. It declares
 compatible glibc, `libgcc_s.so.1` when used, `/bin/sh`, D-Bus, and tools through
 the paths `/usr/bin/pactl`, `/usr/bin/parec`, `/usr/bin/pacat`, and
-`/usr/bin/xdg-open`. The command overlay also requires the 64-bit library
-capabilities `libX11.so.6`, `libX11-xcb.so.1`, `libXcursor.so.1`, `libXi.so.6`,
-`libxkbcommon.so.0`, and `libxkbcommon-x11.so.0`. The package manager resolves
-providers of those paths and libraries. A desktop with a PulseAudio/PipeWire-pulse
+`/usr/bin/xdg-open`. The package manager resolves these dependencies.
+A desktop with a PulseAudio/PipeWire-pulse
 server and tray support must already be configured. The RPM neither chooses
 nor starts the audio server and has no installation/removal scriptlets or triggers.
 
@@ -186,8 +179,7 @@ quitting the application stops it.
 Local transcription/translation engines ship with the packages: Whisper, llama.cpp,
 and Piper with ONNX Runtime and eSpeak data. Users do not separately install
 Python, Ollama, compilers, or AI services. Models are prepared on first selection;
-package installation neither downloads models nor starts inference. Needle voice
-commands have their own setup described in `docs/voice-commands.md`. Cloud keys,
+package installation neither downloads models nor starts inference. Cloud keys,
 personal configuration, and recordings never enter the package.
 
 ## Remove

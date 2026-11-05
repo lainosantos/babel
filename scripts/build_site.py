@@ -33,8 +33,6 @@ GROUPS = [
     ("Capture and automation", [
         ("docs/transcription.md", "transcription", "Transcription", "Original-language text, timestamps, and speaker metadata."),
         ("docs/recording.md", "recording", "Recording", "Mixed originals, file formats, and recording limits."),
-        ("docs/voice-commands.md", "voice-commands", "Voice commands", "Wake names, local recognition, Needle 3, and feedback."),
-        ("docs/mcp.md", "mcp", "MCP integrations", "HTTP and stdio tools with supported authentication."),
     ]),
     ("Development", [
         ("docs/architecture.md", "architecture", "Architecture", "Routing isolation, memory safety, and audio processing."),
@@ -51,7 +49,6 @@ GROUPS = [
         ("ui/README.md", "dashboard", "Dashboard development", "The local interface and its regression tests."),
         ("ui/DESIGN.md", "dashboard-design", "Dashboard design", "Interface design principles and structure."),
         ("assets/README.md", "assets", "Brand assets", "The Babel mark and tray icon assets."),
-        ("assets/fonts/README.md", "fonts", "Fonts", "Bundled typography and licensing."),
     ]),
 ]
 PAGES = [page for _, pages in GROUPS for page in pages]

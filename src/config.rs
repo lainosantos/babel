@@ -110,7 +110,6 @@ pub const GEMINI_ENDPOINT: &str = "wss://generativelanguage.googleapis.com/ws/go
 pub struct AppConfig {
     pub version: u32,
     pub interface: InterfaceConfig,
-    pub agent: crate::commands::AgentConfig,
     pub providers: ProviderProfiles,
     pub local_runtime: LocalRuntimeConfig,
     pub audio: AudioConfig,
@@ -554,7 +553,6 @@ impl Default for AppConfig {
         Self {
             version: 1,
             interface: InterfaceConfig::default(),
-            agent: crate::commands::AgentConfig::default(),
             providers: ProviderProfiles::default(),
             local_runtime: LocalRuntimeConfig::default(),
             audio: AudioConfig::default(),
@@ -631,28 +629,6 @@ fn restore_native_cascade(document: &mut toml::Value) -> bool {
             providers.entry("whisper".to_owned()).or_insert_with(|| {
                 toml::Value::try_from(WhisperSttConfig::default()).expect("Whisper defaults")
             });
-            changed = true;
-        }
-    }
-    if let Some(agent) = document
-        .get_mut("agent")
-        .and_then(toml::Value::as_table_mut)
-    {
-        let language = agent.get("seamless_language").cloned();
-        let keys: Vec<_> = agent
-            .keys()
-            .filter(|key| key.starts_with("seamless_"))
-            .cloned()
-            .collect();
-        if !keys.is_empty() {
-            for key in keys {
-                agent.remove(&key);
-            }
-            agent.insert("whisper_endpoint".into(), "auto".into());
-            agent.insert("whisper_model".into(), DEFAULT_WHISPER_MODEL.into());
-            if let Some(language) = language {
-                agent.insert("whisper_language".into(), language);
-            }
             changed = true;
         }
     }
@@ -893,7 +869,6 @@ impl AppConfig {
     pub fn validate(&self) -> Result<()> {
         let microphone = self.effective_microphone();
         self.interface.validate()?;
-        self.agent.validate()?;
         self.local_runtime.validate()?;
         self.history.validate()?;
         self.recording.mix.validate()?;
@@ -1244,7 +1219,6 @@ mod tests {
         expected.transcription.speaker_recognition.provider = "whisper".into();
         expected.transcription.microphone_recognition.language = "pt-BR".into();
         expected.transcription.speaker_recognition.language = "en-US".into();
-        expected.agent.whisper_language = "pt-BR".into();
         expected.local_runtime.threads = 4;
         let mut document = toml::Value::try_from(&expected).unwrap();
         document["providers"]["local"] = toml::toml! {
@@ -1264,17 +1238,6 @@ mod tests {
         let mut removed = providers.remove("whisper").unwrap();
         removed["model"] = "seamless-streaming".into();
         providers.insert("seamless".into(), removed);
-        let agent = document["agent"].as_table_mut().unwrap();
-        for key in [
-            "whisper_endpoint",
-            "whisper_model",
-            "whisper_language",
-            "whisper_api_key_env",
-        ] {
-            agent.remove(key);
-        }
-        agent.insert("seamless_endpoint".into(), "auto".into());
-        agent.insert("seamless_language".into(), "pt-BR".into());
         fs::write(&path, toml::to_string(&document).unwrap()).unwrap();
         let restored = AppConfig::load(&path).unwrap();
         assert_eq!(

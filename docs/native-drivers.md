@@ -2,7 +2,7 @@
 
 Babel's own drivers live in `native/macos` and `native/windows`. They create
 selectable devices; the Rust application remains responsible for physical audio
-capture, translation, transcription, recording, MCP, the dashboard and the tray.
+capture, translation, transcription, recording, the dashboard and the tray.
 The drivers' audio path contains no AI, networking, API keys or file recording.
 
 **Status:** source code, build and installation are separate for each platform.

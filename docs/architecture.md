@@ -90,8 +90,7 @@ Capture still requires an active external client. Natural app EOF therefore
 preserves the translated tail when Babel remains the default output. Losing that
 output selection or revoking an active microphone selection interrupts playback,
 reports incomplete processing, and preserves originals for recovery. The physical
-microphone is not captured, microphone
-translation is bypassed, and speaker audio never reaches the command listener.
+microphone is not captured and microphone translation is bypassed.
 Stored physical-device and provider preferences are unchanged.
 
 The original-output processing branch remains the sole owner of recording, STT
@@ -141,7 +140,7 @@ inference, speech DSP, history locking or file writing. The processing copy
 shares immutable samples through `Arc`; delivery uses `try_send`, without
 waiting for consumer capacity. The `babel-retention` executor stages originals,
 maintains history and batches encrypted writes in its own blocking pool. The
-`babel-processing` executor runs providers, transcription, commands and file
+`babel-processing` executor runs providers, transcription and file
 writers. Device-selection gates and
 start/stop supervision stay on the control executor: revoking a route does not
 require the model to accept another task.
@@ -153,7 +152,7 @@ audio. This does not reserve physical cores exclusively: SMT, other processes
 and memory bandwidth remain shared. macOS uses distinct executors and CoreAudio
 scheduling without a CPU-pinning guarantee.
 
-Managed inference/command helpers receive thread limits for known libraries.
+Managed inference helpers receive thread limits for known libraries.
 On Unix, `nice` lowers their priority when available; on Linux they inherit the
 spawning worker's CPU mask. On Windows they start without a console and below
 normal priority, but children inherit process affinity, not the worker's mask.
@@ -238,10 +237,9 @@ Reopening devices can still produce a brief gap.
 
 Across all three backends, the microphone activates when the Babel virtual
 endpoint is the system's default input or an external app explicitly uses it.
-Default selection is sufficient to open capture and allow voice commands,
-without a consuming app. Output remains conditional on an external app playing
-through its virtual endpoint; merely making it the default does not open the
-route. Babel's own streams do not activate output.
+Default selection is sufficient to open capture without a consuming app.
+Output remains conditional on an external app playing through its virtual
+endpoint. Babel's own streams do not activate output.
 
 On Linux, new Babel endpoints use float32 stereo. Updating older Babel-owned
 endpoints requires that no app is using them; otherwise installation reports
@@ -261,8 +259,8 @@ session, older finalizers, and translation recovery. Stop/Start and physical-dev
 changes reuse it, avoiding competing native inspection workers. Changing the
 configured virtual endpoints revokes the old observer and creates a replacement.
 
-When a route's activity condition disappears, its supervisor cancels capture,
-original playback and voice-command activation. Translated playback has a separate
+When a route's activity condition disappears, its supervisor cancels capture
+and original playback. Translated playback has a separate
 selection fence that remains active while translation owns the output. Losing the relevant
 OS output selection, an inspection failure, or a changed selection epoch interrupts
 translation and fences queued playback; originals remain available for automatic

@@ -1,8 +1,5 @@
 mod activity;
-mod agent;
-mod command_tools;
 mod history;
-mod notifications;
 mod recognition;
 mod recovery;
 mod resilience;
@@ -143,15 +140,8 @@ impl RouteMetrics {
             .unwrap_or_else(|e| e.into_inner())
             .recovery_notice = Some(notice);
     }
-    fn for_configuration(
-        config: &AppConfig,
-        commands: &Arc<crate::commands::CommandService>,
-    ) -> (Arc<Self>, Arc<Self>) {
+    fn for_configuration(config: &AppConfig) -> (Arc<Self>, Arc<Self>) {
         if config.microphone_uses_speaker() {
-            // No physical microphone is captured in this mode. A speaker
-            // original can never acquire the command listener's capture tap.
-            let scope = commands.begin_capture_scope();
-            commands.set_microphone_active_scoped(false, scope);
             let source = audio::mirror::Source::new();
             let after_translation =
                 config.audio.microphone_source == crate::config::MicrophoneSource::SpeakerOutput;
@@ -167,17 +157,7 @@ impl RouteMetrics {
                 }),
             )
         } else {
-            (Arc::new(Self::with_commands(commands)), Arc::default())
-        }
-    }
-
-    fn with_commands(commands: &Arc<crate::commands::CommandService>) -> Self {
-        Self {
-            audio: Arc::new(AudioStats {
-                command_tap: Some(Arc::downgrade(commands)),
-                ..Default::default()
-            }),
-            ..Default::default()
+            (Arc::default(), Arc::default())
         }
     }
     fn mirror_source(&self) -> Option<Arc<audio::mirror::Source>> {
@@ -373,8 +353,6 @@ struct State {
     config: AppConfig,
     history: Arc<crate::history::HistoryBuffer>,
     config_revision: u64,
-    agent_revision: u64,
-    commands: Arc<crate::commands::CommandService>,
     running: Option<Running>,
     finalizing: Vec<Running>,
     last: EngineStatus,
@@ -443,10 +421,6 @@ pub struct Controller {
     path: PathBuf,
     state: Arc<Mutex<State>>,
     monitor_cancel: CancellationToken,
-    commands: Arc<crate::commands::CommandService>,
-    mcp: Arc<crate::mcp_client::McpClient>,
-    command_tools: Arc<command_tools::AgentTools>,
-    notifications_started: std::sync::atomic::AtomicBool,
     local_runtime: Arc<crate::local_runtime::RuntimeManager>,
 }
 impl Drop for Controller {
@@ -473,31 +447,14 @@ impl Controller {
         }
         let local_runtime = crate::local_runtime::RuntimeManager::new();
         local_runtime.reconcile(&config);
-        let mcp = Arc::new(crate::mcp_client::McpClient::new());
-        let command_tools = Arc::new(command_tools::AgentTools::new(
-            mcp.clone(),
-            config.agent.integrations.clone(),
-        ));
-        let services_root = crate::config::default_path()?.with_file_name("services");
-        let commands = crate::commands::CommandService::with_services_root(
-            config.agent.clone(),
-            command_tools.clone(),
-            Some(services_root),
-        )?;
         Ok(Self {
             path,
-            commands: commands.clone(),
-            mcp,
-            command_tools,
-            notifications_started: std::sync::atomic::AtomicBool::new(false),
             local_runtime,
             monitor_cancel: CancellationToken::new(),
             state: Arc::new(Mutex::new(State {
                 history: Arc::new(crate::history::HistoryBuffer::new(&config.history)),
                 config,
                 config_revision: 0,
-                agent_revision: 0,
-                commands,
                 running: None,
                 finalizing: Vec::new(),
                 last: stopped_status(),
@@ -515,8 +472,6 @@ impl Controller {
     }
     /// Enable original-audio routing for the lifetime of the app, without AI or files.
     pub async fn enable_routing(&self) -> Result<()> {
-        self.commands.start()?;
-        self.start_command_notifications();
         let mut state = self.state.lock().await;
         state.config.validate_routing()?;
         self.local_runtime.reconcile(&state.config);
@@ -552,7 +507,6 @@ impl Controller {
         }
         let routing = stop_routing(&mut *self.state.lock().await).await;
         self.state.lock().await.endpoint_observer.take();
-        self.commands.shutdown().await;
         self.local_runtime.shutdown().await;
         session.and(routing)
     }
@@ -696,7 +650,7 @@ impl Controller {
     }
     pub async fn set_config_if_revision(
         &self,
-        mut config: AppConfig,
+        config: AppConfig,
         revision: Option<u64>,
     ) -> Result<()> {
         let mut state = self.state.lock().await;
@@ -708,9 +662,6 @@ impl Controller {
             state.running.is_none(),
             "End the session before changing settings"
         );
-        // Agent settings have their own live revision and API. An older main
-        // settings form must never overwrite a newer agent configuration.
-        config.agent = state.config.agent.clone();
         config.validate()?;
         stop_routing(&mut state).await?;
         if let Err(error) = config.save(&self.path) {
@@ -845,8 +796,6 @@ impl Controller {
         history_seconds: u32,
         revision: Option<u64>,
     ) -> Result<()> {
-        self.commands.start()?;
-        self.start_command_notifications();
         let mut state = self.state.lock().await;
         let language = crate::i18n::resolve_language(&state.config.interface.language);
         let session =
@@ -989,7 +938,7 @@ impl Controller {
         let cancel = CancellationToken::new();
         let stop_models = CancellationToken::new();
         let routes_closed = Arc::new(RoutesClosed::default());
-        let (microphone, speaker) = RouteMetrics::for_configuration(&cfg, &self.commands);
+        let (microphone, speaker) = RouteMetrics::for_configuration(&cfg);
         let usage = endpoint_usage(&mut state);
         microphone.state("waiting_for_app");
         speaker.state("waiting_for_app");
@@ -1946,24 +1895,14 @@ mod tests {
     }
 
     #[test]
-    fn speaker_mirror_modes_revoke_physical_commands_and_have_only_the_chosen_speaker_tap() {
-        let directory = tempfile::tempdir().unwrap();
-        let controller =
-            Controller::new(AppConfig::default(), directory.path().join("babel.toml")).unwrap();
+    fn speaker_mirror_modes_use_only_the_chosen_speaker_tap() {
         for source in [
             crate::config::MicrophoneSource::SpeakerOriginal,
             crate::config::MicrophoneSource::SpeakerOutput,
         ] {
-            let old_scope = controller.commands.begin_capture_scope();
-            controller
-                .commands
-                .set_microphone_active_scoped(true, old_scope);
             let mut config = AppConfig::default();
             config.audio.microphone_source = source;
-            let (microphone, speaker) =
-                RouteMetrics::for_configuration(&config, &controller.commands);
-            assert!(microphone.audio.command_tap.is_none());
-            assert!(speaker.audio.command_tap.is_none());
+            let (microphone, speaker) = RouteMetrics::for_configuration(&config);
             assert!(microphone.mirror_source().is_none());
             assert!(speaker.mirror_source().is_some());
             assert_eq!(
@@ -1974,10 +1913,6 @@ mod tests {
                 speaker.audio.playback_mirror.is_some(),
                 source == crate::config::MicrophoneSource::SpeakerOutput
             );
-            controller
-                .commands
-                .set_microphone_active_scoped(true, old_scope);
-            assert!(!controller.commands.status().microphone_active);
         }
     }
 
@@ -2727,13 +2662,6 @@ mod tests {
         assert_eq!(interface.language, "en");
         assert_eq!(revision, 1);
         assert_eq!(AppConfig::load(&path).unwrap().interface.language, "en");
-        let agent = crate::commands::AgentConfig {
-            wake_name: "Atlas".into(),
-            ..Default::default()
-        };
-        assert_eq!(controller.set_agent(agent, Some(0)).await.unwrap(), 1);
-        assert_eq!(controller.config_snapshot().await.1, revision);
-        assert_eq!(controller.agent_status().await.0.wake_name, "Atlas");
         {
             let state = controller.state.lock().await;
             let running = state.running.as_ref().unwrap();

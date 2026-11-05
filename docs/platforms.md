@@ -29,15 +29,6 @@ cable in both directions: that can feed translated output back into translation.
 Headphones reduce acoustic feedback between speakers and the real microphone.
 Babel does not change the system's global default devices.
 
-Voice commands have a status overlay that works even with settings closed. It
-uses a discreet native window without taking focus on Windows, macOS, and Linux
-with X11/XWayland. Wayland without XWayland and window creation failures fall
-back to system notifications. **Show desktop notifications**, in Commands,
-controls this feedback; notifications never activate capture or execute tools.
-The graphical helper ships with the packages and starts on demand. See
-[command visual feedback](voice-commands.md#visual-command-feedback) for states,
-reduced motion, privacy, and desktop limitations.
-
 ## Linux: PipeWire with pipewire-pulse or PulseAudio
 
 <a id="linux"></a>
@@ -83,8 +74,7 @@ specific application. Applications that only accept the default output require
 the user to select it manually in the system.
 
 Choosing **Babel_Microphone as the system's default microphone** opens the
-microphone route and enables configured voice commands even when no application
-is capturing audio. An explicit capture by another application on
+microphone route even when no application is capturing audio. An explicit capture by another application on
 `babel_microphone` also opens the route. To pause it, choose the physical
 microphone as the default and stop any explicit Babel captures in applications.
 
@@ -179,8 +169,7 @@ is required.
 
 The CoreAudio monitor queries external processes using the **selected UID**,
 distinguishes capture from playback, and excludes Babel itself. Choosing Babel
-Microphone as the default macOS input opens the physical microphone route and
-enables configured voice commands even without another application's capture.
+Microphone as the default macOS input opens the physical microphone route even when no application is capturing audio.
 Explicit capture of Babel Microphone also opens the route. Selecting the
 physical microphone as default closes it only if no application still uses Babel.
 
@@ -285,8 +274,7 @@ Babel's control. Use **Refresh devices** after installation and select the
 endpoints listed above.
 
 The monitor checks the Windows default microphone and external WASAPI sessions.
-Choosing **Babel Microphone** as default opens the microphone route and enables
-configured voice commands even without an application capturing audio. Explicit
+Choosing **Babel Microphone** as default opens the microphone route even when no application is capturing audio. Explicit
 capture of Babel Microphone also opens the route. Selecting the physical
 microphone as default closes it only if no application still uses Babel.
 

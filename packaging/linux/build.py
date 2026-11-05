@@ -24,21 +24,11 @@ sys.path.insert(0, str(PROJECT / "scripts"))
 import local_runtime_packaging as runtime_package
 
 PACKAGE = "babel-audio"
-BINARIES = ("babel", "babel-tray", "babel-feedback")
+BINARIES = ("babel", "babel-tray")
 VERSION = re.compile(r"[0-9]+\.[0-9]+\.[0-9]+(?:-[A-Za-z0-9][A-Za-z0-9.-]*)?(?:\+[A-Za-z0-9][A-Za-z0-9.-]*)?")
 LIBC_SONAMES = {
     "libc.so.6", "libm.so.6", "libpthread.so.0", "libdl.so.2",
     "librt.so.1", "libresolv.so.2", "ld-linux-x86-64.so.2",
-}
-# winit/softbuffer use dlopen for these native desktop runtimes. They must be
-# declared even though ELF NEEDED cannot discover them from babel-feedback.
-NATIVE_FEEDBACK_LIBRARIES = {
-    "libX11.so.6": "libx11-6",
-    "libX11-xcb.so.1": "libx11-xcb1",
-    "libXcursor.so.1": "libxcursor1",
-    "libXi.so.6": "libxi6",
-    "libxkbcommon.so.0": "libxkbcommon0",
-    "libxkbcommon-x11.so.0": "libxkbcommon-x11-0",
 }
 
 
@@ -80,7 +70,7 @@ def elf_runtime(path: Path, bundled: set[str] | None = None) -> tuple[set[str], 
     if struct.unpack_from("<H", header, 16)[0] not in (2, 3):
         raise ValueError(f"{path}: not an ELF executable or PIE")
     needed = set(re.findall(r"Shared library: \[([^]]+)\]", run("readelf", "--wide", "--dynamic", path).stdout))
-    unknown = needed - LIBC_SONAMES - {"libgcc_s.so.1", "libstdc++.so.6"} - set(NATIVE_FEEDBACK_LIBRARIES) - (bundled or set())
+    unknown = needed - LIBC_SONAMES - {"libgcc_s.so.1", "libstdc++.so.6"} - (bundled or set())
     if unknown:
         raise ValueError(f"{path}: runtime libraries need explicit package mappings: {sorted(unknown)}")
     versions = {
@@ -133,7 +123,6 @@ def stage_payload(bin_dir: Path, payload: Path, version: str, runtime_dir: Path 
     if "libstdc++.so.6" in needed:
         dependencies.append("libstdc++6 (>= 11)")
     dependencies.extend(["pulseaudio-utils", "xdg-utils", "dbus-user-session | dbus-x11"])
-    dependencies.extend(NATIVE_FEEDBACK_LIBRARIES.values())
     copy_file(HERE / "babel-launch", payload / "bin/babel-launch", 0o755)
     copy_file(HERE / "org.babel.audio.desktop", payload / "share/applications/org.babel.audio.desktop")
     copy_file(PROJECT / "assets/babel.svg", payload / "share/icons/hicolor/scalable/apps/org.babel.audio.svg")
@@ -143,7 +132,6 @@ def stage_payload(bin_dir: Path, payload: Path, version: str, runtime_dir: Path 
         rpm_requires.append("libgcc_s.so.1()(64bit)")
     if "libstdc++.so.6" in needed:
         rpm_requires.append("libstdc++.so.6()(64bit)")
-    rpm_requires.extend(f"{library}()(64bit)" for library in NATIVE_FEEDBACK_LIBRARIES)
     docs = payload / "share/doc" / PACKAGE
     for source, destination in [
         (HERE / "LICENSE", "copyright"), (HERE / "README.md", "INSTALL.md"),
@@ -154,9 +142,6 @@ def stage_payload(bin_dir: Path, payload: Path, version: str, runtime_dir: Path 
     for source in sorted((PROJECT / "docs").glob("*.md")):
         copy_file(source, docs / "docs" / source.name)
     copy_file(PROJECT / "ui/fonts/OFL.txt", docs / "licenses/Manrope-OFL.txt")
-    # Optional inference is configured independently. Ship its reviewed helper,
-    # not a Python environment, model download, or a service-starting hook.
-    copy_file(PROJECT / "scripts/needle_bridge.py", payload / "share/babel/scripts/needle_bridge.py")
     manifest = {
         "package": PACKAGE, "version": version, "architecture": "amd64",
         "license": "MIT AND GPL-3.0-or-later" if runtime_dir else "MIT", "glibc_minimum": minimum,

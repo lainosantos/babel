@@ -1,5 +1,4 @@
 //! Loopback-only control surface. A fresh bearer capability is generated on every run.
-mod agent;
 mod instance;
 pub use instance::InstanceGuard;
 use std::sync::Arc;
@@ -144,11 +143,7 @@ fn router(state: DashboardState) -> Router {
         .route("/credentials", get(credential_status).post(set_credential))
         .route("/credentials/clear", post(clear_credential))
         .route("/autostart", get(autostart_status).post(set_autostart))
-        .merge(agent::routes())
-        .route_layer(middleware::from_fn_with_state(state.clone(), authorize))
-        // OAuth redirects cannot carry the dashboard bearer. PKCE + one-use
-        // state protect this single callback; host/origin checks still apply.
-        .route("/agent/oauth/callback", get(agent::oauth_callback));
+        .route_layer(middleware::from_fn_with_state(state.clone(), authorize));
 
     Router::new()
         .route(
@@ -179,33 +174,6 @@ fn router(state: DashboardState) -> Router {
                 (
                     [(header::CONTENT_TYPE, "text/javascript; charset=utf-8")],
                     include_str!("../ui/i18n.js"),
-                )
-            }),
-        )
-        .route(
-            "/agent.js",
-            get(|| async {
-                (
-                    [(header::CONTENT_TYPE, "text/javascript; charset=utf-8")],
-                    include_str!("../ui/agent.js"),
-                )
-            }),
-        )
-        .route(
-            "/help/voice-commands",
-            get(|| async {
-                (
-                    [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
-                    include_str!("../docs/voice-commands.md"),
-                )
-            }),
-        )
-        .route(
-            "/help/mcp",
-            get(|| async {
-                (
-                    [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
-                    include_str!("../docs/mcp.md"),
                 )
             }),
         )

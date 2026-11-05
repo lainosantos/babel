@@ -41,7 +41,7 @@ fastest or attribute the reported translation delay to Gemini.
 ## Original audio through a complete Babel route
 
 A second, isolated Babel instance ran three trials with translation,
-transcription, recording, history and voice commands disabled. The dashboard
+transcription, recording and history disabled. The dashboard
 probe fed 6.304 seconds of locally synthesized Portuguese speech to its owned
 input sink and observed both the input and output monitors. The normal user's
 Babel instance and settings were not changed.
@@ -72,7 +72,7 @@ The Gemini comparison ran through the existing application with a temporary
 API key held only in Babel's memory. No key was exported to the harness or its
 audio child processes. The microphone route used only synthetic speech and
 owned null sinks; the speaker route stayed isolated and silent. Transcription,
-recording, history and voice commands were disabled for the trials. Original
+recording and history were disabled for the trials. Original
 configuration was restored after each model's run.
 
 ### Same-fixture Gemini comparison

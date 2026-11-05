@@ -121,7 +121,7 @@ pub(super) async fn maintain_routing(state: &mut State) {
     let (mic_virtual, mic_virtual_rx) = watch::channel(cfg.microphone.playback_device.clone());
     let (speaker_virtual, speaker_virtual_rx) = watch::channel(cfg.speaker.capture_device.clone());
     let (output, output_rx) = watch::channel(cfg.speaker.playback_device.clone());
-    let (microphone, speaker) = RouteMetrics::for_configuration(cfg, &state.commands);
+    let (microphone, speaker) = RouteMetrics::for_configuration(cfg);
     let mirror_source = speaker.mirror_source();
     let cancel = CancellationToken::new();
     let mut jobs = JoinSet::new();

@@ -25,7 +25,6 @@ Before uninstalling Babel, remove its audio driver using uninstall.ps1 from an
 Administrator PowerShell. The application uninstaller checks that no Babel driver
 device remains. It preserves the program/helper files if removal still needs
 attention, and never removes a driver before the uninstall confirmation dialog.
-Models for local voice commands and API keys are configured separately; no model,
-API key, transcript or user recording is included in this installer.
+The installer excludes model weights, API keys, transcripts and recordings.
 
-See docs\native-drivers.md, docs\platforms.md and docs\voice-commands.md.
+See docs\native-drivers.md and docs\platforms.md.

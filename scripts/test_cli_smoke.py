@@ -57,7 +57,6 @@ def smoke(binary, report):
         data = tomllib.loads(config.read_text(encoding="utf-8"))
         require(data["version"] == 1, "Unexpected config schema")
         require(data["interface"]["language"] == "system", "Default language does not follow the host")
-        require(data["agent"]["whisper_endpoint"] == "auto" and data["agent"]["needle_endpoint"] == "auto", "Voice services must discover their bound ports instead of assuming defaults")
         base = Path(data["files"]["base_path"])
         require(base.is_absolute(), "Default storage base is not absolute")
         require(base == Path.home() / "Babel", "Default storage base does not use the user's Babel folder")

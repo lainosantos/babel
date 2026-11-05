@@ -59,6 +59,7 @@ class AudioSandbox:
             PIPEWIRE_REMOTE="pipewire-0",
             PATH=str(tools) + os.pathsep + os.environ.get("PATH", ""),
             LC_ALL="C.UTF-8",
+            GIO_USE_VFS="local",
         )
         # Do not inherit config-file overrides pointing at the real desktop.
         for name in ["PIPEWIRE_CONFIG_DIR", "PIPEWIRE_CONFIG_NAME", "WIREPLUMBER_CONFIG_DIR"]:
@@ -190,9 +191,7 @@ class Babel:
     def __init__(self, sandbox, executable):
         self.sandbox = sandbox
         config = sandbox.root / "babel.toml"
-        config.write_text('''[agent]
-enabled = false
-[microphone]
+        config.write_text('''[microphone]
 enabled = false
 capture_device = "babel_test_first.monitor"
 playback_device = "babel_mic_bus"
@@ -292,7 +291,7 @@ def check_babel(sandbox, executable, snapshot):
     print("PASS: independent routes follow external clients; selecting physical output releases Babel.")
     assert not (sandbox.root / "recordings").exists()
     assert not (sandbox.root / "transcripts").exists()
-    print("PASS: idle history retains only selected originals in RAM and creates no session files.")
+    print("PASS: idle history retains only selected originals and creates no session files.")
     check_default_microphone(sandbox, babel, mic_targets)
 
     config = babel.api("config")
@@ -321,6 +320,7 @@ def check_babel(sandbox, executable, snapshot):
     sandbox.stop(application)
     babel.expect_routes(set())
     babel.api("stop", "POST")
+    wait_for(lambda: not babel.api("status")["finalizing"], "recording finalized after Stop")
     recordings = list((sandbox.root / "recordings").glob("*.wav"))
     assert len(recordings) == 1, "Session must retain one merged audio file"
     with wave.open(str(recordings[0])) as recording:
@@ -334,8 +334,6 @@ def check_default_microphone(sandbox, babel, mic_targets):
     """A default virtual mic activates routing without requiring a capture app."""
     sandbox.pactl("set-default-source", "babel_microphone")
     babel.expect_routes(mic_targets)
-    wait_for(lambda: babel.api("agent/status")["microphone_active"],
-             "default microphone feeds the command tap without a capture app")
     status = babel.api("status")
     assert not status["running"]
     assert status["microphone"]["state"] == "passthrough"
@@ -346,7 +344,6 @@ def check_default_microphone(sandbox, babel, mic_targets):
     babel.expect_routes(mic_targets)
     sandbox.stop(microphone_app)
     babel.expect_routes(mic_targets)
-    assert babel.api("agent/status")["microphone_active"]
     assert original_pids == {s["properties"]["application.process.id"] for s in sandbox.own_streams()}, \
         "Closing a capture app interrupted the still-selected default microphone"
 
@@ -354,18 +351,14 @@ def check_default_microphone(sandbox, babel, mic_targets):
     babel.expect_routes(mic_targets)
     sandbox.pactl("set-default-source", "babel_test_other.monitor")
     babel.expect_routes(mic_targets)
-    assert babel.api("agent/status")["microphone_active"], \
-        "Changing the default interrupted an app explicitly using Babel"
     sandbox.stop(microphone_app)
     babel.expect_routes(set())
-    wait_for(lambda: not babel.api("agent/status")["microphone_active"],
-             "physical default and no Babel capture app release the command tap")
     retained = babel.api("status")["history"]["microphone_secs"]
     time.sleep(0.3)
     assert babel.api("status")["history"]["microphone_secs"] == retained
     assert not (sandbox.root / "recordings").exists()
     assert not (sandbox.root / "transcripts").exists()
-    print("PASS: system-default mic routes and activates the command tap without an app; physical selection releases it unless explicitly used.")
+    print("PASS: the default virtual microphone routes without an app and stays routed while explicitly selected by an app.")
 
 
 def check_history_recording(sandbox, babel, speaker_targets, previous_recording):
@@ -430,6 +423,7 @@ def check_history_recording(sandbox, babel, speaker_targets, previous_recording)
     assert babel.api("status")["session_id"] == session_id
     babel.api("stop", "POST")
     elapsed = time.monotonic() - started
+    wait_for(lambda: not babel.api("status")["finalizing"], "recording with history finalized after Stop")
     status = babel.api("status")
     assert not status["running"] and not status["last_error"], status
     sandbox.stop(application)

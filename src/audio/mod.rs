@@ -127,7 +127,6 @@ pub struct AudioStats {
     /// Shared-mode translated output has separate ownership from original routing.
     pub translated_playback: bool,
     /// Used only by the capture control worker, never by native audio callbacks.
-    pub command_tap: Option<std::sync::Weak<crate::commands::CommandService>>,
     /// Shares speaker originals with a playback-only microphone route. Never
     /// populated for physical microphone capture or used by device callbacks.
     pub(crate) original_mirror: Option<std::sync::Arc<mirror::Source>>,
@@ -138,7 +137,7 @@ pub struct AudioStats {
     pub dropped_frames: AtomicU64,
     /// Captured blocks discarded before original sidecars could retain them.
     /// Native callbacks may contain multiple logical frames. Playback freshness
-    /// drops and auxiliary command/mirror copies must never increment this.
+    /// drops and auxiliary mirror copies must never increment this.
     pub capture_lost_frames: AtomicU64,
     pub processing_dropped_frames: AtomicU64,
     pub sidecar_dropped_frames: AtomicU64,

@@ -4,8 +4,7 @@
 in. It is **off by default**. On launch, Babel routes original audio between
 configured devices. The microphone activates when Babel is the system default
 microphone or an app explicitly uses its virtual microphone. Output activates
-only while an app sends audio to Babel. Enabled voice commands can listen even
-without a calling app, including immediately after login. Translation,
+only while an app sends audio to Babel. Translation,
 transcription and recording wait for **Start session**; original routing sends
 no audio to providers and creates no files. Autostart does not install virtual
 devices either.
@@ -67,7 +66,7 @@ filesystem. Run these commands from the repository root:
 set -e
 babel_build_dir=$(mktemp -d)
 cargo build --release --locked --bins --target-dir "$babel_build_dir"
-for binary in babel babel-tray babel-feedback; do
+for binary in babel babel-tray; do
     staged=$(mktemp "target/release/.${binary}.XXXXXX")
     install -m 755 "$babel_build_dir/release/$binary" "$staged"
     mv -fT -- "$staged" "target/release/$binary"

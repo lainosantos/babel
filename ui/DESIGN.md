@@ -1,8 +1,8 @@
 # Babel interface direction
 
 The product is a live audio workspace: two independent routes, an optional
-session that creates files, provider and voice configuration, and a microphone
-command agent. The interface must make those separate lifecycles understandable.
+session that creates files, and provider and voice configuration. The interface
+keeps these lifecycles separate.
 
 ## Design tokens
 
@@ -17,7 +17,7 @@ command agent. The interface must make those separate lifecycles understandable.
 
 ## Layout decision
 
-Use a stable navigation rail and six views organized by function. The session transport
+Use a stable navigation rail and five views organized by function. The session transport
 stays available while changing views. All controls stay mounted to preserve
 drafts, selected files, independent revisions and authentication state.
 
@@ -62,7 +62,7 @@ and recent history remains a separate, explicit opt-in.
 The functional separation makes always-on routing distinct from optional
 translation, transcription and recording. Keep one canonical control for every
 setting, and use focused shortcuts where providers or storage are shared. Live
-meters and the persistent session transport retain context across all six views.
+meters and the persistent session transport retain context across all five views.
 Blue and teal distinguish the two audio paths; they do not imply enabled state.
 Playback/routing/session state always has a text label as well.
 
@@ -72,7 +72,6 @@ Playback/routing/session state always has a text label as well.
 - Never recreate form nodes when changing views or language.
 - Reveal the appropriate view and disclosure when a field fails validation.
 - Migrate stored view names (`audio`, `voices`, `files`) to the corresponding new views.
-- Keep agent changes independent from audio-session settings.
 - Match the actual host OS and retain both interface languages.
 - Respect reduced motion and use no continuously animated decoration.
 - Bundle typography with the app; no external font request at runtime.
@@ -80,35 +79,13 @@ Playback/routing/session state always has a text label as well.
 The Manrope font and its OFL license are distributed in `ui/fonts` from the
 [Google Fonts source](https://github.com/google/fonts/tree/main/ofl/manrope).
 
-## Command feedback
-
-Use the actual Babel B mark in a compact notification above the session dock.
-The mark carries one restrained listening wave or processing orbit; the rest of
-the workspace stays still. Success uses a small teal check, failure a muted coral
-exclamation. Both retain a readable text state. Reduced-motion preferences disable
-all logo motion. No notification opens a dialog, moves keyboard focus or plays a
-sound.
-
-Keep the spoken command, tool name, result and technical error inside a disclosure
-that starts closed for every activation. The polite live region announces only
-the phase and generic hint. The Commands page retains its independent current
-listener state while a completed command remains briefly visible. Desktop feedback
-and the dashboard share the same bounded backend visual events, including commands
-that finish between dashboard polls. Opening settings does not replay past results.
-
-Dashboard completion dismisses after five seconds; failure after nine. Hover,
-keyboard focus and an expanded disclosure pause that timeout. A new activation
-replaces the previous notification and cancels its timeout. Dismiss and Escape
-hide the whole activation, including later updates. Local service setup errors
-remain contextual on Commands rather than appearing as failed spoken commands.
-
 ## Credential lifetimes and session duration
 
 Use two left-aligned credential rows for each reference: temporary above saved,
 with independent password drafts and remove buttons. Keep existing white/slate
 surfaces and Manrope; lifetime labels, active-source status and the saved file
 path explain precedence without returning either value. These controls use the
-same layout in translation, transcription and Commands. The session dock shows
+same layout in translation and transcription. The session dock shows
 a quiet tabular HH:MM:SS counter from backend elapsed time, retained across views
 and page reloads, hidden when the session is stopped or status is unavailable.
 

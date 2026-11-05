@@ -321,9 +321,6 @@ def run_trial(api, devices, pcm, args, index, revision, active):
         _, observed_revision = api.api("config")
         if observed_revision != revision:
             raise ProbeError("Settings changed before the next trial; stopping instead of overriding them")
-        agent, _ = api.api("agent")
-        if agent["enabled"]:
-            raise ProbeError("Voice commands were enabled outside the probe; stop testing before playing synthetic speech")
         if args.capture_output:
             path = args.capture_output / f"{args.provider}-{'routing' if args.routing_only else 'translation'}-{index}-{uuid.uuid4().hex[:8]}.wav"
             writer = wave.open(str(path), "wb")
@@ -442,14 +439,6 @@ def stop_owned_session(api, active):
     active.clear()
 
 
-def restore_agent(api, original, applied):
-    current, revision = api.api("agent")
-    restore, conflicts = restore_patch(original, applied, current)
-    if restore != current:
-        api.api("agent", "PUT", restore, revision, timeout=40)
-    return not conflicts
-
-
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--speech", type=Path, required=True, help="Explicitly selected synthetic mono PCM16/16 kHz WAV")
@@ -487,11 +476,6 @@ def main():
     original, revision = api.api("config")
     if not revision:
         raise ProbeError("The dashboard does not support configuration revision checks")
-    agent_original, agent_revision = api.api("agent")
-    if not agent_revision:
-        raise ProbeError("The dashboard does not support independent command configuration revisions")
-    agent_applied = copy.deepcopy(agent_original)
-    agent_applied["enabled"] = False
     if not args.routing_only:
         profile = original["providers"][args.credential_provider or args.provider]
         presence, _ = api.api("credentials?" + urlencode({"api_key_env": profile["api_key_env"]}))
@@ -528,17 +512,11 @@ def main():
     applied["speaker"].update(enabled=False, capture_device=devices.speaker_source + ".monitor",
                               playback_device=devices.speaker_destination)
     applied["audio"]["microphone_source"] = "physical_microphone"
-    for key in ("transcription", "recording", "history", "agent"):
+    for key in ("transcription", "recording", "history"):
         applied[key]["enabled"] = False
     active = {}
     attempted = False
-    agent_attempted = False
     try:
-        # /config intentionally ignores agent settings. Its independent API is
-        # required to ensure synthetic speech can never trigger an MCP tool.
-        if agent_original["enabled"]:
-            agent_attempted = True
-            api.api("agent", "PUT", agent_applied, agent_revision, timeout=40)
         devices.start()
         api.ensure_idle()
         attempted = True
@@ -570,14 +548,6 @@ def main():
             devices.close()
         except ProbeError as error:
             report["errors"].append(str(error))
-        if agent_attempted:
-            try:
-                if not restore_agent(api, agent_original, agent_applied):
-                    report["configuration_restored"] = False
-                    report["errors"].append("Concurrent voice command settings were preserved; review settings before resuming")
-            except ProbeError as error:
-                report["configuration_restored"] = False
-                report["errors"].append("Voice command configuration cleanup: " + str(error))
     report["ok"] = bool(report["trials"]) and not report["errors"] and all(not trial["errors"] for trial in report["trials"])
     encoded = json.dumps(report, indent=2) + "\n"
     if args.json:

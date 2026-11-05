@@ -254,9 +254,9 @@ test('checking retained work after Stop does not delay starting another session'
   assert.equal(p.byId('finalizing-card').hidden, false);
 });
 
-test('the real dashboard separates routing, translation, transcription and recording into six workspace destinations', async t => {
+test('the real dashboard exposes five workspace destinations', async t => {
   const p = await page(t);
-  const views = ['routing', 'translation', 'transcription', 'recording', 'commands', 'settings'];
+  const views = ['routing', 'translation', 'transcription', 'recording', 'settings'];
   assert.deepEqual([...p.doc.querySelectorAll('.nav-item[data-workspace-target]')].map(node => node.dataset.workspaceTarget), views);
   assert.deepEqual([...new Set([...p.doc.querySelectorAll('[data-workspace-panel]')].map(node => node.dataset.workspacePanel))].sort(), [...views].sort());
   const groups = {
@@ -302,7 +302,7 @@ test('moving between feature pages preserves independent drafts and live transcr
   const originalNodes = preservedIds.map(id => p.byId(id));
   p.routeStatus('microphone', { last_input_transcript: 'Texto original do microfone.' });
   await p.poll();
-  for (const view of ['routing', 'settings', 'translation', 'commands', 'transcription', 'recording']) {
+  for (const view of ['routing', 'settings', 'translation', 'transcription', 'recording']) {
     p.byId(`nav-${view}`).click();
     assert.equal(p.window.BabelWorkspace.current, view);
     assert.equal([...p.doc.querySelectorAll('[data-workspace-panel]')].every(panel => panel.hidden === (panel.dataset.workspacePanel !== view)), true);
@@ -354,7 +354,7 @@ test('shared file settings keep the same draft preview after visiting both file 
   assert.equal(p.config().microphone.enabled, false);
   assert.equal(p.config().speaker.enabled, false);
   const lifecycleCalls = p.calls.filter(call => call.options.method === 'PUT' || ['/api/start', '/api/stop'].includes(call.path)).length;
-  for (const view of ['routing', 'translation', 'transcription', 'recording', 'commands', 'settings']) p.byId(`nav-${view}`).click();
+  for (const view of ['routing', 'translation', 'transcription', 'recording', 'settings']) p.byId(`nav-${view}`).click();
   assert.equal(p.calls.filter(call => call.options.method === 'PUT' || ['/api/start', '/api/stop'].includes(call.path)).length, lifecycleCalls);
   assert.equal(p.byId('stop').hidden, false);
   assert.equal(p.byId('files-base_path').matches(':disabled'), true);
@@ -2065,7 +2065,7 @@ test('virtual microphone source preserves the physical device and saved micropho
     assert.equal(p.byId('microphone-capture_device').disabled, false, 'the single selector remains available to change sources');
     assert.equal(p.config().microphone.capture_device, physical);
     assert.match(p.byId('microphone-source-label').textContent, /Babel Speaker.*original/);
-    assert.match(p.byId('microphone-source-hint').textContent, /voice commands are paused/);
+    assert.match(p.byId('microphone-source-hint').textContent, /Physical microphone capture is paused/);
     assert.equal(p.byId('microphone-translation-bypass').hidden, false);
     assert.equal(p.byId('microphone-translation-label').textContent, 'Paused');
     for (const id of ['microphone-enabled', 'microphone-provider', 'microphone-source_language', 'microphone-target_language', 'microphone-prompt', 'microphone-gain', 'transcription-microphone', 'stt-microphone-provider', 'stt-microphone-language', 'recording-microphone', 'recording-microphone-gain', 'recording-microphone-priority', 'recording-ducking']) assert.equal(p.byId(id).disabled, true, id);
@@ -2138,7 +2138,6 @@ test('speaker-original source skips microphone-only session features while quick
   assert.equal(p.config().recording.speaker, true);
   assert.equal(p.byId('microphone-signal').textContent, 'Original', 'bypassed microphone settings never label the original mirror as AI');
   assert.match(p.byId('microphone-signal').parentElement.getAttribute('aria-label'), /Original incoming audio from Babel Speaker/);
-  assert.equal(p.calls.some(call => call.path.startsWith('/api/agent')), false);
 });
 
 test('speaker-original source ignores microphone-only history and preserves bypassed dedicated-model instructions', async t => {
@@ -2159,7 +2158,7 @@ test('speaker-original source ignores microphone-only history and preserves bypa
   await settle(() => p.doc.documentElement.lang === 'pt' && !p.byId('interface-language').disabled);
   assert.equal(selectedMicrophoneSource(p), 'speaker_original');
   assert.equal(p.byId('microphone-translation-label').textContent, 'Pausada');
-  assert.match(p.byId('microphone-source-hint').textContent, /comandos de voz ficam pausados/);
+  assert.match(p.byId('microphone-source-hint').textContent, /A captura do microfone físico fica pausada/);
   assert.equal(p.byId('microphone-prompt').value, 'Saved instructions');
 });
 

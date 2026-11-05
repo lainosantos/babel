@@ -1,5 +1,5 @@
 //! Playback-only sharing of speaker PCM before or after translation. The speaker route remains the
-//! only capture owner; this transport has no speech, recording or command tap.
+//! only capture owner; this transport forwards playback frames.
 use std::{
     sync::{
         Arc,
@@ -339,7 +339,6 @@ mod tests {
         assert_eq!(generation, 7);
         assert!(Arc::ptr_eq(&samples, &frame.samples));
         assert_eq!(samples.as_ref(), frame.samples.as_ref());
-        assert!(stats.command_tap.is_none());
         assert_eq!(stats.captured_frames.load(Ordering::Relaxed), 1);
         cancel.cancel();
         worker.await.unwrap().unwrap();

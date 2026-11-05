@@ -48,11 +48,6 @@ options and the corresponding virtual device's use. With translation,
 transcription and recording off, original audio follows the configured physical
 route.
 
-Voice commands have another lifecycle: Whisper must remain available while the
-agent listens to an eligible Babel microphone, even without a session. Needle
-loads only to interpret a command. See [voice commands](voice-commands.md) for
-these components' CPU limits and idle unloading.
-
 ## Custom speech-to-speech provider
 
 Choose **Custom speech-to-speech** for either translation route and open its
@@ -254,8 +249,7 @@ The managed Whisper + Qwen + Piper translation pipeline does not launch Python.
 Its orchestration and Piper HTTP gateway are Rust; the inference engines use
 native C/C++ libraries. Managed Whisper and Qwen explicitly run on CPU, even
 when a bundled backend supports GPU acceleration. External services control
-their own acceleration settings. The separate Needle voice-command interpreter
-still uses its documented Python adapter.
+their own acceleration settings.
 
 Opening a configuration with the removed experimental translation-engine field
 retains the **Local** route and uses the default cascade. Select the custom

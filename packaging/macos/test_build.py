@@ -78,7 +78,7 @@ class PackagingTests(unittest.TestCase):
             BUILD.expanded_components(self.root, include_driver=False)
 
     def test_app_only_bundle_can_stage_without_a_driver_directory(self):
-        for name in ["babel", "babel-tray", "babel-feedback"]:
+        for name in ["babel", "babel-tray"]:
             self.file(f"bin/{name}", executable=True)
         bundle = BUILD.stage_bundle(self.root / "Babel.app", self.root / "bin", None, "0.1.0")
         resources = bundle / "Contents/Resources"
@@ -90,7 +90,6 @@ class PackagingTests(unittest.TestCase):
         drivers = self.root / "driver"
         self.file("bin/babel", executable=True)
         self.file("bin/babel-tray", executable=True)
-        self.file("bin/babel-feedback", executable=True)
         package = self.file("driver/BabelAudio.pkg", content=b"original package")
         helper = self.file("driver/uninstall.sh", content=b"#!/bin/sh\n", executable=True)
         self.file("driver/babel.toml", content=b"secret")
@@ -99,10 +98,8 @@ class PackagingTests(unittest.TestCase):
         self.assertEqual((resources / "drivers/macos/BabelAudio.pkg").read_bytes(), package.read_bytes())
         self.assertEqual((resources / "drivers/macos/uninstall.sh").read_bytes(), helper.read_bytes())
         self.assertTrue((resources / "drivers/macos/uninstall.sh").stat().st_mode & 0o100)
-        self.assertTrue((resources / "Documentation/voice-commands.md").is_file())
-        self.assertTrue((bundle / "Contents/MacOS/babel-feedback").is_file())
+        self.assertTrue((resources / "Documentation/local-inference.md").is_file())
         self.assertTrue((resources / "Licenses/Manrope-OFL.txt").is_file())
-        self.assertTrue((resources / "Support/scripts/patches/whisper-dynamic-port.patch").is_file())
         self.assertTrue((resources / "pt.lproj/InfoPlist.strings").is_file())
         self.assertFalse(list(bundle.rglob("babel.toml")))
         self.assertFalse(list(bundle.rglob(".tools")))

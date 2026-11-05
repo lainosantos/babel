@@ -2,7 +2,7 @@
 
 ## Dashboard navigation
 
-The dashboard separates controls into six pages:
+The dashboard separates controls into five pages:
 
 - **Routing:** choose the virtual microphone's source, the physical devices, and
   the virtual endpoints for each direction. Original audio forwarding works without starting a session.
@@ -15,7 +15,6 @@ The dashboard separates controls into six pages:
   profiles and credentials, optional timestamps, and TXT folder, and follow the
   most recently received segments.
 - **Recording:** choose original audio sources and the folder for the single WAV file.
-- **Commands:** configure microphone activation, local services, and MCP integrations.
 - **Settings:** configure the shared base folder and filename pattern, audio quality,
   virtual devices, and automatic startup.
 
@@ -102,7 +101,7 @@ Temporary and saved values are independent. Each has its own remove button:
 removing the temporary value reveals the saved value; removing the saved value
 leaves the temporary value active. The environment is always the final fallback
 and is never modified by these buttons. Profiles referencing the same name share
-both values, including command credentials.
+both values.
 
 The dashboard returns only availability, the active source and the config path;
 it never returns either secret. Ordinary settings saves and legacy migrations
@@ -113,17 +112,16 @@ user folder's inherited access permissions. Do not put keys in prompts or endpoi
 Stop the audio session before changing its credentials. `doctor` checks presence,
 not remote validity, credits, or model access.
 
-Downloaded model files default to the `models` subfolder of the same user folder;
-command engines and helper installations use its `services` subfolder. Custom
-absolute model/service folders remain supported. Application installers keep
+Downloaded model files default to the `models` subfolder of the same user folder.
+You can choose a custom absolute model folder. Application installers keep
 their shipped executables in the installation folder; user downloads and caches
 do not belong in the source checkout.
 
 Credential API writes accept `storage: "temporary"` (the backward-compatible
 default) or `storage: "permanent"` on `/api/credentials` and
-`/api/credentials/clear`; the command credential endpoints accept the same scope.
+`/api/credentials/clear`.
 A disk-write failure leaves the cached saved key unchanged. Values are excluded
-from `/api/config` and `/api/agent` payloads.
+from `/api/config` payloads.
 
 The session dock displays elapsed live session time as `HH:MM:SS`, measured by
 Babel's monotonic clock. Reloading the dashboard or changing views keeps the
@@ -144,8 +142,7 @@ content is original audio, without activating translators or creating session fi
 
 The microphone is active when **Babel is the system's default microphone**, even
 without an application capturing audio, or when an application explicitly uses
-Babel's virtual microphone. With the physical microphone selected as its source,
-this also enables voice-command listening, if enabled.
+Babel's virtual microphone.
 To pause this route, choose the physical microphone as the system default and stop
 using Babel in applications that selected it explicitly. Choosing a new default
 does not disconnect those applications.
@@ -214,8 +211,7 @@ the forwarded stream is cleared instead of replaying queued audio later.
 Translation interruptions also clear pending mirrored translated audio. These
 rules apply on Linux, macOS and Windows and also work without a session.
 
-Neither speaker-source mode captures the physical microphone or listens for
-voice commands.
+Neither speaker-source mode captures the physical microphone.
 They do not create a second microphone copy for recording, transcription or
 recent-audio history. To save or transcribe the incoming original, select
 **Original output** on the relevant page; it is processed once with that source
@@ -273,8 +269,7 @@ TXT/WAV file base. Changing the folder does not move existing models.
 releases the engines, this delay allows reuse before terminating managed processes
 and releasing RAM. Weights remain on disk (`cached`). A session loads only what
 its enabled features require; a local profile saved for a disabled feature does
-not load its model. This policy does not stop external servers and is independent
-of voice-command listening.
+not load its model. External servers manage their own lifecycle.
 
 For local translation, `whisper_endpoint`, `ollama_endpoint`, and `piper_endpoint`
 each accept `"auto"`. Managed models are Whisper (`whisper_model`: `tiny-q5_1`,

@@ -2,7 +2,6 @@
 //! installed OS components; a userspace Rust process cannot register those.
 
 use std::{
-    path::{Path, PathBuf},
     sync::{
         Arc,
         atomic::{AtomicBool, AtomicU64, Ordering},
@@ -44,6 +43,22 @@ fn virtual_name(name: &str) -> bool {
     .any(|needle| lower.contains(needle))
 }
 
+fn is_virtual_device(description: &cpal::DeviceDescription) -> bool {
+    description.device_type() == cpal::DeviceType::Virtual
+        || description.interface_type() == cpal::InterfaceType::Virtual
+        || description.driver().is_some_and(virtual_name)
+        || virtual_name(description.name())
+}
+
+pub(super) fn resolve_physical_output(id: &str) -> Result<cpal::Device> {
+    let device = resolve(id, DeviceDirection::Output)?;
+    ensure!(
+        !is_virtual_device(&device.description()?),
+        "A physical output is required for volume control"
+    );
+    Ok(device)
+}
+
 fn enumerate(direction: DeviceDirection) -> Result<Vec<(Device, cpal::Device)>> {
     let host = cpal::default_host();
     let available = match direction {
@@ -57,16 +72,11 @@ fn enumerate(direction: DeviceDirection) -> Result<Vec<(Device, cpal::Device)>> 
                 .context("reading native audio device description")?;
             let name = description.name().to_owned();
             let native_id = device.id()?.to_string();
-            let is_virtual = native_ids::babel_virtual_device(&native_id, description.driver())
-                || description.device_type() == cpal::DeviceType::Virtual
-                || description.interface_type() == cpal::InterfaceType::Virtual
-                || description.driver().is_some_and(virtual_name)
-                || virtual_name(&name);
             let id = native_ids::persistent_id(direction, &native_id);
             Ok((
                 Device {
                     id,
-                    is_virtual,
+                    is_virtual: is_virtual_device(&description),
                     name,
                     direction,
                 },
@@ -181,30 +191,12 @@ pub async fn original_format(capture: &str, _playback: &str) -> Result<(u32, u16
 pub async fn install_virtual_devices() -> Result<String> {
     #[cfg(target_os = "macos")]
     {
-        if let Some(directory) = driver_distribution(&["BabelAudio.pkg"])? {
-            bail!(
-                "The Babel Audio installer is available at {}. Open this package explicitly and follow macOS authorization. Babel has not installed any device.",
-                directory.join("BabelAudio.pkg").display()
-            );
-        }
         bail!(
             "Install BlackHole 2ch and 16ch separately, then select the devices in Babel. See the macOS routing guide in docs/platforms.md."
         );
     }
     #[cfg(target_os = "windows")]
     {
-        if let Some(directory) = driver_distribution(&[
-            "BabelAudio.inf",
-            "BabelAudio.sys",
-            "BabelAudio.cat",
-            "install.ps1",
-            "babel-driver-installer.exe",
-        ])? {
-            bail!(
-                "The Babel Audio driver package is available at {}. Follow its install.ps1 instructions with administrator authorization. Babel has not run the installer or installed any device.",
-                directory.display()
-            );
-        }
         bail!(
             "On Windows x64, install Virtual Cables and its signed USB/IP transport separately, then select two cables in Babel. See the Windows routing guide in docs/platforms.md."
         );
@@ -212,103 +204,14 @@ pub async fn install_virtual_devices() -> Result<String> {
 }
 
 pub async fn uninstall_virtual_devices() -> Result<String> {
-    #[cfg(target_os = "macos")]
-    let helper = "uninstall.sh";
-    #[cfg(target_os = "windows")]
-    let helper = "uninstall.ps1";
-    #[cfg(target_os = "macos")]
-    let required = [helper];
-    #[cfg(target_os = "windows")]
-    let required = [
-        helper,
-        "babel-driver-installer.exe",
-        "BabelAudio.inf",
-        "BabelAudio.cat",
-    ];
-    if let Some(directory) = driver_distribution(&required)? {
-        bail!(
-            "The Babel Audio removal helper is available at {}. Review and run it explicitly with administrator authorization. Babel has not run it or removed any device. Optional third-party cables remain managed by their own installers.",
-            directory.join(helper).display()
-        );
-    }
     bail!(
-        "The Babel Audio removal helper is not bundled with this application. Obtain the matching Babel driver package and follow its removal instructions in native/macos/README.md or native/windows/README.md. Optional third-party cables remain managed by their own installers. No device was removed."
+        "Remove external virtual audio devices using their own uninstall instructions. See docs/platforms.md."
     )
 }
 
-fn driver_distribution(required: &[&str]) -> Result<Option<PathBuf>> {
-    let executable = std::env::current_exe().context("locating the Babel application package")?;
-    let directory = executable
-        .parent()
-        .context("the Babel executable has no parent directory")?;
-    #[cfg(target_os = "macos")]
-    let candidates = [
-        PathBuf::from("drivers/macos"),
-        PathBuf::from("../Resources/drivers/macos"),
-        PathBuf::from("native/macos/dist"),
-        PathBuf::from("native/macos"),
-        PathBuf::from("."),
-    ];
-    #[cfg(target_os = "windows")]
-    let candidates = [
-        PathBuf::from("drivers/windows"),
-        PathBuf::from("native/windows/dist").join(if cfg!(target_arch = "aarch64") {
-            "ARM64"
-        } else {
-            "x64"
-        }),
-        PathBuf::from("native/windows"),
-        PathBuf::from("."),
-    ];
-    // These paths are fixed relative to this binary, never the launch directory
-    // or configuration data. Finding a helper only produces instructions; this
-    // code does not execute it, auto-elevate, or claim a successful installation.
-    find_distribution(directory, &candidates, required)
-}
-
-fn find_distribution(
-    base: &Path,
-    candidates: &[PathBuf],
-    required: &[&str],
-) -> Result<Option<PathBuf>> {
-    for candidate in candidates {
-        let directory = base.join(candidate);
-        if required.iter().all(|name| directory.join(name).is_file()) {
-            return directory
-                .canonicalize()
-                .context("resolving the Babel native driver package path")
-                .map(Some);
-        }
-    }
-    Ok(None)
-}
-
 #[cfg(test)]
-mod installation_tests {
+mod tests {
     use super::*;
-
-    #[test]
-    fn installation_guidance_requires_all_expected_files_from_one_package() {
-        let temp = tempfile::tempdir().unwrap();
-        let packaged = temp.path().join("drivers/test");
-        let unrelated = temp.path().join("unrelated");
-        std::fs::create_dir_all(&packaged).unwrap();
-        std::fs::create_dir_all(&unrelated).unwrap();
-        std::fs::write(packaged.join("driver.inf"), "fixture").unwrap();
-        std::fs::write(unrelated.join("driver.sys"), "fixture").unwrap();
-        let candidates = [PathBuf::from("drivers/test")];
-        let required = ["driver.inf", "driver.sys"];
-        assert!(
-            find_distribution(temp.path(), &candidates, &required)
-                .unwrap()
-                .is_none()
-        );
-        std::fs::write(packaged.join("driver.sys"), "fixture").unwrap();
-        assert_eq!(
-            find_distribution(temp.path(), &candidates, &required).unwrap(),
-            Some(packaged.canonicalize().unwrap())
-        );
-    }
 
     #[test]
     fn playback_completion_requires_the_last_frame_and_its_device_playback_time() {

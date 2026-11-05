@@ -111,7 +111,7 @@ def app_info(version):
         "LSMinimumSystemVersion": MINIMUM_MACOS,
         "LSUIElement": True,
         "NSHighResolutionCapable": True,
-        "NSMicrophoneUsageDescription": "Babel uses your microphone to route audio, translate speech and listen for enabled voice commands.",
+        "NSMicrophoneUsageDescription": "Babel uses your microphone to route audio, translate and transcribe speech, and record sessions.",
     }
 
 
@@ -126,7 +126,7 @@ def stage_bundle(destination, binaries, driver_directory, version, runtime_dir=N
     contents = destination / "Contents"
     resources = contents / "Resources"
     resources.mkdir(parents=True)
-    for name in ["babel", "babel-tray", "babel-feedback"]:
+    for name in ["babel", "babel-tray"]:
         copy_file(binaries / name, contents / "MacOS" / name, executable=True)
     with (contents / "Info.plist").open("wb") as handle:
         plistlib.dump(app_info(version), handle)
@@ -143,10 +143,6 @@ def stage_bundle(destination, binaries, driver_directory, version, runtime_dir=N
         copy_file(source, resources / "Documentation" / source.name)
     copy_file(HERE / instructions_name(driver_directory), resources / "INSTALLATION.txt")
     copy_file(ROOT / "ui/fonts/OFL.txt", resources / "Licenses/Manrope-OFL.txt")
-    # These are inert source/support files. Users copy them to a writable service
-    # directory before explicitly installing helpers; the signed bundle is immutable.
-    for relative in ["setup_whisper.py", "needle_bridge.py", "patches/whisper-dynamic-port.patch"]:
-        copy_file(ROOT / "scripts" / relative, resources / "Support" / "scripts" / relative)
     if runtime_dir is not None:
         runtime_package.stage(runtime_dir, resources / "local-runtime", "macos", ["aarch64" if arch == "arm64" else arch for arch in sorted(arches)])
     return destination
@@ -249,7 +245,7 @@ def check_output_destination(destination, bundle=False):
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--runtime-dir", type=Path, required=True)
-    parser.add_argument("--bin-dir", type=Path, required=True, help="prebuilt executable babel, babel-tray and babel-feedback")
+    parser.add_argument("--bin-dir", type=Path, required=True, help="prebuilt executable babel and babel-tray")
     parser.add_argument("--driver-dir", type=Path, help="include an optional Babel HAL driver package")
     parser.add_argument("--output", type=Path, default=HERE / "dist")
     parser.add_argument("--version", type=validate_version, default=root_version())
@@ -272,7 +268,7 @@ def main(argv=None):
     binaries = args.bin_dir.resolve()
     driver_directory = args.driver_dir.resolve() if args.driver_dir else None
     arches = ARCHES[args.arch]
-    for name in ["babel", "babel-tray", "babel-feedback"]:
+    for name in ["babel", "babel-tray"]:
         validate_macho(binaries / name, arches, "EXECUTE")
     if driver_directory is not None:
         regular_file(driver_directory / "BabelAudio.pkg")
@@ -324,7 +320,6 @@ def main(argv=None):
                 if macho:
                     run([*sign, binary])
             runtime_package.rehash(runtime)
-        run([*sign, app / "Contents/MacOS/babel-feedback"])
         run([*sign, "--entitlements", entitlements, app / "Contents/MacOS/babel"])
         run([*sign, "--entitlements", entitlements, app])
         run(["codesign", "--verify", "--deep", "--strict", "--verbose=2", app])
@@ -359,7 +354,7 @@ def main(argv=None):
         packages = expanded_components(expanded, driver_directory is not None)
         installed_app = validate_payload(packages[APP_PACKAGE_ID], APP_PATH, APP_PACKAGE_ID)
         verify_matching_files(app, installed_app, ["Contents/Info.plist", "Contents/MacOS/babel",
-            "Contents/MacOS/babel-tray", "Contents/MacOS/babel-feedback"])
+            "Contents/MacOS/babel-tray"])
         for runtime in (installed_app / "Contents/Resources/local-runtime").iterdir():
             arch = runtime.name.removeprefix("macos-")
             runtime_package.validate(runtime, "macos", arch)

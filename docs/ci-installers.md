@@ -106,10 +106,11 @@ Windows x64 and ARM64 each run their own runtime-to-installer pipeline, so a
 failure or delay in one architecture does not block packaging the other.
 
 Intermediate artifacts are named `babel-local-runtime-<system>-<architecture>`.
-Each packager receives only its system's payloads and verifies architecture,
-applicable permissions and hashes. Selecting a local provider in the installed
-app therefore needs no Python, Ollama, CMake or manual server installation;
-it only needs to download weights that are missing during initial preparation.
+Each packager receives its system's payloads and verifies architecture,
+applicable permissions and hashes. Users can install and run Babel on Linux,
+macOS and Windows without Python. Local providers use bundled native engines
+and download missing weights during initial preparation. The build scripts
+included in the engine source bundle are for rebuilding the engines.
 
 ## What each build checks
 

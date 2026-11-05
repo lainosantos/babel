@@ -105,21 +105,6 @@ class LatencyProbeTests(unittest.TestCase):
         probe.stop_owned_session(api, {"name": "probe-unique"})
         self.assertEqual(api.calls, ["status", "stop"])
 
-    def test_commands_restore_uses_independent_revision_and_preserves_new_settings(self):
-        class API:
-            def __init__(self):
-                self.calls = []
-
-            def api(self, *args, **kwargs):
-                self.calls.append((args, kwargs))
-                return {"enabled": False, "wake_name": "New user name"}, '"8"'
-
-        api = API()
-        restored = probe.restore_agent(api, {"enabled": True, "wake_name": "Babel"},
-                                       {"enabled": False, "wake_name": "Babel"})
-        self.assertTrue(restored)
-        self.assertEqual(api.calls[1][0], ("agent", "PUT", {"enabled": True, "wake_name": "New user name"}, '"8"'))
-
     def test_fixture_requires_explicit_bounded_pcm_format(self):
         with tempfile.TemporaryDirectory() as directory:
             fixture = Path(directory) / "synthetic.wav"

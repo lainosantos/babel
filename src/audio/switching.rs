@@ -142,82 +142,6 @@ enum End {
     Failed(anyhow::Error),
 }
 
-struct CommandCaptureTap {
-    frames: Option<mpsc::Sender<OriginalFrame>>,
-    worker: Option<tokio::task::JoinHandle<()>>,
-    stats: Arc<AudioStats>,
-    cleanup: Option<(
-        Arc<crate::commands::CommandService>,
-        u64,
-        tokio::runtime::Handle,
-    )>,
-}
-impl CommandCaptureTap {
-    fn new(stats: &Arc<AudioStats>) -> Self {
-        let service = stats
-            .command_tap
-            .as_ref()
-            .and_then(std::sync::Weak::upgrade);
-        let mut tap = Self {
-            frames: None,
-            worker: None,
-            stats: stats.clone(),
-            cleanup: None,
-        };
-        if let Some(service) = service
-            && let Ok(runtime) = crate::execution::processing_handle()
-        {
-            let (tx, mut rx) = mpsc::channel::<OriginalFrame>(8);
-            let generation = service.begin_capture_scope();
-            tap.cleanup = Some((service.clone(), generation, runtime.clone()));
-            tap.worker = Some(runtime.spawn(async move {
-                service.set_microphone_active_scoped(false, generation);
-                let mut active = false;
-                let mut speech = super::speech::SpeechTap::new();
-                while let Some(frame) = rx.recv().await {
-                    if !service.capture_scope_current(generation) {
-                        break;
-                    }
-                    if !active {
-                        service.set_microphone_active_scoped(true, generation);
-                        active = true;
-                    }
-                    if service.wants_audio() {
-                        let converted = speech.convert(&frame);
-                        if service.capture_scope_current(generation) {
-                            service.try_audio(&converted);
-                        }
-                    }
-                }
-                service.set_microphone_active_scoped(false, generation);
-            }));
-            tap.frames = Some(tx);
-        }
-        tap
-    }
-    fn frame(&self, frame: OriginalFrame) {
-        if let Some(frames) = &self.frames
-            && frames.try_send(frame).is_err()
-        {
-            self.stats
-                .processing_dropped_frames
-                .fetch_add(1, Ordering::Relaxed);
-        }
-    }
-}
-impl Drop for CommandCaptureTap {
-    fn drop(&mut self) {
-        if let Some(worker) = &self.worker {
-            worker.abort();
-        }
-        if let Some((service, generation, runtime)) = self.cleanup.take() {
-            runtime.spawn(async move {
-                service.set_microphone_active_scoped(false, generation);
-            });
-        }
-    }
-}
-
 async fn capture_with(
     backend: &dyn Backend,
     initial: &str,
@@ -251,7 +175,6 @@ async fn capture_with(
         );
         let mut finished = false;
         let mut frame_channel_open = true;
-        let command_tap = CommandCaptureTap::new(&stats);
         let mirror = stats
             .original_mirror
             .as_ref()
@@ -271,9 +194,8 @@ async fn capture_with(
                 }
                 frame = incoming.recv(), if frame_channel_open => {
                     let Some(frame) = frame else { frame_channel_open = false; continue; };
-                    // Original frames share immutable storage; publishing to routing
-                    // happens before any speech/command work on a separate runtime.
-                    let command_frame = frame.clone();
+                    // Clone the shared storage only when the speaker mirror needs it.
+                    let mirrored = mirror.as_ref().map(|_| frame.clone());
                     match output.try_send(frame) {
                         Ok(()) => (),
                         Err(mpsc::error::TrySendError::Full(_)) => { stats.record_capture_loss(); }
@@ -282,14 +204,12 @@ async fn capture_with(
                             break End::Disconnected;
                         }
                     }
-                    if let Some(mirror) = &mirror {
-                        mirror.publish(&command_frame);
+                    if let Some((mirror, frame)) = mirror.as_ref().zip(mirrored) {
+                        mirror.publish(&frame);
                     }
-                    command_tap.frame(command_frame);
                 }
             }
         };
-        drop(command_tap);
         drop(mirror);
         let stopped = {
             let stopping = stop_backend(&mut request, &worker_cancel, finished);
@@ -352,7 +272,7 @@ fn forward_capture_tail(
     stats: &AudioStats,
 ) {
     // Hardware is stopping. Only original archival consumers may receive this
-    // tail; command and mirror publishers have already been revoked.
+    // tail; mirror publishers have already been revoked.
     if output.try_send(frame).is_err() {
         stats.record_capture_loss();
     }

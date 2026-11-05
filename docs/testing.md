@@ -21,8 +21,8 @@ full-model smoke tests require their documented environments.
 
 ## Native CI and smoke tests without devices
 
-The matrix in `.github/workflows/checks.yml` runs formatting, Clippy, Rust tests,
-Needle bridge tests and builds on Linux, macOS and Windows for commits and pull
+The matrix in `.github/workflows/checks.yml` runs formatting, Clippy, Rust tests
+and builds on Linux, macOS and Windows for commits and pull
 requests. Failure on one OS does not cancel the others. Conventional Commit
 validation is also part of CI. The matrix runs a native-binary smoke test without
 starting audio, a server, the tray, driver installation or an AI provider:
@@ -227,19 +227,6 @@ routes, including recovery after 64 seconds of accelerated input per route.
 No microphone or desktop output was captured. The portable regression tests
 also run in the Linux, macOS and Windows CI matrix; native inference on other
 platforms must be verified using their matching bundles.
-
-## Voice-command service diagnostics
-
-After separating configuration failures from command failures, **225 Rust tests
-and 52 DOM tests passed**, with warning-free Clippy. The regressions cover an
-invalid Whisper endpoint before the wake word, an ASR error after a previous
-command, failure after a new activation and cancellation when the microphone
-becomes inactive. An endpoint imitating only `/health` receives no microphone WAV.
-
-In the interface, service diagnostics remain on the Commands tab and disappear
-on recovery. Navigating to Settings, changing language and old activation IDs
-do not produce floating command notifications. Tests also verify preservation
-of drafts and access to local settings without inference requests or tool calls.
 
 ## Switching from virtual to physical output
 
@@ -563,8 +550,8 @@ headphones if you later test a physical microphone.
 | Application plays audio only to the output cable | Only output opens; audio reaches the chosen physical destination. |
 | Both endpoints in use | Two independent routes, without feedback or duplicated audio. |
 | Application switches output to a physical device while keeping the virtual microphone | The output route closes; the microphone remains active. Returning to the cable resumes output without replaying accumulated audio. |
-| Application switches microphone to a physical device while keeping virtual output; system default is also physical | The microphone route closes; output remains active. Babel voice commands cannot be triggered by output audio. |
-| Default microphone changes to a physical device, but an application still captures Babel | The explicitly connected application continues receiving audio; the microphone and enabled commands remain active. |
+| Application switches microphone to a physical device while keeping virtual output; system default is also physical | The microphone route closes; output remains active. |
+| Default microphone changes to a physical device, but an application still captures Babel | The explicitly connected application continues receiving audio; the microphone route remains active. |
 | Physical device changed through dashboard/tray during an active session | The new physical device receives the route; session and files remain the same, without backlog replay. |
 | Physical device disconnected/reconnected, or a second physical device selected | Diagnostics and recovery attempts for the selected identity; no silent fallback to the default. |
 | Original recording session, translation/transcription off | One WAV contains both sources on the same timeline; pause/resume preserves the ID and file. |
@@ -663,7 +650,7 @@ capacity across comparison runs and report failures at the normal capacity
 separately. Extra capacity does not impose a startup prefill.
 `--capture-output` saves
 only generated test output for listening or waveform inspection. There are no
-transcript, recording, history or command-processing sessions during the test.
+transcription, recording or history capture during the test.
 No real microphone is selected.
 
 Each trial reports setup readiness separately from first sound, the observed
@@ -704,8 +691,6 @@ only modules whose identity still matches its unique devices. Concurrent user
 edits are preserved and reported. If the process is forcibly killed, cleanup
 cannot run; review the test instance's settings before resuming it. Check
 `configuration_restored` and `errors` in the report after every run.
-Voice commands are disabled and restored through their separate configuration
-API and revision, so the synthetic fixture cannot invoke configured MCP tools.
 
 The harness's safety tests do not access devices, the network or paid models:
 

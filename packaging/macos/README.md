@@ -1,6 +1,6 @@
 # macOS application and driver installer
 
-`build.py` packages the prebuilt `babel`, `babel-tray` and `babel-feedback`
+`build.py` packages the prebuilt `babel` and `babel-tray`
 binaries into `Babel.app` and a universal `.pkg`, with checksums and a manifest.
 The default installer contains the application and local inference engines.
 Follow [macOS routing](../../docs/platforms.md#macos) to install BlackHole.
@@ -8,7 +8,7 @@ Pass `--driver-dir native/macos/dist` to include the optional Babel HAL driver
 and its original installer scripts.
 
 Run packaging on macOS with Python 3.11+ and the Xcode command-line tools.
-The application requires macOS 14.2 or later. All three Mach-O executables must
+The application requires macOS 14.2 or later. Both Mach-O executables must
 contain the requested architectures and use system libraries.
 
 ## Development and CI
@@ -21,7 +21,7 @@ rustup target add aarch64-apple-darwin x86_64-apple-darwin
 MACOSX_DEPLOYMENT_TARGET=14.2 cargo build --locked --release --bins --target aarch64-apple-darwin
 MACOSX_DEPLOYMENT_TARGET=14.2 cargo build --locked --release --bins --target x86_64-apple-darwin
 mkdir -p packaging/macos/universal-bin
-for binary in babel babel-tray babel-feedback; do
+for binary in babel babel-tray; do
   lipo -create "target/aarch64-apple-darwin/release/$binary" \
     "target/x86_64-apple-darwin/release/$binary" \
     -output "packaging/macos/universal-bin/$binary"
@@ -83,43 +83,21 @@ requests a dynamic dashboard port. It does not write beside its executable.
 
 The bundle includes:
 
-- `Contents/MacOS/{babel,babel-tray,babel-feedback}`;
+- `Contents/MacOS/{babel,babel-tray}`;
 - the repository's `docs/*.md` guides;
 - driver package, removal helper, and licenses when `--driver-dir` is supplied;
 - `Contents/Resources/local-runtime/macos-{aarch64,x86_64}` with Whisper,
   llama.cpp, Piper, ONNX Runtime, eSpeak data and their licenses. CPU backends
   and Metal are included; no Homebrew or separately installed AI daemon is used;
 - complete corresponding Piper/eSpeak source archives, patches and build
-  instructions in each runtime's `sources/` directory;
-- `Contents/Resources/Support/scripts/` with Whisper setup, the Needle bridge
-  and the pinned Whisper port-discovery patch.
+  instructions in each runtime's `sources/` directory.
 
 The translation and transcription engines start through Babel when selected.
 Weights are verified and downloaded by the application on first use, outside
 its immutable signed bundle. Native executables and libraries are signed before
-the outer app, and payload hashes are regenerated after signing. No Python,
-API key, user TOML or recording is included. The separate Needle command agent
-still has its own setup. To prepare those command services explicitly:
-
-```sh
-mkdir -p "$HOME/Library/Application Support/Babel"
-cp -R /Applications/Babel.app/Contents/Resources/Support/scripts \
-  "$HOME/Library/Application Support/Babel/"
-cd "$HOME/Library/Application Support/Babel"
-python3 scripts/setup_whisper.py --backend metal
-python3 -m venv .tools/needle
-.tools/needle/bin/python -m pip install cactus-needle==3.0.6
-.tools/needle/bin/python -c "import os; os.environ['NEEDLE_TELEMETRY']='0'; os.environ['DO_NOT_TRACK']='1'; from needle import Needle; Needle(tools=[]).close()"
-```
-
-Use `--backend cpu` for Whisper without Metal. Read the bundled
-`Documentation/voice-commands.md` for requirements and provider limitations.
-With the default configuration location, leave the services directory empty;
-otherwise set an absolute writable directory containing `.tools` and `scripts`.
-Keep both managed endpoints `auto`. Babel starts already-installed helpers on
-OS-assigned ports and preserves `auto` in the configuration. Never modify the
-signed app bundle to install helpers. Copying the support directory above
-should be done once; preserve any existing user-modified scripts on upgrades.
+the outer app, and payload hashes are regenerated after signing. Users can
+install and run Babel without Python. The bundle excludes credentials, user
+configuration and recordings.
 
 Disable login startup and quit Babel before removal. If you installed the
 optional Babel driver, its removal

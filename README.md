@@ -18,15 +18,6 @@ direction's translation preserves that routing during a session as well.
 > installers use separately installed virtual audio devices. See
 > [platform setup](docs/platforms.md) for installation and signing limitations.
 
-The command agent uses **only the original physical microphone**, with a
-configurable wake name (default: “Babel”), local Whisper, **Needle 3** and
-authenticated HTTP/stdio MCP integrations. It also works without a translation
-or recording session. Output audio never feeds the agent. See
-[setup and voice commands](docs/voice-commands.md) and
-[MCP integrations and authentication](docs/mcp.md); both local services must be
-prepared before use. The dashboard and notifications show processing and results
-without blocking audio routing.
-
 ```text
 Physical microphone → translation → Babel Microphone → calling app
 Calling app → Babel Speaker → translation → physical headphones
@@ -247,7 +238,7 @@ a distinct vocal identity per participant. Other models have their own native
 output behavior. Babel does not assign voices to participants or override the
 model's default voice. See [native translation voices](docs/voices.md).
 
-## Commands
+## CLI commands
 
 ```text
 babel                         Local dashboard + tray

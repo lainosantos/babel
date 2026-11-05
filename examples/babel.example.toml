@@ -146,8 +146,3 @@ microphone_threshold_db = -50.0 # Activity threshold before gain, -60..-20 dBFS.
 # base_path = '/Users/ana/Babel'
 # base_path = 'C:\Users\Ana\Babel'
 name_pattern = "{date}-{time}-{session}-{id}"
-
-[agent]
-whisper_model = "base-q5_1" # Managed command recognizer, installed by setup_whisper.py.
-local_threads = 2 # Whisper only, bounded by available CPUs.
-idle_unload_secs = 60 # Whisper after mic inactivity; Needle after the last command.

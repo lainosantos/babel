@@ -61,30 +61,6 @@ concurrent changes; saving a preference updates the local revision without
 saving audio drafts. Tests include English/Portuguese, fallback, switching during
 a session or editing, conflicts, draft preservation and catalog coverage.
 
-## Voice commands and MCP
-
-Activation uses only the original physical microphone. Output audio, including
-other participants' incoming speech, never feeds the agent.
-
-`agent.js` controls a section separate from the audio form. `GET/PUT /api/agent`
-use their own revision; saving these settings neither saves audio drafts nor
-restarts the session. Status from `/api/agent/status` shows activation, local
-recognition, Needle3 decisions, execution, results and failures. The floating
-panel can be dismissed, does not move focus and renders responses as plain text.
-Identical updates do not repeat screen-reader announcements.
-
-Integrations support Streamable HTTP or stdio processes, with an optional tool
-allowlist. Discovery uses `tools/list` without executing tools. The button stays
-disabled until the server is saved, avoiding tests against an older configuration.
-OAuth accounts have an explicit connection action, authorization link and
-callback monitoring; they can also be disconnected. Bearer tokens, headers and
-secret variables use references. Temporary values travel through a separate API
-and never enter saved JSON.
-
-`agent-tests.cjs` exercises these flows using in-memory responses, without MCP
-servers, audio capture or real accounts. English and Portuguese catalogs cover
-all agent states and fields.
-
 ## Operating-system controls
 
 The dashboard queries authenticated `/api/platform` to identify **the computer
@@ -107,8 +83,8 @@ failure/recovery and changing language while editing.
 
 ## Workspace organization
 
-The dashboard has six views: routing, translation, transcription,
-recording, voice commands and host settings. The session bar stays available
+The dashboard has five views: routing, translation, transcription,
+recording and host settings. The session bar stays available
 while navigating. Fields remain in the same forms; changing view or language
 does not rebuild inputs, discard drafts or start/stop audio.
 
@@ -130,8 +106,7 @@ dashboard.
 
 `workspace.js` controls navigation, focus and validation-error presentation only.
 If a field in another view is invalid, its view, profile and details open before
-validation is presented. Agent settings remain independent of the audio form
-during a session.
+validation is presented.
 
 The design direction and visual tokens are in [DESIGN.md](DESIGN.md). The
 executable includes Manrope and its license at `fonts/OFL.txt`; opening the
